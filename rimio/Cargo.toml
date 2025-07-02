@@ -1,0 +1,22 @@
+[package]
+name = "rimio"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Block IO abstraction for rim ecosystem"
+
+[features]
+default = ["mem"]
+std = ["alloc"]
+mem = []
+uefi = ["dep:uefi"]
+alloc = []
+
+[dependencies]
+crc32fast = { version = "1.4.2", optional = true }
+paste = "1.0.15"
+uefi = { version = "0.35", optional = true }
+zerocopy = { version = "0.8.25", default-features = false}
+
+[dev-dependencies]
+tempfile = "3.20"

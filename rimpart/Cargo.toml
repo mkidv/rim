@@ -1,0 +1,20 @@
+[package]
+name = "rimpart"
+version = "0.1.1"
+edition = "2024"
+
+[features]
+default = ["mem", "std"]
+mem = ["rimio/mem"]
+std = ["rimio/std", "alloc"]
+uefi = ["rimio/uefi", "alloc"]
+alloc = []
+
+[dependencies]
+crc32fast = { version ="1.4.2", default-features = false, features = ["std"] }
+heapless = "0.8.0"
+paste = "1.0.15"
+rimio = { path = "../rimio" }
+zerocopy = { version = "0.8.25", default-features = false, features = [
+    "derive",
+] }

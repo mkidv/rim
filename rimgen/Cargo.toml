@@ -1,0 +1,17 @@
+[package]
+name = "rimgen"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rimgen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.39", features = ["derive"] }
+rimgen-layout = { path = "../rimgen-layout" }
+rimgen-output = { path = "../rimgen-output" }
+
+[dev-dependencies]
+criterion = "0.6.0"

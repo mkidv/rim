@@ -1,0 +1,31 @@
+[package]
+name = "rimfs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["mem", "std"]
+mem = ["rimio/mem"]
+std = ["rimio/std", "alloc"]
+uefi = ["rimio/uefi", "alloc"]
+alloc = []
+
+[dependencies]
+bitflags = "2.9.1"
+crc32fast = { version ="1.4.2", default-features = false, features = ["std"] }
+rimio = { path = "../rimio" }
+time = { version = "0.3.41", default-features = false, features = ["std"] }
+zerocopy = { version = "0.8.25", default-features = false, features = [
+    "derive",
+] }
+
+[dev-dependencies]
+criterion = { version = "0.6.0", features = ["html_reports"] }
+tempfile = "3.20.0"
+
+[package.metadata.docs.rs]
+features = ["std"]
+
+[[bench]]
+name = "fat32_bench"
+harness = false
