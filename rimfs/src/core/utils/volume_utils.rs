@@ -27,7 +27,7 @@ pub fn generate_volume_id_32() -> u32 {
 
     let seconds = now.unix_timestamp() as u32;
     let millis = now.millisecond() as u32;
-    let counter = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let counter = COUNTER.fetch_add(5, core::sync::atomic::Ordering::Relaxed);
 
     let mut id = (seconds & 0xFFFF) | ((millis & 0xFF) << 16) | ((millis >> 8) << 24);
 
@@ -48,9 +48,9 @@ pub fn generate_volume_id_128() -> u128 {
 
     let seconds = now.unix_timestamp() as u128;
     let millis = now.millisecond() as u128;
-    let counter = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as u128;
+    let counter = COUNTER.fetch_add(5, core::sync::atomic::Ordering::Relaxed) as u128;
 
-    let mut id = (seconds << 64) | (millis << 32) | counter;
+    let mut id = (seconds & 0xFFFF) | (seconds << 64) | ((millis & 0xFF) << 16) | ((millis >> 8) << 32) | counter;
 
     // Mix 1 LSB of the counter into byte 0
     id ^= counter & 0xFF;
@@ -58,52 +58,83 @@ pub fn generate_volume_id_128() -> u128 {
     id
 }
 
-/// Computes the FAT size and cluster count for a given FAT configuration.
-///
-/// This function performs convergence to determine the optimal FAT size (`fat_size`)
-/// and the number of clusters (`cluster_count`) based on the FAT file system parameters.
-///
-/// # Arguments
-/// - `sector_size`: Size of a sector in bytes (e.g., 512)
-/// - `total_sectors`: Total number of sectors on the volume
-/// - `reserved_sectors`: Number of reserved sectors (before the FAT area)
-/// - `entry_size`: Size of a FAT entry (in bytes, e.g., 4 for FAT32)
-/// - `min_entries`: Minimum number of FAT entries (often 2 for FAT12/16/32)
-/// - `fat_count`: Number of FAT copies (usually 2)
-/// - `sectors_per_cluster`: Number of sectors per cluster
-///
-/// # Returns
-/// Tuple `(fat_size, cluster_count)`
-/// - `fat_size`: FAT size in sectors
-/// - `cluster_count`: Number of data clusters
-pub fn converge_fat_layout(
-    sector_size: u32,
-    total_sectors: u32,
-    reserved_sectors: u32,
-    entry_size: u32,
-    min_entries: u32,
-    num_fats: u8,
-    sectors_per_cluster: u32,
-) -> (u32, u32) {
-    let mut cluster_count = 0;
-    let mut fat_size = 0;
-    let mut prev_fat_size = fat_size;
-    loop {
-        let entries = cluster_count + min_entries;
-        fat_size = (entries * entry_size).div_ceil(sector_size); // assumes 512 here
-        let fat_area = fat_size * num_fats as u32;
-        let data_sectors = total_sectors - reserved_sectors - fat_area;
-        let new_cluster_count = data_sectors / sectors_per_cluster;
-
-        if new_cluster_count == cluster_count && fat_size == prev_fat_size {
-            break;
+#[inline]
+fn crc32_ieee(mut crc: u32, bytes: &[u8]) -> u32 {
+    const P: u32 = 0xEDB88320;
+    crc ^= 0xFFFFFFFF;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg() & P;
+            crc = (crc >> 1) ^ mask;
         }
-
-        cluster_count = new_cluster_count;
-        prev_fat_size = fat_size;
     }
+    !crc
+}
 
-    (fat_size, cluster_count)
+#[inline]
+fn xorshift32(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x
+}
+
+/// Seed = concat(label upper, size_bytes LE, cluster_size LE, user_salt LE)
+pub fn derive_ids(
+    label: &str,
+    size_bytes: u64,
+    cluster_size: u32,
+    user_salt: u32,
+) -> ([u8; 16], u32) {
+    let mut seed = 0u32;
+    let mut tmp = [0u8; 8 + 4 + 64];
+    let mut n = 0;
+
+    for b in label.bytes().take(32) {
+        tmp[n] = b.to_ascii_uppercase();
+        n += 1;
+    }
+    tmp[n..n + 8].copy_from_slice(&size_bytes.to_le_bytes());
+    n += 8;
+    tmp[n..n + 4].copy_from_slice(&cluster_size.to_le_bytes());
+    n += 4;
+    tmp[n..n + 4].copy_from_slice(&user_salt.to_le_bytes());
+    n += 4;
+
+    seed = crc32_ieee(0, &tmp[..n]);
+
+    let mut x = xorshift32(seed ^ 0x9E37_79B9);
+    let mut guid = [0u8; 16];
+    for i in 0..4 {
+        x = xorshift32(x);
+        guid[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    guid[6] = (guid[6] & 0x0F) | 0x40;
+    guid[8] = (guid[8] & 0x3F) | 0x80;
+
+    let vol_id = crc32_ieee(0, &guid);
+
+    (guid, vol_id)
+}
+
+#[inline]
+pub fn guid_from_volume_id(seed: u32) -> [u8; 16] {
+    let mut x = seed ^ 0x9E37_79B9;
+    let mut out = [0u8; 16];
+    for i in 0..4 {
+        x = xorshift32(x);
+        out[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    out[6] = (out[6] & 0x0F) | 0x40;
+    out[8] = (out[8] & 0x3F) | 0x80;
+    out
+}
+
+/// Volume serial 32-bit (FAT/ExFAT) dérivé du GUID.
+#[inline]
+pub fn volume_id_from_guid(guid: &[u8; 16]) -> u32 {
+    crc32_ieee(0, guid)
 }
 
 #[cfg(all(test, feature = "std"))]

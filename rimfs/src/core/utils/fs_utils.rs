@@ -8,36 +8,36 @@
 //! These functions are typically used in tests to validate
 //! that the content injected or parsed matches expectations.
 
-use crate::core::{FsError, FsResult, parser::FsParser};
+use crate::core::{FsError, FsResult, resolver::FsResolver};
 
 /// Checks if a file exists at the given path.
 ///
 /// Returns `Ok(())` if the path exists and is a file, or an `FsError` otherwise.
-pub fn check_file_exists<P: FsParser>(parser: &mut P, path: &str) -> FsResult {
+pub fn check_file_exists<P: FsResolver>(parser: &mut P, path: &str) -> FsResult {
     let node = parser.parse_path(path)?;
     if node.is_file() {
         Ok(())
     } else {
-        Err(FsError::Other("Expected file at path {path}, found dir"))
+        Err("Expected file at path {path}, found dir".into())
     }
 }
 
 /// Checks if a directory exists at the given path.
 ///
 /// Returns `Ok(())` if the path exists and is a directory, or an `FsError` otherwise.
-pub fn check_dir_exists<P: FsParser>(parser: &mut P, path: &str) -> FsResult {
+pub fn check_dir_exists<P: FsResolver>(parser: &mut P, path: &str) -> FsResult {
     let node = parser.parse_path(path)?;
     if node.is_dir() {
         Ok(())
     } else {
-        Err(FsError::Other("Expected dir at path {path}, found file"))
+        Err("Expected dir at path {path}, found file".into())
     }
 }
 
 /// Checks if the content of a file at the given path matches `expected_content`.
 ///
 /// Returns `Ok(())` if the content matches exactly, or an `FsError` otherwise.
-pub fn check_file_content<P: FsParser>(
+pub fn check_file_content<P: FsResolver>(
     parser: &mut P,
     path: &str,
     expected_content: &[u8],
@@ -46,18 +46,19 @@ pub fn check_file_content<P: FsParser>(
     if content == expected_content {
         Ok(())
     } else {
-        Err(FsError::Other("File content mismatch"))
+        Err("File content mismatch".into())
     }
 }
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use crate::core::StdResolver;
+
     use super::*;
-    use crate::StdFsParser;
 
     #[test]
     fn test_check_file_and_dir_exists() {
-        let mut parser = StdFsParser::new();
+        let mut parser = StdResolver::new();
 
         // Should succeed if run in a normal project root.
         check_dir_exists(&mut parser, "src").expect("Expected 'src' to be a directory");

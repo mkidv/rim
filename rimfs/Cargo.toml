@@ -1,7 +1,10 @@
 [package]
 name = "rimfs"
-version = "0.1.0"
-edition = "2024"
+description = "Fs implementation for rim ecosystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [features]
 default = ["mem", "std"]
@@ -20,11 +23,15 @@ zerocopy = { version = "0.8.25", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-criterion = { version = "0.6.0", features = ["html_reports"] }
+criterion = { version = "0.7.0", features = ["html_reports"] }
 tempfile = "3.20.0"
 
 [package.metadata.docs.rs]
 features = ["std"]
+
+[[bench]]
+name = "exfat_bench"
+harness = false
 
 [[bench]]
 name = "fat32_bench"

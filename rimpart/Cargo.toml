@@ -1,20 +1,25 @@
 [package]
 name = "rimpart"
-version = "0.1.1"
-edition = "2024"
+description = "Partition manager for rim ecosystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [features]
-default = ["mem", "std"]
-mem = ["rimio/mem"]
+default = ["std"]
+mem = ["rimio/mem", "alloc"]
 std = ["rimio/std", "alloc"]
 uefi = ["rimio/uefi", "alloc"]
 alloc = []
 
 [dependencies]
-crc32fast = { version ="1.4.2", default-features = false, features = ["std"] }
-heapless = "0.8.0"
+crc32fast = { version = "1.4.2", default-features = false }
 paste = "1.0.15"
-rimio = { path = "../rimio" }
+rimio = { path = "../rimio", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }
+
+[dev-dependencies]
+rimio = { path = "../rimio", default-features = false, features = ["mem"] }

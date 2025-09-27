@@ -1,0 +1,10 @@
+[package]
+name = "sector-analyzer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rimpart = { path = "../rimpart" }
+rimio = { path = "../rimio" }
+
+[workspace]

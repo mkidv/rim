@@ -45,14 +45,14 @@ pub struct ExFatUpcaseEntry {
 }
 
 impl ExFatUpcaseEntry {
-    pub fn new(first_cluster: u32, table_checksum: u32) -> Self {
+    pub fn new(first_cluster: u32, table_len: u64, table_checksum: u32) -> Self {
         Self {
-            entry_type: EXFAT_ENTRY_UPCASE_TABLE,
+            entry_type: EXFAT_ENTRY_UPCASE,
             reserved1: [0u8; 3],
             table_checksum,
             reserved2: [0u8; 12],
             first_cluster,
-            data_length: EXFAT_UPCASE_TABLE_SIZE as u64,
+            data_length: table_len,
         }
     }
 
@@ -76,7 +76,7 @@ impl ExFatVolumeLabelEntry {
         let character_count = volume_label.iter().take_while(|&&c| c != 0).count() as u8;
 
         Self {
-            entry_type: EXFAT_ENTRY_VOLUME_LABEL,
+            entry_type: EXFAT_ENTRY_LABEL,
             character_count,
             volume_label,
             reserved: 0,
@@ -138,26 +138,6 @@ impl ExFatGuidEntry {
         }
 
         self.set_checksum = sum;
-    }
-
-    pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(self.as_bytes());
-    }
-}
-
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, Default)]
-#[repr(C, packed)]
-pub struct ExFatEodEntry {
-    pub entry_type: u8,
-    pub reserved: [u8; 31],
-}
-
-impl ExFatEodEntry {
-    pub fn new() -> Self {
-        Self {
-            entry_type: EXFAT_END_OF_DIR,
-            reserved: [0u8; 31],
-        }
     }
 
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {

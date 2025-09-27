@@ -13,7 +13,7 @@ pub struct MemBlockIO<'a> {
 }
 
 impl<'a> MemBlockIO<'a> {
-    /// Creates a new `MemBlockIO` over the given memory buffer.
+    #[inline]
     pub fn new(buffer: &'a mut [u8]) -> Self {
         let logical_len = buffer.len();
 
@@ -24,6 +24,7 @@ impl<'a> MemBlockIO<'a> {
         }
     }
 
+    #[inline]
     pub fn new_with_offset(buffer: &'a mut [u8], partition_offset: u64) -> Self {
         let logical_len = buffer.len();
 
@@ -34,9 +35,16 @@ impl<'a> MemBlockIO<'a> {
         }
     }
 
-    fn check_bounds(&self, offset: u64, len: usize) -> BlockIOResult {
-        let end = (offset as usize).saturating_add(len);
-        if end > self.logical_len {
+    #[inline]
+    fn check_bounds(&self, abs_off: u64, len: usize) -> BlockIOResult {
+        let end = abs_off
+            .checked_add(len as u64)
+            .ok_or(BlockIOError::OutOfBounds)?;
+        let max = self
+            .partition_offset
+            .checked_add(self.logical_len as u64)
+            .ok_or(BlockIOError::OutOfBounds)?;
+        if end > max {
             return Err(BlockIOError::OutOfBounds);
         }
         Ok(())
@@ -44,6 +52,7 @@ impl<'a> MemBlockIO<'a> {
 }
 
 impl<'a> BlockIO for MemBlockIO<'a> {
+    #[inline(always)]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> BlockIOResult {
         let abs_offset = self.partition_offset + offset;
         self.check_bounds(abs_offset, data.len())?;
@@ -52,6 +61,7 @@ impl<'a> BlockIO for MemBlockIO<'a> {
         Ok(())
     }
 
+    #[inline(always)]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> BlockIOResult {
         let abs_offset = self.partition_offset + offset;
         self.check_bounds(abs_offset, buf.len())?;
@@ -60,15 +70,18 @@ impl<'a> BlockIO for MemBlockIO<'a> {
         Ok(())
     }
 
+    #[inline]
     fn flush(&mut self) -> BlockIOResult {
         Ok(())
     }
 
+    #[inline]
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
         partition_offset
     }
 
+    #[inline]
     fn partition_offset(&self) -> u64 {
         self.partition_offset
     }
@@ -76,12 +89,14 @@ impl<'a> BlockIO for MemBlockIO<'a> {
 
 impl<'a> BlockIOSetLen for MemBlockIO<'a> {
     fn set_len(&mut self, new_len: u64) -> BlockIOResult {
-        let new_len = new_len as usize;
-        let end = self.partition_offset as usize + new_len;
+        let end = self
+            .partition_offset
+            .checked_add(new_len)
+            .ok_or(BlockIOError::OutOfBounds)? as usize;
         if end > self.buffer.len() {
             return Err(BlockIOError::OutOfBounds);
         }
-        self.logical_len = new_len;
+        self.logical_len = new_len as usize;
         Ok(())
     }
 }

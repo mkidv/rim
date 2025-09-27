@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // rimgen/fs/exfat/attr.rs
 
-use crate::core::parser::attr::FileAttributes;
+use crate::core::resolver::attr::FileAttributes;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy)]

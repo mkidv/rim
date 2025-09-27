@@ -1,0 +1,96 @@
+# ────────────────
+# Rust & Cargo
+# ────────────────
+/target/
+**/target/
+/Cargo.lock
+**/Cargo.lock
+
+# Optional if you want to version Cargo.lock for binaries only:
+# !/Cargo.lock
+
+# ────────────────
+# Backup & temp
+# ────────────────
+*.rs.bk
+*.swp
+*.tmp
+*.bak
+*.old
+*.log
+
+# ────────────────
+# IDEs & editors
+# ────────────────
+# VSCode
+.vscode/
+**/.vscode/
+
+# JetBrains (CLion, IntelliJ, RustRover)
+.idea/
+**/.idea/
+*.iml
+
+# Sublime
+*.sublime-workspace
+*.sublime-project
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ────────────────
+# OS
+# ────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ────────────────
+# Git
+# ────────────────
+.git/
+.gitmodules
+.gitattributes
+
+# ────────────────
+# Build tools / output
+# ────────────────
+/build/
+/dist/
+/out/
+/docs/
+/coverage/
+
+# ────────────────
+# Binaries
+# ────────────────
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.img
+*.iso
+*.vhd
+
+# ────────────────
+# Archives
+# ────────────────
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# ────────────────
+# Testing / CI
+# ────────────────
+/test-output/
+/coverage/
+/lcov.info
+
+# ────────────────
+# rim-specific exclusions (optionnel)
+# ────────────────

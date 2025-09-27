@@ -33,7 +33,7 @@ impl Fat32Handle {
 
 impl FsHandle for Fat32Handle {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Fat32Allocator<'a> {
     meta: &'a Fat32Meta,
     next_free: u32,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use crate::core::parser::*;
+use crate::core::resolver::*;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy)]

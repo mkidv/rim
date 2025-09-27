@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::core::parser::*;
-
-use crate::core::utils::time_utils;
-use crate::fs::exfat::{constant::*, utils};
+use crate::{
+    core::{errors::*, resolver::*, utils::time_utils},
+    fs::exfat::{constant::*, upcase::UpcaseHandle, utils},
+};
 
 #[derive(Debug, Clone)]
 pub struct ExFatEntries {
@@ -19,8 +19,8 @@ pub struct ExFatEntries {
 }
 
 impl ExFatEntries {
-    pub fn name(&self) -> FsParserResult<String> {
-        utils::decode_name(&self.names)
+    pub fn name(&self) -> FsParsingResult<String> {
+        decode_name(&self.names)
     }
 
     pub fn name_bytes_eq(&self, target: &str) -> bool {
@@ -47,17 +47,18 @@ impl ExFatEntries {
         self.stream.first_cluster
     }
 
-    pub fn dir(name: &str, cluster: u32, attr: &FileAttributes) -> Self {
-        let names = utils::name_entries(name);
+    pub fn dir(name: &str, cluster: u32, attr: &FileAttributes, upcase: &UpcaseHandle) -> Self {
+        let names = name_entries(name);
 
-        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+        let name_length = name_length_utf16(name);
+
         let secondary_count = 1 + names.len() as u8;
 
         let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
 
-        let name_hash = utils::compute_name_hash(name);
+        let name_hash = compute_name_hash(name, upcase);
 
-        let stream = ExFatStreamEntry::new(cluster, 0, name_utf16.len() as u8, name_hash);
+        let stream = ExFatStreamEntry::new(cluster, 0, name_length, name_hash);
 
         primary.compute_set_checksum(&stream, &names);
 
@@ -68,17 +69,75 @@ impl ExFatEntries {
         }
     }
 
-    pub fn file(name: &str, cluster: u32, size: u32, attr: &FileAttributes) -> Self {
-        let names = utils::name_entries(name);
+    pub fn dir_with_len(
+        name: &str,
+        first_cluster: u32,
+        attr: &FileAttributes,
+        data_len: u64,
+        upcase: &UpcaseHandle,
+    ) -> Self {
+        let names = name_entries(name);
+        let name_length = name_length_utf16(name);
 
-        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+        let secondary_count = 1 + names.len() as u8;
+
+        let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
+        let name_hash = compute_name_hash(name, upcase);
+
+        let mut stream = ExFatStreamEntry::new(first_cluster, data_len, name_length, name_hash);
+        stream.general_secondary_flags |= 1; // AllocationPossible
+
+        primary.compute_set_checksum(&stream, &names);
+        Self {
+            primary,
+            stream,
+            names,
+        }
+    }
+
+    pub fn file(
+        name: &str,
+        cluster: u32,
+        size: u32,
+        attr: &FileAttributes,
+        upcase: &UpcaseHandle,
+    ) -> Self {
+        let names = name_entries(name);
+        let name_length = name_length_utf16(name);
         let secondary_count = 1 + names.len() as u8;
 
         let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
 
-        let name_hash = utils::compute_name_hash(name);
+        let name_hash = compute_name_hash(name, upcase);
 
-        let stream = ExFatStreamEntry::new(cluster, size as u64, name_utf16.len() as u8, name_hash);
+        let stream = ExFatStreamEntry::new(cluster, size as u64, name_length, name_hash);
+
+        primary.compute_set_checksum(&stream, &names);
+
+        Self {
+            primary,
+            stream,
+            names,
+        }
+    }
+
+    pub fn file_contiguous(
+        name: &str,
+        cluster: u32,
+        size: u32,
+        attr: &FileAttributes,
+        upcase: &UpcaseHandle,
+    ) -> Self {
+        let names = name_entries(name);
+        let name_length = name_length_utf16(name);
+        let secondary_count = 1 + names.len() as u8;
+
+        let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
+
+        let name_hash = compute_name_hash(name, upcase);
+
+        let mut stream = ExFatStreamEntry::new(cluster, size as u64, name_length, name_hash);
+        stream.general_secondary_flags |= 0x02; // NoFatChain
 
         primary.compute_set_checksum(&stream, &names);
 
@@ -101,30 +160,30 @@ impl ExFatEntries {
     }
 
     pub fn from_raw(
-        raw_name_stack: &[Vec<u8>],
+        raw_name_stack: &[[u8; 32]],
         raw_primary: &[u8],
         raw_stream: &[u8],
-    ) -> FsParserResult<Self> {
+    ) -> FsParsingResult<Self> {
         if raw_primary.len() != 32 || raw_stream.len() != 32 {
-            return Err(FsParserError::Invalid(
+            return Err(FsParsingError::Invalid(
                 "Primary or Stream Entry invalid size",
             ));
         }
 
         let primary = ExFatPrimaryEntry::read_from_bytes(raw_primary)
-            .map_err(|_| FsParserError::Invalid("Invalid Primary Entry"))?;
+            .map_err(|_| FsParsingError::Invalid("Invalid Primary Entry"))?;
 
         let stream = ExFatStreamEntry::read_from_bytes(raw_stream)
-            .map_err(|_| FsParserError::Invalid("Invalid Stream Entry"))?;
+            .map_err(|_| FsParsingError::Invalid("Invalid Stream Entry"))?;
 
         let mut names = Vec::with_capacity(raw_name_stack.len());
         for lfn in raw_name_stack.iter() {
             if lfn.len() != 32 {
-                return Err(FsParserError::Invalid("Invalid Name Entry size"));
+                return Err(FsParsingError::Invalid("Invalid Name Entry size"));
             }
 
             let name = ExFatNameEntry::read_from_bytes(lfn)
-                .map_err(|_| FsParserError::Invalid("Invalid Name Entry"))?;
+                .map_err(|_| FsParsingError::Invalid("Invalid Name Entry"))?;
 
             names.push(name);
         }
@@ -135,6 +194,57 @@ impl ExFatEntries {
             names,
         })
     }
+}
+
+fn name_entries(name: &str) -> Vec<ExFatNameEntry> {
+    let name_utf16: Vec<u16> = name.encode_utf16().collect();
+    let count = name_utf16.len().div_ceil(15);
+
+    (0..count)
+        .map(|i| {
+            let start = i * 15;
+            let end = ((i + 1) * 15).min(name_utf16.len());
+
+            let mut name_chars = [0x0000u16; 15];
+            for (j, &c) in name_utf16[start..end].iter().enumerate() {
+                name_chars[j] = c;
+            }
+
+            ExFatNameEntry::new(name_chars)
+        })
+        .collect()
+}
+
+fn decode_name(names: &[ExFatNameEntry]) -> FsParsingResult<String> {
+    let mut name_utf16 = Vec::with_capacity(names.len() * 15);
+    for name_entry in names {
+        let name_chars = name_entry.name_chars;
+        for &c in name_chars.iter() {
+            if c == 0x0000 || c == 0xFFFF {
+                break;
+            }
+            name_utf16.push(c);
+        }
+    }
+    String::from_utf16(&name_utf16)
+        .map_err(|_| FsParsingError::Invalid("Invalid UTF-16 in ExFat name"))
+}
+
+#[inline]
+fn compute_name_hash(name: &str, upcase: &UpcaseHandle) -> u16 {
+    let mut h: u16 = 0;
+    for cu in name.encode_utf16() {
+        let b = upcase.upper(cu).to_le_bytes();
+        h = h.rotate_right(1).wrapping_add(b[0] as u16);
+        h = h.rotate_right(1).wrapping_add(b[1] as u16);
+    }
+    h
+}
+
+#[inline]
+fn name_length_utf16(name: &str) -> u8 {
+    let n = name.encode_utf16().count();
+    u8::try_from(n).expect("exFAT supports up to 255 UTF-16 units")
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
@@ -169,7 +279,7 @@ impl ExFatPrimaryEntry {
         Self {
             entry_type: EXFAT_ENTRY_PRIMARY,
             secondary_count,
-            set_checksum: 0, // can be computed later
+            set_checksum: 0, // computed later
             file_attributes: attr.as_exfat_attr(),
             reserved1: 0,
             create_timestamp: c_time,
@@ -186,24 +296,27 @@ impl ExFatPrimaryEntry {
 
     pub fn compute_set_checksum(&mut self, stream: &ExFatStreamEntry, names: &[ExFatNameEntry]) {
         let mut sum = 0u16;
-        let arr = self.as_bytes();
-        for (i, &b) in arr.iter().enumerate() {
+
+        // Primary (ignorer SetChecksum aux offsets 2..=3)
+        let p = self.as_bytes();
+        for (i, &b) in p.iter().enumerate() {
             if i == 2 || i == 3 {
                 continue;
             }
-            sum = sum.wrapping_add(b as u16);
+            sum = sum.rotate_right(1).wrapping_add(b as u16);
         }
 
-        sum = stream
-            .as_bytes()
-            .iter()
-            .fold(sum, |acc, b| acc.wrapping_add(*b as u16));
+        // Stream
+        let s = stream.as_bytes();
+        for &b in s.iter() {
+            sum = sum.rotate_right(1).wrapping_add(b as u16);
+        }
 
+        // FileName entries
         for name in names {
-            sum = name
-                .as_bytes()
-                .iter()
-                .fold(sum, |acc, b| acc.wrapping_add(*b as u16));
+            for &b in name.as_bytes().iter() {
+                sum = sum.rotate_right(1).wrapping_add(b as u16);
+            }
         }
 
         self.set_checksum = sum;
@@ -246,6 +359,12 @@ impl ExFatStreamEntry {
         }
     }
 
+    /// Flag NoFatChain (contiguous) : bit1 de `general_secondary_flags`
+    #[inline]
+    pub fn is_contiguous(&self) -> bool {
+        (self.general_secondary_flags & 0x02) != 0
+    }
+
     #[inline(always)]
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
@@ -270,6 +389,26 @@ impl ExFatNameEntry {
     }
 
     #[inline(always)]
+    pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self.as_bytes());
+    }
+}
+
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, Default)]
+#[repr(C, packed)]
+pub struct ExFatEodEntry {
+    pub entry_type: u8,
+    pub reserved: [u8; 31],
+}
+
+impl ExFatEodEntry {
+    pub fn new() -> Self {
+        Self {
+            entry_type: EXFAT_EOD,
+            reserved: [0u8; 31],
+        }
+    }
+
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
     }

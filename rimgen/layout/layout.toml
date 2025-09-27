@@ -1,21 +1,33 @@
-# [[partitions]]
-# name = "RIM EFI"
-# mountpoint = "efi"
-# size = "100M"
-# fs = "fat32"
-# bootable = true
+[[partitions]]
+name = "RIM EFI"
+mountpoint = "efi"
+size = "100M"
+fs = "fat32"
+bootable = true
 
-# [[partitions]]
-# name = "RIM FAT32"
-# mountpoint = "data/*"
-# size = "auto"
-# fs = "fat32"
+[[partitions]]
+name = "RIM FAT32"
+mountpoint = "data/*"
+size = "auto"
+fs = "fat32"
 
 [[partitions]]
 name = "RIM EXFAT"
 mountpoint = "data/*"
 size = "300M"
 fs = "exfat"
+
+# [[partitions]]
+# name = "RIM EXT4"
+# mountpoint = "data/*"
+# size = "300M"
+# fs = "ext4"
+
+# [[partitions]]
+# name = "NATIVE NTFS"
+# mountpoint = "data/*"
+# size = "300M"
+# fs = "ntfs"
 
 # [[partitions]]
 # name = "RIM RAW"

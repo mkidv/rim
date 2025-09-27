@@ -1,13 +1,21 @@
-// rimgen/src/main.rs
+// SPDX-License-Identifier: MIT
 
-mod output;
+mod layout;
+mod out;
+#[macro_use]
+mod utils;
 
+#[cfg(feature = "host-scripts")]
+mod host;
+
+use crate::{
+    layout::Layout,
+    out::{target::DryRunMode, *},
+};
 use clap::{Parser, Subcommand};
-use rimgen_output::*;
-use rimgen_layout::*;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
-use crate::output::Output;
+use crate::utils::log::LogLevel;
 
 #[derive(Parser)]
 #[command(name = "rimgen", version, about = "Rust Image Generator", long_about = None)]
@@ -32,6 +40,11 @@ enum Commands {
         dry_run: bool,
         #[arg(long)]
         truncate: bool,
+        #[arg(long, short, action = clap::ArgAction::Count)]
+        verbose: u8,
+
+        #[arg(long, short)]
+        quiet: bool,
     },
     /// Flash image to a physical device
     Flash {
@@ -66,19 +79,78 @@ fn main() -> anyhow::Result<()> {
             output,
             dry_run,
             truncate,
+            verbose,
+            quiet,
         } => {
+            if quiet && !dry_run {
+                crate::utils::set_log_level(LogLevel::Quiet);
+            } else if verbose > 0 || dry_run {
+                crate::utils::set_log_level(LogLevel::Verbose);
+            }
+            let t0 = Instant::now();
+            crate::log_info!("🚀 Rust Image Maker — v{}", env!("CARGO_PKG_VERSION"));
+
+            if dry_run {
+                crate::log_normal!("🌀 Dry run mode: no data will be written.");
+            } else {
+                crate::log_info!("Writing disk image to {}", output.display());
+            }
+
             let layout_path = layout;
             let layout = Layout::from_file(&layout_path)?;
             layout.validate()?;
-            layout.print_summary();
-            if dry_run {
-                println!("[rimgen] Dry run mode: no data will be written.");
+            crate::log_verbose!("Parsed layout {layout}");
+
+            let out_kind = Output::from_path(&output)?;
+
+            let res = match out_kind {
+                Output::Img => img::create(
+                    &layout,
+                    &output,
+                    &truncate,
+                    if dry_run {
+                        DryRunMode::Tempfile
+                    } else {
+                        DryRunMode::Off
+                    },
+                ),
+                Output::Vhd => vhd::create(
+                    &layout,
+                    &output,
+                    &truncate,
+                    if dry_run {
+                        DryRunMode::Tempfile
+                    } else {
+                        DryRunMode::Off
+                    },
+                ),
+            };
+
+            let dt = t0.elapsed().as_secs_f32();
+            if let Err(e) = res {
+                let _ = std::fs::remove_file(&output);
+
+                crate::log_normal!(
+                    "❌ Failed to write {} in {:.2}s\n  ↳ {}",
+                    &output.display(),
+                    dt,
+                    e
+                );
+                std::process::exit(1);
+            } else if (dry_run) {
+                crate::log_normal!(
+                    "🌀 Dry-run successful — simulated image {} in {:.2}s (no bytes written)",
+                    output.display(),
+                    dt
+                );
             } else {
-                println!("[rimgen] Writing disk image to: {}", output.display());
-            }
-            match Output::from_path(&output)? {
-                Output::Img => img::create(&layout, &output, &truncate)?,
-                Output::Vhd => vhd::create(&layout, &output, &truncate)?,
+                let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+                crate::log_normal!(
+                    "✨ Wrote {} ({} in {:.2}s) — with ❤️  from RIM",
+                    output.display(),
+                    utils::pretty_bytes(bytes),
+                    dt
+                );
             }
         }
         Commands::Flash {

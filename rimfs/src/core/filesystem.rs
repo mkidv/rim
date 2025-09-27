@@ -3,7 +3,7 @@
 use rimio::BlockIO;
 
 use crate::core::traits::{
-    FsAllocator, FsChecker, FsFormatter, FsHandle, FsMeta, FsNodeInjector, FsParser,
+    FsAllocator, FsChecker, FsFormatter, FsHandle, FsMeta, FsNodeInjector, FsResolver,
 };
 /// Unified trait representing a filesystem.
 /// It encapsulates the fundamental components required for generation, injection, and verification.
@@ -12,7 +12,7 @@ pub trait FsFilesystem<'a> {
     type Meta: FsMeta<Self::AllocUnit> + Clone + 'a;
 
     /// Logical allocation unit (e.g. cluster ID, inode number...).
-    type AllocUnit: PartialOrd + Copy;
+    type AllocUnit: Ord + Copy;
 
     /// Handle returned during allocations (may contain additional metadata).
     type Handle: FsHandle + Clone;
@@ -30,7 +30,7 @@ pub trait FsFilesystem<'a> {
     type Checker: FsChecker + 'a;
 
     /// Parser responsible for parsing the filesystem structure.
-    type Parser: FsParser + 'a;
+    type Parser: FsResolver + 'a;
 
     /// Creates a new allocator from the metadata.
     fn allocator(meta: &'a Self::Meta) -> Self::Allocator;

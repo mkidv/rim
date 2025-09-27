@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use crate::define_partition_types;
-
-define_partition_types! {
+crate::define_partition_types! {
     Esp => "EFI System Partition", [
         0x28, 0x73, 0x2A, 0xC1,
         0x1F, 0xF8,

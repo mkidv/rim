@@ -14,7 +14,7 @@ impl<'a> FsFilesystem<'a> for ExFat {
     type Formatter = ExFatFormatter<'a, dyn BlockIO + 'a>;
     type Injector = ExFatInjector<'a, dyn BlockIO + 'a>;
     type Checker = ExFatChecker<'a, dyn BlockIO + 'a>;
-    type Parser = ExFatParser<'a, dyn BlockIO + 'a>;
+    type Parser = ExFatResolver<'a, dyn BlockIO + 'a>;
 
     fn allocator(meta: &'a Self::Meta) -> Self::Allocator {
         ExFatAllocator::new(meta)
@@ -37,7 +37,7 @@ impl<'a> FsFilesystem<'a> for ExFat {
     }
 
     fn parser(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Parser {
-        ExFatParser::new(io, meta)
+        ExFatResolver::new(io, meta)
     }
 
     fn identifier() -> &'static str {

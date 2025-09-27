@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #[cfg(feature = "std")]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 #[cfg(feature = "std")]
 use crate::BlockIOSetLen;
@@ -16,13 +16,15 @@ pub struct StdBlockIO<'a, T: Read + Write + Seek> {
 
 #[cfg(feature = "std")]
 impl<'a, T: Read + Write + Seek> StdBlockIO<'a, T> {
+    #[inline]
     pub fn new(io: &'a mut T) -> Self {
         Self {
             io,
             partition_offset: 0,
         }
     }
-
+    
+    #[inline]
     pub fn new_with_offset(io: &'a mut T, partition_offset: u64) -> Self {
         Self {
             io,
@@ -35,37 +37,30 @@ impl<'a, T: Read + Write + Seek> StdBlockIO<'a, T> {
 impl<'a, T: Read + Write + Seek> BlockIO for StdBlockIO<'a, T> {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> BlockIOResult {
         let abs_offset = self.partition_offset + offset;
-        self.io
-            .seek(SeekFrom::Start(abs_offset))
-            .map_err(|_| BlockIOError::Error("Seek failed"))?;
-        self.io
-            .write_all(data)
-            .map_err(|_| BlockIOError::Error("Write failed"))?;
+        self.io.seek(SeekFrom::Start(abs_offset))?;
+        self.io.write_all(data)?;
         Ok(())
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> BlockIOResult {
         let abs_offset = self.partition_offset + offset;
-        self.io
-            .seek(SeekFrom::Start(abs_offset))
-            .map_err(|_| BlockIOError::Error("Seek failed"))?;
-        self.io
-            .read_exact(buf)
-            .map_err(|_| BlockIOError::Error("Read failed"))?;
+        self.io.seek(SeekFrom::Start(abs_offset))?;
+        self.io.read_exact(buf)?;
         Ok(())
     }
 
     fn flush(&mut self) -> BlockIOResult {
-        self.io
-            .flush()
-            .map_err(|_| BlockIOError::Error("Flush failed"))
+        self.io.flush()?;
+        Ok(())
     }
 
+    #[inline]
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
         partition_offset
     }
 
+    #[inline]
     fn partition_offset(&self) -> u64 {
         self.partition_offset
     }
@@ -74,19 +69,21 @@ impl<'a, T: Read + Write + Seek> BlockIO for StdBlockIO<'a, T> {
 #[cfg(feature = "std")]
 impl<'a> BlockIOSetLen for StdBlockIO<'a, std::fs::File> {
     fn set_len(&mut self, len: u64) -> BlockIOResult {
-        use std::io::{Seek, SeekFrom};
-
-        self.io
-            .set_len(self.partition_offset + len)
-            .map_err(|_| BlockIOError::Error("set_len failed"))?;
-
+        self.io.set_len(self.partition_offset + len)?;
         self.flush()?;
-
-        self.io
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| BlockIOError::Error("Seek after set_len failed"))?;
-
+        self.io.seek(SeekFrom::Start(0))?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<Error> for BlockIOError {
+    #[cold]
+    #[inline(never)]
+    fn from(e: Error) -> Self {
+        // Leak the string to produce a 'static str. Acceptable for error mapping.
+        let leaked_str: &'static str = Box::leak(e.to_string().into_boxed_str());
+        BlockIOError::Other(leaked_str)
     }
 }
 

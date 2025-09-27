@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pub use crate::core::error::{FsAllocatorError, FsAllocatorResult};
+pub use crate::core::errors::{FsAllocatorError, FsAllocatorResult};
 
 /// Trait implemented by all FS allocation handles.
 ///

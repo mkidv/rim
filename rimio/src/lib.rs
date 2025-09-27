@@ -5,12 +5,13 @@
 extern crate alloc;
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::vec;
 
 // === Core modules ===
-pub mod error;
-pub mod utils;
+pub mod errors;
 mod macros;
+pub mod stats;
+pub mod utils;
 
 // === Backend modules ===
 #[cfg(feature = "mem")]
@@ -29,7 +30,8 @@ pub mod prelude {
     pub use super::BlockIOSetLen;
     pub use super::BlockIOStreamExt;
     pub use super::BlockIOStructExt;
-    pub use super::error::*;
+    pub use super::errors::*;
+    pub use super::stats::*;
 
     #[cfg(feature = "mem")]
     pub use super::mem::MemBlockIO;
@@ -42,13 +44,16 @@ pub mod prelude {
 }
 
 // === Internal use ===
-use error::*;
+use errors::*;
 #[allow(clippy::single_component_path_imports)]
 use paste;
 
 // === Constants ===
-/// Maximum size of internal scratch buffer (used for streaming/chunked ops)
-const BLOCK_BUF_SIZE: usize = 8192;
+
+/// Maximum size of internal scratch buffer (used for streaming/chunked ops).
+/// 4 KiB = typical page size and common disk sector/cluster size.
+/// Safe for no_std/UEFI stack usage, overridable in high-level code.
+pub const BLOCK_BUF_SIZE: usize = 4096;
 
 // === Traits ===
 
@@ -253,6 +258,7 @@ pub trait BlockIOStreamExt: BlockIO {
 
 #[cfg(feature = "alloc")]
 impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
+    #[inline]
     fn read_chunks_streamed<const N: usize, F>(
         &mut self,
         offset: u64,
@@ -288,6 +294,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
         Ok(())
     }
 
+    #[inline]
     fn write_chunks_streamed<const N: usize, F>(
         &mut self,
         offset: u64,
@@ -323,7 +330,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
     }
 
     /// Stream-read fixed-size elements at multiple arbitrary offsets using a callback.
-    #[inline(always)]
+    #[inline]
     fn read_multi_streamed<const N: usize, F>(
         &mut self,
         offsets: &[u64],
@@ -354,7 +361,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
     }
 
     /// Stream-write fixed-size elements at multiple arbitrary offsets using a generator callback.
-    #[inline(always)]
+    #[inline]
     fn write_multi_streamed<const N: usize, F>(
         &mut self,
         offsets: &[u64],
@@ -386,6 +393,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
 
 #[cfg(not(feature = "alloc"))]
 impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
+    #[inline]
     fn read_chunks_streamed<const N: usize, F>(
         &mut self,
         offset: u64,
@@ -401,7 +409,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
         let entries_per_chunk = BUF_SIZE / N;
         assert!(
             chunk <= entries_per_chunk,
-            "Chunk trop grand pour le buffer interne."
+            "Chunk too large for the internal buffer."
         );
 
         let mut remaining = count;
@@ -427,6 +435,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
         Ok(())
     }
 
+    #[inline]
     fn write_chunks_streamed<const N: usize, F>(
         &mut self,
         offset: u64,
@@ -442,7 +451,7 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
         let entries_per_chunk = BUF_SIZE / N;
         assert!(
             chunk <= entries_per_chunk,
-            "Chunk trop grand pour le buffer interne."
+            "Chunk too large for the internal buffer."
         );
 
         let mut remaining = count;
@@ -466,12 +475,53 @@ impl<T: BlockIO + ?Sized> BlockIOStreamExt for T {
 
         Ok(())
     }
+
+    /// Stream-read fixed-size elements at multiple arbitrary offsets (no-alloc).
+    #[inline]
+    fn read_multi_streamed<const N: usize, F>(
+        &mut self,
+        offsets: &[u64],
+        _chunk: usize,
+        mut f: F,
+    ) -> BlockIOResult
+    where
+        F: FnMut(usize, &[u8; N]),
+    {
+        let mut elem = [0u8; N];
+        assert!(N <= BLOCK_BUF_SIZE, "N too large for internal buffer.",);
+
+        for (i, &off) in offsets.iter().enumerate() {
+            self.read_at(off, &mut elem)?;
+            f(i, &elem);
+        }
+        Ok(())
+    }
+
+    /// Stream-write fixed-size elements at multiple arbitrary offsets (no-alloc).
+    #[inline]
+    fn write_multi_streamed<const N: usize, F>(
+        &mut self,
+        offsets: &[u64],
+        _chunk: usize,
+        mut f: F,
+    ) -> BlockIOResult
+    where
+        F: FnMut(usize) -> [u8; N],
+    {
+        assert!(N <= BLOCK_BUF_SIZE, "N too large for internal buffer.",);
+
+        for (i, &off) in offsets.iter().enumerate() {
+            let bytes = f(i);
+            self.write_at(off, &bytes)?;
+        }
+        Ok(())
+    }
 }
 
 /// Trait for setting the length of a BlockIO object.
 ///
 /// Allows resizing the underlying storage (if supported by the backend).
-pub trait BlockIOSetLen {
+pub trait BlockIOSetLen: BlockIO {
     /// Sets the length of the storage.
     fn set_len(&mut self, len: u64) -> BlockIOResult;
 }
@@ -490,7 +540,7 @@ pub trait BlockIOStructExt: BlockIO {
         assert!(size <= BLOCK_BUF_SIZE, "read_struct: type too large");
         let mut buf = [0u8; BLOCK_BUF_SIZE];
         self.read_at(offset, &mut buf[..size])?;
-        T::read_from_bytes(&buf[..size]).map_err(|_| BlockIOError::Error("read_struct failed"))
+        T::read_from_bytes(&buf[..size]).map_err(|_| BlockIOError::Other("read_struct failed"))
     }
 
     /// Writes a struct of type `T` at the given offset.

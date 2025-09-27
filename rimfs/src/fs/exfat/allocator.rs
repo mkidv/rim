@@ -33,7 +33,7 @@ impl ExFatHandle {
 
 impl FsHandle for ExFatHandle {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExFatAllocator<'p> {
     meta: &'p ExFatMeta,
     next_free: u32,

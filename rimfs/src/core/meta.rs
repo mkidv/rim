@@ -4,7 +4,7 @@ pub use crate::core::utils::volume_utils::*;
 
 /// Trait implemented by each FS-specific Meta structure.
 /// Provides access to static metadata needed during formatting, allocation, injection, or checking.
-pub trait FsMeta<Unit: PartialOrd + Copy> {
+pub trait FsMeta<Unit: Ord + Copy> {
     /// Size of one allocation unit in bytes.
     fn unit_size(&self) -> usize;
 
@@ -28,6 +28,6 @@ pub trait FsMeta<Unit: PartialOrd + Copy> {
 
     /// Check if a given unit is valid for this FS.
     fn is_valid_unit(&self, unit: Unit) -> bool {
-        unit >= self.first_data_unit() && unit < self.last_data_unit()
+        unit >= self.first_data_unit() && unit <= self.last_data_unit()
     }
 }

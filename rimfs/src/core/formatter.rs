@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pub use crate::core::error::{FsFormatterError, FsFormatterResult};
+pub use crate::core::errors::{FsFormatterError, FsFormatterResult};
 
 /// A Formatter for a filesystem type.
 ///

@@ -16,13 +16,13 @@ fn main() {
 
     // 1. Top-level files
     create_file(
-        &test_data_dir.join("README.txt"),
+        test_data_dir.join("README.txt"),
         b"This is a test README file.\n",
     );
-    create_file(&test_data_dir.join("data.bin"), &vec![0xAA; 512 * 4]);
+    create_file(test_data_dir.join("data.bin"), &vec![0xAA; 512 * 4]);
     create_file(
-        &test_data_dir.join("image.png"),
-        &vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'],
+        test_data_dir.join("image.png"),
+        &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'],
     );
 
     // 2. Subdir1
@@ -41,7 +41,7 @@ fn main() {
 
     // 4. Long filename test
     create_file(
-        &test_data_dir.join("long_named_file_for_testing_fat32_long_filename_support.txt"),
+        test_data_dir.join("long_named_file_for_testing_long_filename_support_on_different_fs.txt"),
         b"This file has a long filename.\n",
     );
 
@@ -50,14 +50,14 @@ fn main() {
     create_dir_all(&many).expect("Failed to create many_files");
     for i in 0..100 {
         create_file(
-            many.join(format!("file_{:03}.txt", i)),
-            format!("File number {}\n", i).as_bytes(),
+            many.join(format!("file_{i:03}.txt")),
+            format!("File number {i}\n").as_bytes(),
         );
     }
 
     // 6. Big file
     create_file(
-        &test_data_dir.join("big_file.bin"),
+        test_data_dir.join("big_file.bin"),
         &vec![0xAB; 2 * 1024 * 1024], // 2 MB
     );
 

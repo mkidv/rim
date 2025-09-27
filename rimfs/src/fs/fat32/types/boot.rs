@@ -6,8 +6,7 @@ use alloc::vec::Vec;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::core::parser::*;
-use crate::fs::fat32::{attr::*, constant::*, meta::*, utils};
+use crate::fs::fat32::{constant::*, meta::*};
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
@@ -43,16 +42,16 @@ pub struct Fat32Vbr {
     pub volume_label: [u8; 11],
     pub fs_type: [u8; 8],
 
-    pub boot_code: [u8; 420], // to make 512 - 90 bytes = 420
-    pub signature: [u8; 2],
+    pub boot_code: [u8; 420],
+    pub signature: u16,
 }
 
 impl Fat32Vbr {
     pub fn from_meta(meta: &Fat32Meta) -> Self {
         Self {
             jump_boot: FAT_JUMP_BOOT,
-            oem_name: *FAT_OEM_NAME,
-            bytes_per_sector: meta.sector_size,
+            oem_name: oem_name(),
+            bytes_per_sector: meta.bytes_per_sector,
             sectors_per_cluster: meta.sectors_per_cluster,
             reserved_sectors: DEFAULT_FAT_RESERVED_SECTORS,
             num_fats: meta.num_fats,
@@ -63,8 +62,8 @@ impl Fat32Vbr {
             sectors_per_track: FAT_SECTORS_PER_TRACK,
             num_heads: FAT_HEADS,
             hidden_sectors: FAT_HIDDEN_SECTORS,
-            total_sectors_32: meta.total_sectors,
-            fat_size_32: meta.fat_size,
+            total_sectors_32: meta.volume_size_sectors.min(u32::MAX as u64) as u32,
+            fat_size_32: meta.fat_size_sectors,
             ext_flags: FAT_EXT_FLAGS,
             fs_version: FAT_FS_VERSION,
             root_cluster: meta.root_unit(),
@@ -87,7 +86,7 @@ impl Default for Fat32Vbr {
     fn default() -> Self {
         Self {
             jump_boot: FAT_JUMP_BOOT,
-            oem_name: *FAT_OEM_NAME,
+            oem_name: oem_name(),
             bytes_per_sector: FAT_SECTOR_SIZE,
             sectors_per_cluster: FAT_SECTORS_PER_CLUSTER,
             reserved_sectors: DEFAULT_FAT_RESERVED_SECTORS,
@@ -113,7 +112,7 @@ impl Default for Fat32Vbr {
             volume_id: 0,
             volume_label: *FAT_VOLUME_LABEL_EMPTY,
             fs_type: *FAT_FS_TYPE,
-            boot_code: [0u8; FAT_BOOT_CODE_SIZE],
+            boot_code: [0u8; 420],
             signature: FAT_SIGNATURE,
         }
     }
@@ -128,21 +127,19 @@ pub struct Fat32FsInfo {
     pub free_cluster_count: u32,
     pub next_free_cluster: u32,
     pub reserved2: [u8; 12],
-    pub trail_signature: [u8; 2],
-    pub reserved3: [u8; 2],
+    pub trail_signature: [u8; 4],
 }
 
 impl Fat32FsInfo {
     pub fn from_meta(meta: &Fat32Meta) -> Self {
         Self {
-            lead_signature: *FAT_FSINFO_LEAD_SIGNATURE,
+            lead_signature: FAT_FSINFO_LEAD_SIGNATURE,
             reserved1: [0u8; 480],
-            struct_signature: *FAT_FSINFO_STRUCT_SIGNATURE,
-            free_cluster_count: FAT_FSINFO_FREE_COUNT_UNKNOWN,
-            next_free_cluster: meta.root_unit() + 1,
+            struct_signature: FAT_FSINFO_STRUCT_SIGNATURE,
+            free_cluster_count: FAT_FSINFO_UNKNOWN,
+            next_free_cluster: meta.first_data_unit(),
             reserved2: [0u8; 12],
             trail_signature: FAT_FSINFO_TRAIL_SIGNATURE,
-            reserved3: [0u8; 2],
         }
     }
 }
@@ -150,14 +147,13 @@ impl Fat32FsInfo {
 impl Default for Fat32FsInfo {
     fn default() -> Self {
         Self {
-            lead_signature: *FAT_FSINFO_LEAD_SIGNATURE,
+            lead_signature: FAT_FSINFO_LEAD_SIGNATURE,
             reserved1: [0u8; 480],
-            struct_signature: *FAT_FSINFO_STRUCT_SIGNATURE,
-            free_cluster_count: FAT_FSINFO_FREE_COUNT_UNKNOWN,
+            struct_signature: FAT_FSINFO_STRUCT_SIGNATURE,
+            free_cluster_count: FAT_FSINFO_UNKNOWN,
             next_free_cluster: FAT_ROOT_CLUSTER + 1,
             reserved2: [0u8; 12],
             trail_signature: FAT_FSINFO_TRAIL_SIGNATURE,
-            reserved3: [0u8; 2],
         }
     }
 }

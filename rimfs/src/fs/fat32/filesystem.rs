@@ -14,7 +14,7 @@ impl<'a> FsFilesystem<'a> for Fat32 {
     type Formatter = Fat32Formatter<'a, dyn BlockIO + 'a>;
     type Injector = Fat32Injector<'a, dyn BlockIO + 'a>;
     type Checker = Fat32Checker<'a, dyn BlockIO + 'a>;
-    type Parser = Fat32Parser<'a, dyn BlockIO + 'a>;
+    type Parser = Fat32Resolver<'a, dyn BlockIO + 'a>;
 
     fn allocator(meta: &'a Self::Meta) -> Self::Allocator {
         Fat32Allocator::new(meta)
@@ -37,7 +37,7 @@ impl<'a> FsFilesystem<'a> for Fat32 {
     }
 
     fn parser(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Parser {
-        Fat32Parser::new(io, meta)
+        Fat32Resolver::new(io, meta)
     }
 
     fn identifier() -> &'static str {
