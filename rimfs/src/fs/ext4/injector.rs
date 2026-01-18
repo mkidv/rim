@@ -77,7 +77,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
 
         // Deserialize
         use zerocopy::FromBytes;
-        Ext4Inode::read_from(&buf[..]).map_err(|_| FsInjectorError::Other("Failed to parse inode"))
+        Ext4Inode::read_from(&buf[..]).ok_or(FsInjectorError::Other("Failed to parse inode"))
     }
 
     fn flush_superblock(&mut self) -> FsInjectorResult {
@@ -160,7 +160,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
                 self.group_total_blocks(group_index) - self.group_used_blocks(group_index);
             let free_inodes =
                 self.group_total_inodes(group_index) - self.group_used_inodes(group_index);
-            let used_dirs = if group_index == 0 {
+            let _used_dirs = if group_index == 0 {
                 // Approximate: we don't track per-group dir count in allocator.
                 // But we know group 0 has root.
                 // For now, let's leave it as is or try to track it?
@@ -212,7 +212,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
             self.io.read_at(block_bitmap_offset, &mut block_bitmap)?;
 
             let group_start = layout.group_start;
-            let group_end = group_start + meta.blocks_per_group;
+            let _group_end = group_start + meta.blocks_per_group;
 
             // Determine range of used blocks in this group
             // implied by used_blocks count (since allocation is contiguous 0..used_blocks)
