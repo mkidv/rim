@@ -833,7 +833,7 @@ where
 {
     let align = align_lba_1m(sector_size);
     let mut cur = header.first_usable_lba;
-    if cur % align != 0 {
+    if !cur.is_multiple_of(align) {
         cur += align - (cur % align);
     }
 
@@ -850,7 +850,7 @@ where
         }
 
         // realign if needed
-        if cur % align != 0 {
+        if !cur.is_multiple_of(align) {
             cur += align - (cur % align);
         }
         if cur > header.last_usable_lba {

@@ -110,7 +110,7 @@ jobs:
           EOF
 
       - name: Generate Disk Image
-        run: ./target/release/rimgen layout.toml --output test_image.img
+        run: ./target/release/rimgen build --layout layout.toml --output test_image.img
 
       - name: Verify Partitions (fsck)
         run: |
