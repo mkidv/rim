@@ -130,6 +130,7 @@ pub fn create(
 }
 
 /// Strip VHD footer and restore .img
+#[allow(dead_code)]
 pub fn unwrap_vhd_to_raw(vhd_path: &Path, img_path: &Path) -> anyhow::Result<()> {
     let mut file = File::open(vhd_path)?;
     let len = file.metadata()?.len();

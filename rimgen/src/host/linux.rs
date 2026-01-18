@@ -20,6 +20,7 @@ impl LinScript {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_debug(mut self) -> Self {
         self.debug = true;
         self
@@ -64,7 +65,7 @@ impl LinScript {
                 .join(" ");
             sh.add(format_cmd);
 
-            if (!mountpoint.is_empty()) {
+            if !mountpoint.is_empty() {
                 // Mount, copy, unmount
                 sh.add(format!("mkdir -p {mount_path}"));
                 sh.add(format!("mount {mapper_path} {mount_path}"));

@@ -95,18 +95,18 @@ jobs:
           [[partitions]]
           name = "efi"
           size = { Fixed = 32 }
-          fs = "Fat32"
+          fs = "fat32"
           bootable = true
 
           [[partitions]]
           name = "data"
           size = { Fixed = 32 }
-          fs = "ExFat"
+          fs = "exfat"
 
           [[partitions]]
           name = "linux"
           size = { Fixed = 64 }
-          fs = "Ext4"
+          fs = "ext4"
           EOF
 
       - name: Generate Disk Image
