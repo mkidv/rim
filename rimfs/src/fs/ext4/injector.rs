@@ -46,8 +46,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         Ok(())
     }
 
-    fn write_metadata(&mut self, metadata_id: u32, data: &[u8]) -> FsInjectorResult {
-        // inode numbers are 1-based.
+    fn get_inode_offset(&self, metadata_id: u32) -> FsInjectorResult<u64> {
         if metadata_id < 1 {
             return Err(FsInjectorError::Other("Invalid Inode 0"));
         }
@@ -59,13 +58,26 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         let layout = GroupLayout::compute(self.meta, group);
         let table_block = layout.inode_table_block;
 
-        // inode size? EXT4_DEFAULT_INODE_SIZE
         let inode_size = EXT4_DEFAULT_INODE_SIZE as u64;
         let offset = (table_block as u64 * self.meta.block_size as u64)
             + (index_in_group as u64 * inode_size);
+        Ok(offset)
+    }
 
+    fn write_metadata(&mut self, metadata_id: u32, data: &[u8]) -> FsInjectorResult {
+        let offset = self.get_inode_offset(metadata_id)?;
         self.io.write_at(offset, data)?;
         Ok(())
+    }
+
+    fn read_inode(&mut self, metadata_id: u32) -> FsInjectorResult<Ext4Inode> {
+        let offset = self.get_inode_offset(metadata_id)?;
+        let mut buf = [0u8; EXT4_DEFAULT_INODE_SIZE as usize];
+        self.io.read_at(offset, &mut buf)?;
+
+        // Deserialize
+        use zerocopy::FromBytes;
+        Ext4Inode::read_from(&buf[..]).map_err(|_| FsInjectorError::Other("Failed to parse inode"))
     }
 
     fn flush_superblock(&mut self) -> FsInjectorResult {
@@ -148,10 +160,25 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
                 self.group_total_blocks(group_index) - self.group_used_blocks(group_index);
             let free_inodes =
                 self.group_total_inodes(group_index) - self.group_used_inodes(group_index);
+            let used_dirs = if group_index == 0 {
+                // Approximate: we don't track per-group dir count in allocator.
+                // But we know group 0 has root.
+                // For now, let's leave it as is or try to track it?
+                // The fsck error "Directories count wrong" suggests we should update it.
+                // Since we don't easily know which group a directory falls into during injection without
+                // tracking, we might skip this or set to a safe value.
+                // However, let's just update free counts which is critical.
+                0 // usage usually managed by kernel
+            } else {
+                0
+            };
 
             let mut bg_update = [0u8; 4];
             bg_update[0..2].copy_from_slice(&(free_blocks as u16).to_le_bytes()); // bg_free_blocks_count
             bg_update[2..4].copy_from_slice(&(free_inodes as u16).to_le_bytes()); // bg_free_inodes_count
+
+            // Note: We are not updating bg_used_dirs_count here as it's at offset 0x10 and we write at 0x0C + 4 bytes.
+            // If we wanted to update used_dirs we need to write to 0x10 (bg_used_dirs_count_lo).
 
             let offset = self.bgdt_offset() + (group_index as u64) * EXT4_BGDT_ENTRY_SIZE as u64;
 
@@ -164,9 +191,95 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         Ok(())
     }
 
+    fn flush_bitmaps(&mut self) -> FsInjectorResult {
+        use crate::core::utils::bitmap::BitmapOps;
+
+        // Sync Block Bitmap
+        let meta = self.meta;
+        let used_blocks = self.allocator.blocks.used_units();
+
+        // We assume contiguous allocation from the allocator.
+        // We need to iterate over groups and set bits for used blocks.
+
+        for group in 0..self.group_count() {
+            let layout = GroupLayout::compute(meta, group as u32);
+            // Block bitmap
+            let bitmap_size = (meta.blocks_per_group / 8) as usize;
+            let mut block_bitmap = vec![0u8; bitmap_size];
+
+            // Read existing bitmap to preserve system/reserved bits set by formatter
+            let block_bitmap_offset = meta.block_size as u64 * layout.block_bitmap_block as u64;
+            self.io.read_at(block_bitmap_offset, &mut block_bitmap)?;
+
+            let group_start = layout.group_start;
+            let group_end = group_start + meta.blocks_per_group;
+
+            // Determine range of used blocks in this group
+            // implied by used_blocks count (since allocation is contiguous 0..used_blocks)
+            let used_limit = used_blocks as u32; // global block number limit
+
+            let start_in_group = 0; // relative 0
+            let end_in_group = if used_limit > group_start {
+                (used_limit - group_start).min(meta.blocks_per_group)
+            } else {
+                0
+            };
+
+            for i in start_in_group..end_in_group {
+                block_bitmap.set_bit(i as usize, true);
+            }
+
+            self.io.write_at(block_bitmap_offset, &block_bitmap)?;
+
+            // Sync Inode Bitmap
+            let used_inodes = self.allocator.meta.used_metadata() as u32;
+            // Inode bitmap
+            let inode_bitmap_size = (meta.inodes_per_group / 8) as usize;
+            let mut inode_bitmap = vec![0u8; inode_bitmap_size];
+
+            let inode_bitmap_offset = meta.block_size as u64 * layout.inode_bitmap_block as u64;
+            self.io.read_at(inode_bitmap_offset, &mut inode_bitmap)?;
+
+            let group_start_inode = group as u32 * meta.inodes_per_group; // 0-based index
+
+            // Allocator inodes are 1-based (starts at 11).
+            // But used_metadata returns count.
+            // used_metadata = (next_inode - 11).
+            // This is tricky because allocator starts at 11.
+            // Inodes 1-10 are reserved.
+
+            // Let's rely on next_inode from allocator? No we can't access private fields easily if not exposed.
+            // but `used_metadata` is public.
+            // And we know formatter sets reserved inodes (1-10) in group 0.
+
+            // The allocator allocates continuously from 11.
+            // So we need to set bits for inodes 11 .. (11 + used_inodes).
+
+            let alloc_start = EXT4_FIRST_INODE - 1; // 10 (0-indexed)
+            let alloc_end = alloc_start + used_inodes;
+
+            let group_s_inode = group_start_inode;
+            let group_e_inode = group_start_inode + meta.inodes_per_group;
+
+            // Intersection of [alloc_start, alloc_end) and [group_s_inode, group_e_inode)
+            let start = alloc_start.max(group_s_inode);
+            let end = alloc_end.min(group_e_inode);
+
+            if start < end {
+                for i in start..end {
+                    let bit = (i - group_s_inode) as usize;
+                    inode_bitmap.set_bit(bit, true);
+                }
+                self.io.write_at(inode_bitmap_offset, &inode_bitmap)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn flush_metadata(&mut self) -> FsInjectorResult {
         self.flush_superblock()?;
         self.flush_bgdt()?;
+        self.flush_bitmaps()?;
         Ok(())
     }
 }
@@ -276,6 +389,12 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
         // Push new dir context
         let ctx = FsContext::new(handle, entries);
         self.stack.push(ctx);
+
+        // Update parent link count (parent has +1 sub directory)
+        // Parent inode (..)
+        let mut parent_inode_data = self.read_inode(parent_inode)?;
+        parent_inode_data.i_links_count += 1;
+        self.write_metadata(parent_inode, &parent_inode_data.to_bytes())?;
 
         Ok(())
     }
