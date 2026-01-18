@@ -7,6 +7,7 @@ macro_rules! args {
     };
 }
 
+#[allow(dead_code)]
 pub trait ToArgs {
     fn to_args(self) -> Vec<String>;
 }

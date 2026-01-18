@@ -1,17 +1,22 @@
 [package]
 name = "rimpart"
-description = "Partition manager for rim ecosystem"
+description = "Partition manager for RIM ecosystem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["std"]
+alloc = []
 mem = ["rimio/mem", "alloc"]
 std = ["rimio/std", "alloc"]
-uefi = ["rimio/uefi", "alloc"]
-alloc = []
+uefi = ["rimio/uefi"]
+
 
 [dependencies]
 crc32fast = { version = "1.4.2", default-features = false }
@@ -23,3 +28,8 @@ zerocopy = { version = "0.8.25", default-features = false, features = [
 
 [dev-dependencies]
 rimio = { path = "../rimio", default-features = false, features = ["mem"] }
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "gpt_crc_stream_bench"
+harness = false

@@ -2,27 +2,57 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
-use rimio::{BlockIO, BlockIOExt};
+use rimio::{RimIO, RimIOExt};
 
-use crate::core::cursor::ClusterCursor;
+use crate::core::cursor::{ClusterCursor, LinearCursor};
 pub use crate::core::resolver::*;
 
 use crate::core::FsCursorError;
 use crate::core::utils::path_utils::*;
 use crate::fs::exfat::{constant::*, meta::*, types::*};
 
-pub struct ExFatResolver<'a, IO: BlockIO + ?Sized> {
+pub struct ExFatResolver<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     meta: &'a ExFatMeta,
 }
 
-impl<'a, IO: BlockIO + ?Sized> ExFatResolver<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> ExFatResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExFatMeta) -> Self {
         Self { io, meta }
     }
+
+    /// Internal helper to get the entry details
+    fn resolve_entry(&mut self, path: &str) -> FsResolverResult<ExFatEntries> {
+        if path.is_empty() || path == "/" {
+            // Root is a directory, effectively consistent but special case
+            return Err(FsResolverError::Invalid(
+                "Cannot resolve file entry for root",
+            ));
+        }
+
+        let components = split_path(path);
+        let mut cluster = self.meta.root_unit();
+
+        for (i, comp) in components.iter().enumerate() {
+            let entry =
+                find_in_dir(self.io, self.meta, cluster, comp)?.ok_or(FsResolverError::NotFound)?;
+
+            if i == components.len() - 1 {
+                return Ok(entry);
+            }
+
+            if !entry.is_dir() {
+                return Err(FsResolverError::Invalid(
+                    "Expected directory for intermediate component",
+                ));
+            }
+            cluster = entry.first_cluster();
+        }
+        Err(FsResolverError::Invalid("Invalid path"))
+    }
 }
 
-impl<'a, IO: BlockIO + ?Sized> FsResolver for ExFatResolver<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> FsResolver for ExFatResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, cluster, _) = self.resolve_path(path)?;
         crate::ensure!(is_dir, FsResolverError::Invalid("Expected a directory"));
@@ -36,33 +66,45 @@ impl<'a, IO: BlockIO + ?Sized> FsResolver for ExFatResolver<'a, IO> {
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (is_dir, first_cluster, size) = self.resolve_path(path)?;
-        crate::ensure!(!is_dir, FsResolverError::Invalid("Expected a file"));
+        let entry = self.resolve_entry(path)?;
+        crate::ensure!(!entry.is_dir(), FsResolverError::Invalid("Expected a file"));
 
+        let size = entry.size();
         if size == 0 {
             return Ok(Vec::new());
         }
 
-        let cs = self.meta.unit_size();
+        let first_cluster = entry.first_cluster();
+        let is_contiguous = entry.stream.is_contiguous();
+
         let mut out = vec![0u8; size];
-        let mut written = 0usize;
 
-        let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
-        cur.for_each_run(self.io, |io, start, len| {
-            if written >= out.len() {
-                return Ok(());
+        if is_contiguous {
+            // OPTIMIZATION: Use LinearCursor to bypass FAT table
+            let mut cur = LinearCursor::from_len_bytes_safe(self.meta, first_cluster, size as u64);
+            cur.read_into(self.io, size, &mut out)?;
+        } else {
+            // Standard path: Use ClusterCursor to chase FAT chain
+            let cs = self.meta.unit_size();
+            let mut written = 0usize;
+            let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
+            cur.for_each_run(self.io, |io, start, len| {
+                if written >= out.len() {
+                    return Ok(());
+                }
+                let off = self.meta.unit_offset(start);
+                let bytes = (len as usize) * cs;
+                let to_copy = core::cmp::min(bytes, out.len() - written);
+                io.read_at(off, &mut out[written..written + to_copy])?;
+                written += to_copy;
+                Ok(())
+            })?;
+
+            if written < out.len() {
+                crate::bail!("short_stream_read");
             }
-            let off = self.meta.unit_offset(start);
-            let bytes = (len as usize) * cs;
-            let to_copy = core::cmp::min(bytes, out.len() - written);
-            io.read_at(off, &mut out[written..written + to_copy])?;
-            written += to_copy;
-            Ok(())
-        })?;
-
-        if written < out.len() {
-            crate::bail!("short_stream_read");
         }
+
         Ok(out)
     }
 
@@ -70,26 +112,17 @@ impl<'a, IO: BlockIO + ?Sized> FsResolver for ExFatResolver<'a, IO> {
         if path.is_empty() || path == "/" {
             return Ok((true, self.meta.root_unit(), 0));
         }
-        let components = split_path(path);
-        let mut cluster = self.meta.root_unit();
 
-        for (i, comp) in components.iter().enumerate() {
-            let entry =
-                find_in_dir(self.io, self.meta, cluster, comp)?.ok_or(FsResolverError::NotFound)?;
-            let is_last = i == components.len() - 1;
-            let is_dir = entry.is_dir();
-            let next = entry.first_cluster();
-            let size = entry.size();
+        // Reuse resolve_entry but handle the error transformation if needed
+        // Or just keep the logic for backward compat if resolve_path is public trait
+        // Wait, resolve_path is FsResolver trait method?
+        // Yes, let's look at the trait definition.
+        // It returns (is_dir, start_cluster, size).
+        // It doesn't return the entry or flags.
+        // So we keep resolve_path as is for trait compliance, but read_file uses the optimized logic by doing its own lookup or using resolve_entry.
 
-            if is_last {
-                return Ok((is_dir, next, size));
-            } else {
-                crate::ensure!(is_dir, FsResolverError::Invalid("Expected a directory"));
-            }
-
-            cluster = next;
-        }
-        Err(FsResolverError::Invalid("Invalid path"))
+        let entry = self.resolve_entry(path)?;
+        Ok((entry.is_dir(), entry.first_cluster(), entry.size()))
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
@@ -116,7 +149,7 @@ impl<'a, IO: BlockIO + ?Sized> FsResolver for ExFatResolver<'a, IO> {
     }
 }
 
-fn read_dir_entries<IO: BlockIO + ?Sized>(
+fn read_dir_entries<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     start_cluster: u32,
@@ -126,8 +159,7 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
     let cs = meta.unit_size();
     let mut entries: Vec<ExFatEntries> = Vec::new();
 
-    let mut lfn_stack: Vec<[u8; 32]> = Vec::new();
-    lfn_stack.reserve(16);
+    let mut lfn_stack: Vec<[u8; 32]> = Vec::with_capacity(16);
 
     let mut raw_primary: Option<[u8; 32]> = None;
     let mut raw_stream: Option<[u8; 32]> = None;
@@ -147,20 +179,20 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
         for chunk in buf[..].chunks_exact(32) {
             match chunk[0] {
                 EXFAT_ENTRY_PRIMARY => {
-                    if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take()) {
-                        if let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s) {
-                            entries.push(e);
-                        }
+                    if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take())
+                        && let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s)
+                    {
+                        entries.push(e);
                     }
                     lfn_stack.clear();
-                    raw_primary = Some(chunk.try_into().unwrap());
+                    raw_primary = Some(chunk.try_into().unwrap_or([0u8; 32]));
                     raw_stream = None;
                 }
                 EXFAT_ENTRY_STREAM => {
-                    raw_stream = Some(chunk.try_into().unwrap());
+                    raw_stream = Some(chunk.try_into().unwrap_or([0u8; 32]));
                 }
                 EXFAT_ENTRY_NAME => {
-                    lfn_stack.push(chunk.try_into().unwrap());
+                    lfn_stack.push(chunk.try_into().unwrap_or([0u8; 32]));
                 }
                 EXFAT_EOD => {
                     if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take()) {
@@ -189,10 +221,10 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
         Err(e) => return Err(FsResolverError::Cursor(e)),
     }
 
-    if let (Some(p), Some(s)) = (raw_primary, raw_stream) {
-        if let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s) {
-            entries.push(e);
-        }
+    if let (Some(p), Some(s)) = (raw_primary, raw_stream)
+        && let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s)
+    {
+        entries.push(e);
     }
 
     entries.sort_by(|a, b| {
@@ -206,12 +238,12 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
     Ok(entries)
 }
 
-/// Recherche `target` dans le répertoire `dir_cluster` (exFAT).
-/// Retourne la première entrée correspondante, sinon None.
-/// - Parcours par runs pour limiter les I/O
-/// - Autorise les clusters système (root dir)
-/// - Garde l'état PRIMARY/STREAM/NAME à cheval entre clusters **et** runs
-pub fn find_in_dir<IO: BlockIO + ?Sized>(
+/// Search for `target` in directory `dir_cluster` (exFAT).
+/// Returns the first matching entry, or `None`.
+/// - Traversal by runs to minimize I/O.
+/// - Allows system clusters (root directory, etc.).
+/// - Maintains PRIMARY/STREAM/NAME state across clusters and runs.
+pub fn find_in_dir<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     dir_cluster: u32,
@@ -219,29 +251,29 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
 ) -> FsResolverResult<Option<ExFatEntries>> {
     let cs = meta.unit_size();
 
-    // Répertoires → autoriser système (root, etc.)
+    // Directories -> allow system clusters (root, etc.)
     let mut cur = ClusterCursor::new(meta, dir_cluster);
 
-    // État d’assemblage persistant entre runs
+    // Assembly state persistent across runs
     let mut lfn_stack = vec![];
     let mut raw_primary: Option<[u8; 32]> = None;
     let mut raw_stream: Option<[u8; 32]> = None;
 
-    // Résultat capturé + sentinelle pour early-exit
+    // Captured result + sentinel for early-exit
     let mut found: Option<ExFatEntries> = None;
 
     let res = cur.for_each_run(io, |io, run_start, run_len| {
-        // Lire le run d'un bloc
+        // Read the run as a single block
         let total = (run_len as usize) * cs;
         let mut data = vec![0u8; total];
         let off0 = meta.unit_offset(run_start);
         io.read_block_best_effort(off0, &mut data, total)?;
 
-        // Parcourir les entrées 32 octets
+        // Traverse 32-byte entries
         for chunk in data.chunks_exact(32) {
             match chunk[0] {
                 EXFAT_ENTRY_PRIMARY => {
-                    // Si on avait une entrée en cours, tenter de la finaliser
+                    // Try to finalize the entry currently being assembled
                     if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take())
                         && let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s)
                         && e.name_bytes_eq(target)
@@ -249,21 +281,21 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
                         found = Some(e);
                         return Err(FsCursorError::Other("found"));
                     }
-                    // Démarrer une nouvelle entrée
+                    // Start assembling a new entry
                     lfn_stack.clear();
-                    raw_primary = Some(chunk.try_into().unwrap());
+                    raw_primary = Some(chunk.try_into().unwrap_or([0u8; 32]));
                     raw_stream = None;
                 }
                 EXFAT_ENTRY_STREAM => {
-                    // Associer au PRIMARY courant (s'il existe)
-                    raw_stream = Some(chunk.try_into().unwrap());
+                    // Associate with the current PRIMARY (if it exists)
+                    raw_stream = Some(chunk.try_into().unwrap_or([0u8; 32]));
                 }
                 EXFAT_ENTRY_NAME => {
-                    // Accumuler les NAME (UTF-16LE par fragments)
-                    lfn_stack.push(chunk.try_into().unwrap());
+                    // Accumulate fragments of the NAME entry (UTF-16LE)
+                    lfn_stack.push(chunk.try_into().unwrap_or([0u8; 32]));
                 }
                 EXFAT_EOD => {
-                    // Fin logique du dir: flush la dernière entrée potentielle
+                    // Logical end of directory: flush the last potential entry
                     if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take()) {
                         let e = ExFatEntries::from_raw(&lfn_stack, &p, &s)?;
                         if e.name_bytes_eq(target) {
@@ -271,10 +303,10 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
                             return Err(FsCursorError::Other("found"));
                         }
                     }
-                    return Ok(()); // Plus rien après
+                    return Ok(()); // Nothing follows
                 }
                 _ => {
-                    // Entrée inconnue / padding → si on était en cours, on reset proprement
+                    // Unknown entry or padding -> if an entry was being assembled, reset it
                     if raw_primary.is_none() && raw_stream.is_none() {
                         continue;
                     }
@@ -289,7 +321,7 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
 
     match res {
         Ok(()) => {
-            // Fin de chaîne sans EOD: flush final au cas où PRIMARY/STREAM était en cours
+            // End of chain without EOD: final flush in case PRIMARY/STREAM was in progress
             if let (Some(p), Some(s)) = (raw_primary, raw_stream)
                 && let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s)
                 && e.name_bytes_eq(target)

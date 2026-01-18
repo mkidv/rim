@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check & Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Check
+        run: cargo check --all-features
+      - name: Security Audit
+        # Check for vulnerabilities in dependencies
+        run: cargo audit
+
+  test:
+    name: Test Suite
+    needs: check
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Tests
+        run: cargo test --all-features
+
+  lint:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Generate Coverage
+        run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }} # Optional for public repos
+          fail_ci_if_error: false
+
+  integrity:
+    name: Image Integrity Verification
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Filesystem Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dosfstools exfatprogs e2fsprogs
+
+      - name: Build rimgen (Release)
+        run: cargo build --release -p rimgen
+
+      - name: Create Test Layout
+        run: |
+          cat > layout.toml <<EOF
+          [[partitions]]
+          name = "efi"
+          size = { Fixed = 32 }
+          fs = "Fat32"
+          bootable = true
+
+          [[partitions]]
+          name = "data"
+          size = { Fixed = 32 }
+          fs = "ExFat"
+
+          [[partitions]]
+          name = "linux"
+          size = { Fixed = 64 }
+          fs = "Ext4"
+          EOF
+
+      - name: Generate Disk Image
+        run: ./target/release/rimgen layout.toml --output test_image.img
+
+      - name: Verify Partitions (fsck)
+        run: |
+          # Attach loop device with partitions
+          sudo losetup -P -f test_image.img
+
+          # Find the loop device name associated with the file
+          LOOPDEV=$(losetup -j test_image.img | cut -d: -f1)
+          echo "Attached to $LOOPDEV"
+          ls -l /dev/loop*
+
+          # Verify FAT32
+          echo ">>> Checking FAT32..."
+          sudo fsck.vfat -v -n ${LOOPDEV}p1
+
+          # Verify ExFAT
+          echo ">>> Checking ExFAT..."
+          sudo fsck.exfat -n ${LOOPDEV}p2
+
+          # Verify EXT4
+          echo ">>> Checking Ext4..."
+          sudo e2fsck -n -f ${LOOPDEV}p3
+
+          echo ">>> Integrity Checks Passed"
+
+          # Cleanup
+          sudo losetup -d $LOOPDEV

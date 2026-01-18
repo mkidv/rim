@@ -1,34 +1,36 @@
 // SPDX-License-Identifier: MIT
 
 use crate::FsMeta;
-use crate::core::FsCursorResult;
-use crate::core::errors::{FsCursorError, FsResult};
+use crate::core::errors::FsCursorError;
+use crate::core::{FsCursorResult, fat};
 use rimio::prelude::*;
 
-/// Trait pour les systèmes de fichiers à allocation par clusters (FAT32, ExFAT, etc.)
+/// Trait for cluster-based filesystems (FAT32, ExFAT, etc.)
 pub trait ClusterMeta: FsMeta<u32> {
     const EOC: u32;
     const FIRST_CLUSTER: u32;
     const ENTRY_SIZE: usize;
-    const ENTRY_MASK: u32; // Masque pour isoler les bits utiles
+    const ENTRY_MASK: u32; // Mask to isolate useful bits
 
-    /// Calcule l'offset d'une entrée FAT
+    /// Computes the offset of a FAT entry
     fn fat_entry_offset(&self, cluster: u32, fat_index: u8) -> u64;
 
-    /// Vérifie si un cluster est End-of-Chain
+    /// Checks if a cluster is End-of-Chain
     fn is_eoc(&self, cluster: u32) -> bool {
         cluster >= Self::EOC
     }
+
+    fn num_fats(&self) -> u8;
 }
 
-/// Curseur générique pour les systèmes de fichiers à allocation par cluster.
+/// Generic cursor for cluster-based filesystems.
 ///
-/// Ce curseur abstrait la logique de parcours des chaînes de clusters et optimise
-/// automatiquement les I/O en groupant les runs contigus.
+/// This cursor abstracts cluster chain traversal logic and automatically
+/// optimizes I/O by grouping contiguous runs.
 ///
 /// # Type Parameters
-/// - `M`: Type implémentant `FsMeta<u32>` (Fat32Meta, ExFatMeta, etc.)
-/// - `C`: Constantes spécifiques au FS (EOC, FIRST_CLUSTER, etc.)
+/// - `M`: Type implementing `FsMeta<u32>` (Fat32Meta, ExFatMeta, etc.)
+/// - `C`: FS-specific constants (EOC, FIRST_CLUSTER, etc.)
 #[derive(Debug)]
 pub struct ClusterCursor<'a, M>
 where
@@ -73,10 +75,10 @@ where
         (min..=max).contains(&c)
     }
 
-    /// Une étape d'itération (utilise read_fat_entry intégré)
+    /// One iteration step (uses integrated read_fat_entry)
     pub fn next_with<IO>(&mut self, io: &mut IO) -> Option<FsCursorResult<u32>>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
     {
         let c = self.current?;
         self.seen += 1;
@@ -85,11 +87,11 @@ where
             return Some(Err(FsCursorError::LoopDetected));
         }
 
-        let next = match read_fat_entry(io, self.meta, c, 0) {
+        let next = match fat::chain::read_entry(io, self.meta, c, 0) {
             Ok(n) => n,
             Err(e) => {
                 self.current = None;
-                return Some(Err(e));
+                return Some(Err(e.into()));
             }
         };
 
@@ -110,10 +112,10 @@ where
         Some(Ok(c))
     }
 
-    /// Itération cluster par cluster via callback
+    /// Iterate cluster by cluster via callback
     pub fn for_each_cluster<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
         F: FnMut(&mut IO, u32) -> FsCursorResult<()>,
     {
         while let Some(res) = self.next_with(io) {
@@ -123,10 +125,10 @@ where
         Ok(())
     }
 
-    /// Itère par runs contigus (start,len) via callback
+    /// Iterate by contiguous runs (start, len) via callback
     pub fn for_each_run<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
         F: FnMut(&mut IO, u32, u32) -> FsCursorResult<()>,
     {
         let mut start: Option<u32> = None;
@@ -164,18 +166,18 @@ where
         Ok(())
     }
 
-    /// Fabrique un itérateur "cluster par cluster"
+    /// Creates a cluster-by-cluster iterator
     pub fn iter<'b, IO>(&'b mut self, io: &'b mut IO) -> ClusterIter<'a, 'b, M, IO>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
     {
         ClusterIter { cursor: self, io }
     }
 
-    /// Fabrique un itérateur de **runs** contigus
+    /// Creates an iterator over contiguous **runs**
     pub fn runs<'b, IO>(&'b mut self, io: &'b mut IO) -> RunIter<'a, 'b, M, IO>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
     {
         RunIter {
             cursor: self,
@@ -188,7 +190,7 @@ where
     }
 }
 
-/// Itérateur cluster par cluster
+/// Cluster-by-cluster iterator
 pub struct ClusterIter<'a, 'b, M, IO: ?Sized>
 where
     M: ClusterMeta,
@@ -200,7 +202,7 @@ where
 impl<'a, 'b, M, IO: ?Sized> Iterator for ClusterIter<'a, 'b, M, IO>
 where
     M: ClusterMeta,
-    IO: BlockIO,
+    IO: RimIO,
 {
     type Item = FsCursorResult<u32>;
 
@@ -209,7 +211,7 @@ where
     }
 }
 
-/// Itérateur de runs contigus
+/// Contiguous runs iterator
 pub struct RunIter<'a, 'b, M, IO: ?Sized>
 where
     M: ClusterMeta,
@@ -225,7 +227,7 @@ where
 impl<'a, 'b, M, IO: ?Sized> Iterator for RunIter<'a, 'b, M, IO>
 where
     M: ClusterMeta,
-    IO: BlockIO,
+    IO: RimIO,
 {
     type Item = FsCursorResult<(u32, u32)>;
 
@@ -243,9 +245,9 @@ where
                             self.prev = Some(c);
                         }
                         Some(_) => {
-                            // casse de run → on retourne le précédent
+                            // Run break → return the previous one
                             let out = (self.start.unwrap(), self.len);
-                            // initialise le nouveau run avec c
+                            // initialize the new run with c
                             self.start = Some(c);
                             self.prev = Some(c);
                             self.len = 1;
@@ -263,7 +265,7 @@ where
                     return Some(Err(e));
                 }
                 None => {
-                    // fin : s'il reste un run incomplet, on le retourne une dernière fois
+                    // End: if there's an incomplete run left, return it one last time
                     self.finished = true;
                     if let (Some(s), l @ 1..) = (self.start, self.len) {
                         return Some(Ok((s, l)));
@@ -275,40 +277,8 @@ where
     }
 }
 
-/// Lecture *générique* d'une entrée FAT, sans allocation.
-/// Supporte ENTRY_SIZE = 1/2/4 et la sélection de la copie (fat_index).
-#[inline]
-pub fn read_fat_entry<M, IO>(
-    io: &mut IO,
-    meta: &M,
-    cluster: u32,
-    fat_index: u8,
-) -> FsCursorResult<u32>
-where
-    M: ClusterMeta,
-    IO: BlockIO + ?Sized,
-{
-    let off = meta.fat_entry_offset(cluster, fat_index);
-
-    // tampon stack maximal 4 octets (FAT12/16/32 couvert)
-    let mut buf = [0u8; 4];
-    let n = M::ENTRY_SIZE;
-    debug_assert!(n <= 4 && n != 0);
-
-    io.read_at(off, &mut buf[..n])?;
-
-    let raw = match n {
-        4 => u32::from_le_bytes(buf),
-        2 => u16::from_le_bytes([buf[0], buf[1]]) as u32,
-        1 => buf[0] as u32,
-        _ => return Err(FsCursorError::UnsupportedEntrySize),
-    };
-
-    Ok(raw & M::ENTRY_MASK)
-}
-
-/// Curseur linéaire (contigu) : parcourt une plage [start .. start+clusters).
-/// Ne consulte PAS la FAT. Idéal pour NOFATCHAIN (Upcase, Bitmap, etc.).
+/// Linear (contiguous) cursor: traverses range [start .. start+clusters).
+/// Does NOT consult the FAT. Ideal for NOFATCHAIN entries (Upcase, Bitmap, etc.).
 #[derive(Clone, Copy, Debug)]
 pub struct LinearCursor<'a, M: ClusterMeta> {
     meta: &'a M,
@@ -334,7 +304,7 @@ impl<'a, M: ClusterMeta> Iterator for LinearCursor<'a, M> {
 }
 
 impl<'a, M: ClusterMeta> LinearCursor<'a, M> {
-    /// Construction depuis un nombre de clusters
+    /// Constructs from a cluster count
     #[inline]
     pub fn from_clusters_safe(meta: &'a M, start: u32, clusters: u32) -> Self {
         Self {
@@ -345,7 +315,7 @@ impl<'a, M: ClusterMeta> LinearCursor<'a, M> {
         }
     }
 
-    /// Construction depuis une longueur logique en octets
+    /// Constructs from a logical length in bytes
     #[inline]
     pub fn from_len_bytes_safe(meta: &'a M, start: u32, len_bytes: u64) -> Self {
         let cs = meta.unit_size() as u64;
@@ -363,7 +333,7 @@ impl<'a, M: ClusterMeta> LinearCursor<'a, M> {
         }
     }
 
-    /// Construction depuis une longueur logique en octets
+    /// Constructs from a logical length in bytes
     #[inline]
     pub fn from_len_bytes(meta: &'a M, start: u32, len_bytes: u64) -> Self {
         let cs = meta.unit_size() as u64;
@@ -382,37 +352,37 @@ impl<'a, M: ClusterMeta> LinearCursor<'a, M> {
         (min..=max).contains(&c)
     }
 
-    /// Itère par **runs contigus** (start, len) et appelle `f(io, start, len)`.
-    /// `IO` est passé pour permettre un batching I/O direct dans le callback.
+    /// Iterates by **contiguous runs** (start, len) and calls `f(io, start, len)`.
+    /// `IO` is passed to allow direct I/O batching in the callback.
     pub fn for_each_run<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: BlockIO + ?Sized,
+        IO: RimIO + ?Sized,
         F: FnMut(&mut IO, u32, u32) -> FsCursorResult<()>,
     {
-        // Comme c’est linéaire, l’intégralité de la plage est un seul run si la taille > 0.
+        // Since it's linear, the entire range is a single run if size > 0.
         if self.next < self.end_excl {
             let start = self.next;
             if !self.in_bounds(start) {
                 return Err(FsCursorError::InvalidCluster(start));
             }
             let len = self.end_excl - self.next;
-            // validation minimale: borne haute
+            // minimal validation: upper bound
             let last = start.saturating_add(len - 1);
 
             if !self.in_bounds(last) {
                 return Err(FsCursorError::InvalidCluster(last));
             }
 
-            // Consomme d’un coup
+            // Consume everything at once
             self.next = self.end_excl;
             f(io, start, len)?;
         }
         Ok(())
     }
 
-    /// Lecture directe du stream dans `dst`, en batchant par runs.
-    /// `total_len` = bytes logiques à lire (tronque le dernier run si besoin).
-    pub fn read_into<IO: BlockIO + ?Sized>(
+    /// Reads stream directly into `dst`, batching by runs.
+    /// `total_len` = logical bytes to read (truncates last run if needed).
+    pub fn read_into<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
         total_len: usize,
@@ -426,7 +396,7 @@ impl<'a, M: ClusterMeta> LinearCursor<'a, M> {
             if written >= total_len {
                 return Ok(());
             }
-            // Taille en octets de ce run
+            // Size in bytes of this run
             let run_bytes = (run_len as usize) * cs;
             let to_copy = core::cmp::min(run_bytes, total_len - written);
             if to_copy > 0 {

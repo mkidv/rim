@@ -5,16 +5,20 @@ pub enum LogLevel {
     Verbose,
 }
 
-static mut LOG_LEVEL: LogLevel = LogLevel::Normal;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Normal as u8);
 
 pub fn set_log_level(level: LogLevel) {
-    unsafe {
-        LOG_LEVEL = level;
-    }
+    LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
 pub fn log_level() -> LogLevel {
-    unsafe { LOG_LEVEL }
+    match LOG_LEVEL.load(Ordering::Relaxed) {
+        0 => LogLevel::Quiet,
+        1 => LogLevel::Normal,
+        _ => LogLevel::Verbose,
+    }
 }
 
 #[macro_export]

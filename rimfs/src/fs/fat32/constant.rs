@@ -14,7 +14,7 @@ pub fn oem_name() -> [u8; 8] {
     out
 }
 
-// === Disk Layout Parameters ===
+// Disk Layout Parameters
 
 pub const FAT_MAX_SECTOR_SIZE: usize = 4096;
 pub const FAT_SECTOR_SIZE: u16 = 512; // BPB_BytsPerSec
@@ -27,22 +27,23 @@ pub const FAT_HEADS: u16 = 255; // BPB_NumHeads (CHS hint)
 pub const FAT_SECTORS_PER_TRACK: u16 = 63; // BPB_SecPerTrk (CHS hint)
 pub const FAT_HIDDEN_SECTORS: u32 = 0; // BPB_HiddSec
 
-// === FAT Region Parameters ===
+// FAT Region Parameters
 
 pub const FAT_ENTRY_SIZE: usize = 4;
 pub const FAT_MEDIA_DESCRIPTOR: u8 = 0xF8; // BPB_Media
 pub const FAT_EOC: u32 = 0x0FFFFFF8;
 pub const FAT_FIRST_CLUSTER: u32 = 2;
 pub const FAT_ROOT_CLUSTER: u32 = 2; // BPB_RootClus
+pub const FAT_BAD_CLUSTER: u32 = 0x0FFFFFF7;
 
-// === Special Sector Numbers ===
+// Special Sector Numbers
 
 pub const FAT_VBR_SECTOR: u64 = 0;
 pub const FAT_VBR_BACKUP_SECTOR: u64 = 6;
 pub const FAT_FSINFO_SECTOR: u64 = 1;
 pub const FAT_FSINFO_BACKUP_SECTOR: u64 = 7;
 
-// === Standard FAT32 BPB / Extended BPB / FSINFO Constants ===
+// Standard FAT32 BPB / Extended BPB / FSINFO Constants
 
 pub const FAT_JUMP_BOOT: [u8; 3] = [0xEB, 0x58, 0x90]; // BS_jmpBoot
 // pub const FAT_OEM_NAME: &[u8; 8] = b"MSWIN4.1"; // BS_OEMName

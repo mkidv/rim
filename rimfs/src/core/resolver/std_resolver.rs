@@ -5,17 +5,17 @@
 #[cfg(feature = "std")]
 use std::{fs, io::Error, path::Path};
 
-use rimio::errors::BlockIOError;
+use rimio::errors::RimIOError;
 
 use crate::core::{
     resolver::*,
     utils::{path_utils::*, time_utils::*},
 };
 
-/// Standard filesystem parser implementation of [`FsParser`] using the local filesystem.
+/// Standard filesystem parser implementation of [`FsResolver`] using the local filesystem.
 ///
 /// This parser operates on the real filesystem using `std::fs`, and implements the expected behavior
-/// of [`FsParser`] for injection and checking.
+/// of [`FsResolver`] for injection and checking.
 ///
 /// Paths are normalized with `/` separators.
 /// This implementation is only available when the `std` feature is enabled.
@@ -91,7 +91,7 @@ impl FsResolver for StdResolver {
             mode: {
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;             
+                    use std::os::unix::fs::PermissionsExt;
                     Some(meta.permissions().mode())
                 }
                 #[cfg(not(unix))]
@@ -122,7 +122,7 @@ impl FsResolver for StdResolver {
 #[cfg(feature = "std")]
 impl From<Error> for FsResolverError {
     fn from(e: Error) -> Self {
-        FsResolverError::IO(BlockIOError::from(e))
+        FsResolverError::IO(RimIOError::from(e))
     }
 }
 

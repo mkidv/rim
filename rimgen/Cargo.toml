@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # [lib]
 # name = "rimgen"
@@ -21,6 +25,7 @@ host-scripts = ["which"]
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
+indicatif = "0.17.8"
 rimio = { path = "../rimio" }
 rimpart = { path = "../rimpart" }
 rimfs = { path = "../rimfs" }
@@ -33,3 +38,4 @@ which = { version = "8.0.0", optional = true }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }
+colored = "3.1.1"

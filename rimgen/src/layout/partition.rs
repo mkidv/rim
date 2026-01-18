@@ -17,7 +17,11 @@ pub struct Partition {
     pub bootable: bool,
     #[serde(default)]
     pub guid: Option<uuid::Uuid>,
-    pub index: Option<usize>
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub payload: Option<std::path::PathBuf>,
+    pub label: Option<String>,
+    pub uuid: Option<String>,
 }
 
 impl Partition {
@@ -32,11 +36,26 @@ impl Partition {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if matches!(self.fs, Filesystem::Raw | Filesystem::None) && self.mountpoint.is_some() {
+        if matches!(self.fs, Filesystem::Raw | Filesystem::None) {
+            if self.mountpoint.is_some() {
+                anyhow::bail!(
+                    "Partition '{}' is marked as Raw/None but has a mountpoint '{}'",
+                    self.name,
+                    self.mountpoint.as_deref().unwrap_or("")
+                );
+            }
+        } else if self.payload.is_some() {
             anyhow::bail!(
-                "Partition '{}' is marked as Raw/None but has a mountpoint '{}'",
+                "Partition '{}' has a 'payload' defined but is not of type 'raw' (fs={}). Payload is only for raw partitions.",
                 self.name,
-                self.mountpoint.as_deref().unwrap_or("")
+                self.fs
+            );
+        }
+
+        if self.payload.is_some() && self.mountpoint.is_some() {
+            anyhow::bail!(
+                "Partition '{}' cannot have both 'mountpoint' and 'payload'.",
+                self.name
             );
         }
 
@@ -88,7 +107,10 @@ impl Partition {
         if self.kind.is_some() && effective_kind != expected_kind {
             crate::log_verbose!(
                 "Warning: Partition '{}' uses fs '{}' but type '{:?}' (expected {:?})",
-                self.name, self.fs, effective_kind, expected_kind
+                self.name,
+                self.fs,
+                effective_kind,
+                expected_kind
             );
         }
 

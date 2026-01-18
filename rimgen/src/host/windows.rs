@@ -20,6 +20,7 @@ impl WinScript {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_debug(mut self) -> Self {
         self.debug = true;
         self
@@ -33,7 +34,7 @@ impl WinScript {
     pub fn new_from(layout: &Layout, vhd_path: &Path) -> anyhow::Result<Self> {
         let mut ps = WinScript::new();
 
-        // ✅ S’assurer que le module Storage est chargé
+        // ✅ Ensure the Storage module is loaded
         ps.add("Import-Module Storage -ErrorAction Stop");
 
         ps.add("try {");
@@ -54,12 +55,12 @@ impl WinScript {
             let source_path_buf = layout.base_dir.join(mountpoint);
             let source_path = source_path_buf.display();
 
-            // 🎯 Récupère l'objet Partition PowerShell
+            // 🎯 Get the PowerShell Partition object
             ps.add(format!(
                 "$p = Get-Partition -DiskNumber $diskNumber -PartitionNumber {part_index}"
             ));
 
-            // 🧼 Ligne de formatage robuste (pipeline)
+            // 🧼 Robust formatting line (pipeline)
             let format_cmd = part.fs.build_format_command(&part.name, "$p")?.join(" ");
             ps.add(format_cmd);
 
@@ -90,7 +91,7 @@ impl WinScript {
         drop(script);
 
         if self.debug {
-            println!("==[Windows Script]==\n{}\n==================", content);
+            println!("==[Windows Script]==\n{content}\n==================");
         }
 
         let status = Command::new("powershell")

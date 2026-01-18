@@ -67,11 +67,20 @@ fn parse_size_mb(size: &str) -> anyhow::Result<u64> {
 }
 
 pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> anyhow::Result<u64> {
+    // Heuristic constants for auto-sizing
+    // improved to avoid "No space left on device" errors.
+    const BLOCK_SIZE: u64 = 4096;
+    const OVERHEAD_FACTOR: f64 = 1.10; // 10% overhead for metadata, tables, journals
+    const FIXED_SLACK: u64 = 16 * 1024 * 1024; // 16MB fixed slack for robustness
+
     fn accumulate(path: &Path) -> anyhow::Result<u64> {
         if path.is_file() {
-            Ok(fs::metadata(path)?.len())
+            let len = fs::metadata(path)?.len();
+            // Round up to block size to account for slack space
+            let blocks = len.div_ceil(BLOCK_SIZE);
+            Ok(blocks * BLOCK_SIZE)
         } else if path.is_dir() {
-            let mut total = 0;
+            let mut total = BLOCK_SIZE; // Assumes a directory takes at least one block
             for entry in fs::read_dir(path)? {
                 let entry = match entry {
                     Ok(e) => e,
@@ -79,12 +88,16 @@ pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> anyhow::Result<u64> {
                 };
                 total += accumulate(&entry.path()).unwrap_or(0);
             }
-
             Ok(total)
         } else {
             Ok(0)
         }
     }
 
-    accumulate(dir.as_ref())
+    let raw_needed = accumulate(dir.as_ref())?;
+    // Apply safety factors
+    let with_overhead = (raw_needed as f64 * OVERHEAD_FACTOR) as u64;
+    let total = with_overhead + FIXED_SLACK;
+
+    Ok(total)
 }

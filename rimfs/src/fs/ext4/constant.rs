@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// rimgen/fs/ext4/constant.rs
 
-// === Superblock ===
+// Superblock
 
 // Magic number EXT4 (in s_magic)
 pub const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
@@ -14,7 +13,7 @@ pub const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
 // Logical block where the superblock is located (in disk image)
 pub const EXT4_SUPERBLOCK_BLOCK_NUMBER: u32 = 0;
 
-// === Block Size ===
+// Block Size
 
 // Default value
 pub const EXT4_DEFAULT_BLOCK_SIZE: u32 = 4096;
@@ -23,7 +22,7 @@ pub const EXT4_DEFAULT_BLOCK_SIZE: u32 = 4096;
 pub const EXT4_MIN_BLOCK_SIZE: u32 = 1024;
 pub const EXT4_MAX_BLOCK_SIZE: u32 = 65536;
 
-// === Inode ===
+// Inode
 
 pub const EXT4_ROOT_INODE: u32 = 2;
 pub const EXT4_FIRST_INODE: u32 = 11;
@@ -31,7 +30,7 @@ pub const EXT4_DEFAULT_INODE_SIZE: u32 = 256; // Can be 128 or 256
 pub const EXT4_MIN_INODE_SIZE: usize = 128;
 pub const EXT4_MAX_INODE_SIZE: usize = 1024;
 
-// === Block Groups ===
+// Block Groups
 
 pub const EXT4_DEFAULT_BLOCKS_PER_GROUP: u32 = 8192;
 pub const EXT4_DEFAULT_INODES_PER_GROUP: u32 = 256;
@@ -39,12 +38,12 @@ pub const EXT4_DEFAULT_INODES_PER_GROUP: u32 = 256;
 // BGDT entry size
 pub const EXT4_BGDT_ENTRY_SIZE: usize = 64;
 
-// === Default UID / GID ===
+// Default UID / GID
 
 pub const EXT4_DEFAULT_UID: u16 = 0;
 pub const EXT4_DEFAULT_GID: u16 = 0;
 
-// === Inode Flags ===
+// Inode Flags
 
 // Inode uses EXTENTS (modern mode)
 pub const EXT4_INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
@@ -55,12 +54,12 @@ pub const EXT4_INODE_FLAG_INDEX: u32 = 0x0001_0000;
 // Immutable file
 pub const EXT4_INODE_FLAG_IMMUTABLE: u32 = 0x0000_0010;
 
-// === Journal ===
+// Journal
 
 // Default journal size (number of blocks)
 pub const EXT4_DEFAULT_JOURNAL_BLOCKS: u32 = 1024;
 
-// === Filesystem Features (Superblock flags) ===
+// Filesystem Features (Superblock flags)
 
 // Compatible features
 pub const EXT4_FEATURE_COMPAT_DIR_PREALLOC: u32 = 0x0001;
@@ -92,12 +91,25 @@ pub const EXT4_FEATURE_RO_COMPAT_GDT_CSUM: u32 = 0x0010;
 pub const EXT4_FEATURE_RO_COMPAT_DIR_NLINK: u32 = 0x0020;
 pub const EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
 
-// === Backup Groups ===
+// Backup Groups
 
 pub const EXT4_BACKUP_GROUPS: u32 = 2;
 
-// === Miscellaneous ===
+// Miscellaneous
+
+// Extent header magic number
+pub const EXT4_EXTENT_HEADER_MAGIC: u16 = 0xF30A;
 
 // End of block list value in EXTENTS
 pub const EXT4_EXTENT_EOF: u32 = 0xFFFFFFFF;
 pub const EXT4_ROOT_DIR_LINKS_COUNT: u16 = 2;
+
+// Directory Entry File Types
+pub const EXT4_FT_UNKNOWN: u8 = 0;
+pub const EXT4_FT_REG_FILE: u8 = 1;
+pub const EXT4_FT_DIR: u8 = 2;
+pub const EXT4_FT_CHRDEV: u8 = 3;
+pub const EXT4_FT_BLKDEV: u8 = 4;
+pub const EXT4_FT_FIFO: u8 = 5;
+pub const EXT4_FT_SOCK: u8 = 6;
+pub const EXT4_FT_SYMLINK: u8 = 7;

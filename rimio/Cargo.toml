@@ -1,17 +1,21 @@
 [package]
 name = "rimio"
-description = "Block IO abstraction for RIM ecosystem"
+description = "IO abstraction for RIM ecosystem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
-default = ["mem"]
-std   = ["alloc"]
+default = ["std"]
 alloc = ["zerocopy/alloc"]
 mem   = []
-uefi  = ["dep:uefi", "alloc"]
+std   = ["alloc"]
+uefi  = ["dep:uefi"]
 
 [dependencies]
 paste = "1.0.15"

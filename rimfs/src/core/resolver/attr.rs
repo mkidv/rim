@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#![cfg_attr(not(feature = "std"), no_std)]
 
 use time::OffsetDateTime;
 
@@ -48,6 +47,19 @@ impl FileAttributes {
         }
     }
 
+    /// Creates file attributes with current timestamp
+    #[cfg(feature = "std")]
+    pub fn new_file_now() -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            archive: true,
+            created: Some(now),
+            modified: Some(now),
+            accessed: Some(now),
+            ..Default::default()
+        }
+    }
+
     /// Merges another [`FileAttributes`] into `self`.
     ///
     /// For boolean fields, `other`'s `true` values override `self`.
@@ -82,6 +94,16 @@ impl FileAttributes {
     pub fn set_system(mut self, value: bool) -> Self {
         self.system = value;
         self
+    }
+
+    /// Compares structure only (ignores timestamps and mode).
+    /// Useful for tests where timestamps are set by the filesystem.
+    pub fn structural_eq(&self, other: &Self) -> bool {
+        self.read_only == other.read_only
+            && self.hidden == other.hidden
+            && self.system == other.system
+            && self.archive == other.archive
+            && self.dir == other.dir
     }
 }
 

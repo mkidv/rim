@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use ::alloc::vec::Vec;
+
 pub use crate::core::errors::{FsInjectorError, FsInjectorResult};
 pub use crate::core::resolver::FsNode;
 
@@ -16,6 +19,8 @@ impl<Handle: FsHandle> FsContext<Handle> {
     }
 }
 
+use rimio::prelude::RimIO;
+
 /*
   Injector contract (simple, no pending state):
 
@@ -29,9 +34,10 @@ impl<Handle: FsHandle> FsContext<Handle> {
         internal offset for later backpatch of DataLength).
       * Push the child context on the stack. Do NOT write to disk yet.
 
-  - write_file(name, content, attr)
-      * Allocate clusters as needed, write file content to disk,
-        then append the file entry into the CURRENT directory buffer.
+  - write_file(name, source, size, attr)
+      * Allocate clusters as needed for `size`.
+      * Stream `source` content to disk using `copy_range_smart`.
+      * Append the file entry into the CURRENT directory buffer.
 
   - flush_current()
       * Pop the top context and WRITE ONLY that context’s buffer to disk.
@@ -50,31 +56,22 @@ impl<Handle: FsHandle> FsContext<Handle> {
           write_dir()    // same as above for grandchildren, etc.
         flush_current()  // writes the child directory buffer to disk
       flush()            // final drain
-
-  Notes:
-    - Parent linkage is done immediately in write_dir(); there is no deferred
-      “pending directory” step.
-    - Directory buffers are written exactly once (at flush_current/flush).
-    - Implementations should guarantee that allocated clusters for directories
-      are not reused (reservation happens in write_dir()).
 */
 pub trait FsNodeInjector<Handle: FsHandle> {
     /// Create a new directory under the current directory.
-    /// Must:
-    /// - allocate & reserve the child's first cluster immediately
-    /// - initialize the child directory buffer in memory
-    /// - append the child's directory entry to the current parent buffer now
-    /// - push the child context on the internal stack
+    #[must_use = "injection result must be checked for errors"]
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult;
 
     /// Create a file under the current directory.
-    /// Should:
-    /// - allocate and write the file data to disk
-    /// - append the file entry to the current directory buffer
+    ///
+    /// Reads `size` bytes from `source` and writes them to the new file.
+    /// `size` must match the available data in `source`.
+    #[must_use = "injection result must be checked for errors"]
     fn write_file(
         &mut self,
         name: &str,
-        content: &[u8],
+        source: &mut dyn RimIO,
+        size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult;
 
@@ -87,10 +84,36 @@ pub trait FsNodeInjector<Handle: FsHandle> {
     /// buffers are written only at flush_current/flush.
     fn inject_node(&mut self, node: &FsNode, recurse: bool) -> FsInjectorResult {
         match node {
-            FsNode::File { name, content, attr } => {
-                self.write_file(name, content, attr)?;
+            FsNode::File {
+                name,
+                content,
+                attr,
+            } => {
+                // Wrapper for compatibility with in-memory trees (tests, small injections)
+                #[cfg(all(feature = "alloc", feature = "mem"))]
+                {
+                    let mut data = content.clone();
+                    let mut io = rimio::prelude::MemRimIO::new(&mut data);
+                    self.write_file(name, &mut io, content.len() as u64, attr)?;
+                }
+                #[cfg(all(feature = "alloc", not(feature = "mem")))]
+                {
+                    let _ = (name, content, attr);
+                    return Err(FsInjectorError::Other(
+                        "In-memory injection requires mem feature",
+                    ));
+                }
+                #[cfg(not(feature = "alloc"))]
+                {
+                    let _ = (name, content, attr);
+                    return Err(FsInjectorError::Other("In-memory injection requires alloc"));
+                }
             }
-            FsNode::Dir { name, children, attr } => {
+            FsNode::Dir {
+                name,
+                children,
+                attr,
+            } => {
                 if !name.is_empty() {
                     self.write_dir(name, attr)?; // reserve + link to parent + push child
                 }
@@ -114,6 +137,7 @@ pub trait FsNodeInjector<Handle: FsHandle> {
     }
 
     /// Full-tree injection helper.
+    #[must_use = "injection result must be checked for errors"]
     fn inject_tree(&mut self, node: &FsNode) -> FsInjectorResult {
         self.set_root_context(node)?;
         self.inject_node(node, true)?;
@@ -122,6 +146,7 @@ pub trait FsNodeInjector<Handle: FsHandle> {
     }
 
     /// Single-path injection helper (no recursion).
+    #[must_use = "injection result must be checked for errors"]
     fn inject_path(&mut self, node: &FsNode) -> FsInjectorResult {
         self.set_root_context(node)?;
         self.inject_node(node, false)?;

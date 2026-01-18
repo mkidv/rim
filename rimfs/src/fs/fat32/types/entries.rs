@@ -1,15 +1,15 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec, vec::Vec};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
+    FsMeta, Validate,
     core::{errors::*, resolver::*},
+    fat32::Fat32Meta,
     fs::fat32::{
         attr::*,
-        constant::{FAT_DOT_NAME, FAT_DOTDOT_NAME, FAT_EOD},
+        constant::{FAT_DOT_NAME, FAT_DOTDOT_NAME, FAT_EOD, FAT_FIRST_CLUSTER},
         utils,
     },
 };
@@ -230,6 +230,27 @@ impl Fat32Entry {
     }
 }
 
+impl Validate<Fat32Meta> for Fat32Entry {
+    type Err = FsParsingError;
+
+    fn neutralized(&self) -> Self {
+        *self
+    }
+
+    fn validate(&self, meta: &Fat32Meta) -> Result<(), Self::Err> {
+        // Forbid empty SFN (11 x ' ') for a real entry
+        if self.name.iter().all(|&b| b == b' ') {
+            return Err(FsParsingError::Invalid("SFN: empty 8.3 name"));
+        }
+        // If first_cluster != 0, it must be within the data range
+        let c = self.first_cluster();
+        if c != 0 && (c < FAT_FIRST_CLUSTER || c > meta.last_data_unit()) {
+            return Err(FsParsingError::Invalid("Entry: first_cluster out of range"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
 pub struct Fat32LFNEntry {
@@ -316,7 +337,7 @@ impl Fat32EodEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::fat32::utils::*;
+    use crate::{core::utils::checksum_utils::checksum, fs::fat32::utils::*};
 
     #[test]
     fn test_lfn_entry_serialization() {
@@ -329,12 +350,12 @@ mod tests {
         assert_eq!(raw[13], 0xAB); // Checksum
     }
 
-    /// Construit une entrée "fichier" avec LFN à partir d'un nom UTF-8.
+    /// Builds a "file" entry with LFN from a UTF-8 name.
     fn build_entries_for_name(name: &str) -> Fat32Entries {
-        // ATTR: fichier "archive" (0x20) par défaut
+        // ATTR: default to "archive" file (0x20)
         let attr = FileAttributes::new_file();
 
-        // Repr SFN + LFN
+        // SFN + LFN Representation
         let (short, is_lfn) = to_short_name(name);
         let lfn = if is_lfn {
             lfn_entries(name, &short)
@@ -356,7 +377,7 @@ mod tests {
         Fat32Entries { lfn, entry }
     }
 
-    /// Vérifie que l'ordre LFN est 0x40|N, N-1, ..., 1 (sur disque)
+    /// Checks that LFN order is 0x40|N, N-1, ..., 1 (on disk)
     fn assert_lfn_order_disk(lfns: &[Fat32LFNEntry]) {
         if lfns.is_empty() {
             return;
@@ -381,8 +402,8 @@ mod tests {
         }
     }
 
-    /// Vérifie le terminator 0x0000 dans le *dernier fragment* (le premier sur disque).
-    /// S'applique quand le nombre total de code units UTF-16 n'est PAS un multiple de 13.
+    /// Checks the 0x0000 terminator in the *last fragment* (the first one on disk).
+    /// Applies when the total number of UTF-16 code units is NOT a multiple of 13.
     fn assert_terminator_when_applicable(name: &str, lfns: &[Fat32LFNEntry]) {
         if lfns.is_empty() {
             return;
@@ -392,19 +413,19 @@ mod tests {
         let rem = u16s.len() % 13;
         if rem == 0 {
             return;
-        } // exactement plein: pas de place pour 0x0000, acceptable
+        } // exactly full: no room for 0x0000, acceptable
 
-        // Sur disque, la première entrée (0x40|N) contient la *fin* du nom.
+        // On disk, the first entry (0x40|N) contains the *end* of the name.
         let first = &lfns[0];
         let frag = first.extract_utf16();
         assert_eq!(
             frag[rem], 0x0000,
             "Expected 0x0000 terminator at position {rem} in last LFN chunk"
         );
-        // Les positions > rem doivent rester 0xFFFF (padding), on en vérifie quelques-unes
-        for i in (rem + 1)..13 {
+        // Positions > rem must stay 0xFFFF (padding), checking a few of them
+        for (i, &v) in frag.iter().enumerate().skip(rem + 1) {
             assert_eq!(
-                frag[i], 0xFFFF,
+                v, 0xFFFF,
                 "Expected 0xFFFF padding after terminator at pos {i}"
             );
         }
@@ -412,12 +433,12 @@ mod tests {
 
     #[test]
     fn test_sfn_only_roundtrip() {
-        // Nom ASCII 8.3 → pas de LFN
+        // ASCII 8.3 name → no LFN
         let e = build_entries_for_name("FOO.TXT");
         assert!(e.lfn.is_empty(), "SFN-only should not create LFN entries");
 
         let decoded = e.name().expect("decode SFN");
-        assert_eq!(decoded, "foo.txt"); // decode_sfn renvoie en lower-case côté utils
+        assert_eq!(decoded, "foo.txt"); // decode_sfn returns lower-case on the utils side
         assert!(
             e.name_bytes_eq("Foo.TXT"),
             "ASCII case-insensitive equality for SFN"
@@ -438,27 +459,27 @@ mod tests {
         for name in candidates {
             let e = build_entries_for_name(name);
 
-            // Doit avoir des LFN (sauf si 8.3 strict, ce qui n'est pas le cas ici)
+            // Must have LFNs (unless strict 8.3, which is not the case here)
             assert!(!e.lfn.is_empty(), "Expected LFN entries for {name}");
 
-            // Ordre + drapeaux + type
+            // Order + flags + type
             assert_lfn_order_disk(&e.lfn);
 
-            // Checksum cohérent avec le SFN
-            let sum = lfn_checksum(&e.entry.name);
+            // Checksum consistent with SFN
+            let checksum: u8 = checksum(&e.entry.name);
             assert!(
-                e.lfn.iter().all(|l| l.checksum == sum),
+                e.lfn.iter().all(|l| l.checksum == checksum),
                 "LFN checksum mismatch for {name}"
             );
 
-            // Terminator 0x0000 (si applicable)
+            // Terminator 0x0000 (if applicable)
             assert_terminator_when_applicable(name, &e.lfn);
 
-            // Décodage final
+            // Final decoding
             let decoded = e.name().expect("decode LFN");
             assert_eq!(decoded, name, "LFN round-trip failed for {name}");
 
-            // Égalité stricte pour Unicode (pas de case-folding)
+            // Strict equality for Unicode (no case-folding)
             assert!(
                 e.name_bytes_eq(name),
                 "Unicode strict equality should hold for {name}"
@@ -468,8 +489,8 @@ mod tests {
 
     #[test]
     fn test_lfn_long_255_chars() {
-        // 255 code units max (ici on construit ~255 U+0061 'a', puis suffixe)
-        let base = core::iter::repeat('a').take(240).collect::<String>();
+        // 255 code units max (here we build ~255 U+0061 'a', then suffix)
+        let base = "a".repeat(240);
         let name = format!("{base}_émoji_🐍.bin"); // total < 255 code units
         let e = build_entries_for_name(&name);
 
@@ -479,7 +500,7 @@ mod tests {
         let decoded = e.name().expect("decode long LFN");
         assert_eq!(decoded, name);
 
-        // Si non multiple de 13, vérifie terminator
+        // If not a multiple of 13, check terminator
         assert_terminator_when_applicable(&name, &e.lfn);
     }
 
@@ -489,7 +510,7 @@ mod tests {
         let self_cluster: u32 = 5;
         let parent_cluster: u32 = 2;
 
-        // Construire un buffer "tête de répertoire" minimal: '.', '..', EOD
+        // Build a minimal "directory head" buffer: '.', '..', EOD
         let mut buf = Vec::with_capacity(3 * 32);
         Fat32Entries::dot(self_cluster).to_raw_buffer(&mut buf); // slot 0
         Fat32Entries::dotdot(parent_cluster).to_raw_buffer(&mut buf); // slot 1
@@ -499,7 +520,7 @@ mod tests {
 
         // -------- slot 0: '.' --------
         let s0 = &buf[0..32];
-        // Nom SFN = ".          " (1 point + 10 espaces)
+        // SFN Name = ".          " (1 dot + 10 spaces)
         assert_eq!(&s0[0..11], b".          ");
         // ATTR = DIRECTORY only
         assert_eq!(s0[11], Fat32Attributes::DIRECTORY.bits());
@@ -514,7 +535,7 @@ mod tests {
 
         // -------- slot 1: '..' --------
         let s1 = &buf[32..64];
-        // Nom SFN = "..         " (2 points + 9 espaces)
+        // SFN Name = "..         " (2 dots + 9 spaces)
         assert_eq!(&s1[0..11], b"..         ");
         // ATTR = DIRECTORY only
         assert_eq!(s1[11], Fat32Attributes::DIRECTORY.bits());
@@ -547,32 +568,32 @@ mod tests {
 
     #[test]
     fn test_lfn_then_sfn_serialization_order() {
-        // Nom qui force un LFN
+        // Name that forces an LFN
         let name = "long_named_file_for_testing.txt";
         let attr = FileAttributes::new_file();
         let (date, time, fine) = datetime_from_attr(&attr);
         let (short, is_lfn) = to_short_name(name);
         assert!(is_lfn, "Expected LFN for this filename");
 
-        // Construit les entrées: d'abord LFN(s), puis SFN
+        // Builds entries: first LFN(s), then SFN
         let lfns = lfn_entries(name, &short);
         let entry = Fat32Entry::new(short, attr.as_fat_attr(), 7, 123, date, time, fine);
 
-        // Sérialisation dans un tampon
+        // Serialization into a buffer
         let mut buf = Vec::new();
         for l in &lfns {
             l.to_raw_buffer(&mut buf);
         }
         entry.to_raw_buffer(&mut buf);
 
-        // Vérifie l'ordre: nb_lfns * 32 d'abord, puis SFN
+        // Checks order: nb_lfns * 32 first, then SFN
         let l = lfns.len() * 32;
         assert!(buf.len() >= l + 32);
-        // Le dernier bloc doit être le SFN et porter les bons champs
+        // The last block must be the SFN and carry the correct fields
         let sfn = &buf[l..l + 32];
         assert_ne!(sfn[11], 0x0F, "Last entry must be SFN, not LFN");
-        // Checksum cohérent
-        let chk = lfn_checksum(&entry.name);
+        // Consistent checksum
+        let chk: u8 = checksum(&entry.name);
         for (i, lfn_raw) in buf[..l].chunks_exact(32).enumerate() {
             assert_eq!(lfn_raw[11], 0x0F, "LFN attr mismatch at #{i}");
             assert_eq!(lfn_raw[13], chk, "LFN checksum mismatch at #{i}");

@@ -8,6 +8,8 @@ pub use crate::core::allocator::*;
 
 use crate::fs::fat32::meta::*;
 
+pub use crate::core::allocator::chain_allocator::ChainAllocator;
+
 #[derive(Debug, Clone)]
 pub struct Fat32Handle {
     pub cluster_id: u32,
@@ -22,8 +24,12 @@ impl Fat32Handle {
         }
     }
 
+    /// Creates a handle from an existing cluster chain.
+    ///
+    /// If the chain is empty, `cluster_id` defaults to 0 (invalid cluster),
+    /// which should be caught by validation logic elsewhere.
     pub fn from_chain(cluster_chain: Vec<u32>) -> Self {
-        let cluster_id = *cluster_chain.first().expect("FAT32: empty cluster_chain");
+        let cluster_id = cluster_chain.first().copied().unwrap_or(0);
         Self {
             cluster_id,
             cluster_chain,
@@ -31,42 +37,12 @@ impl Fat32Handle {
     }
 }
 
+impl From<Vec<u32>> for Fat32Handle {
+    fn from(chain: Vec<u32>) -> Self {
+        Self::from_chain(chain)
+    }
+}
+
 impl FsHandle for Fat32Handle {}
 
-#[derive(Debug, Clone, Copy)]
-pub struct Fat32Allocator<'a> {
-    meta: &'a Fat32Meta,
-    next_free: u32,
-}
-
-impl<'a> Fat32Allocator<'a> {
-    pub fn new(meta: &'a Fat32Meta) -> Self {
-        Self {
-            meta,
-            next_free: meta.first_data_unit(),
-        }
-    }
-}
-
-impl<'a> FsAllocator<Fat32Handle> for Fat32Allocator<'a> {
-    fn allocate_chain(&mut self, count: usize) -> FsAllocatorResult<Fat32Handle> {
-         let mut chain = vec![0u32; count];
-        for cluster in &mut chain {
-            let next_cluster = self.next_free;
-            if next_cluster > self.meta.last_data_unit() {
-                return Err(FsAllocatorError::OutOfBlocks);
-            }
-            self.next_free += 1;
-            *cluster = next_cluster;
-        }
-        Ok(Fat32Handle::from_chain(chain))
-    }
-
-    fn used_units(&self) -> usize {
-        (self.next_free - self.meta.first_data_unit()) as usize
-    }
-
-    fn remaining_units(&self) -> usize {
-        self.meta.total_units() - self.used_units()
-    }
-}
+pub type Fat32Allocator<'a> = ChainAllocator<'a, Fat32Meta>;

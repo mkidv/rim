@@ -1,42 +1,50 @@
 // SPDX-License-Identifier: MIT
-// rimgen/fs/ext4/allocator.rs
 
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use ::alloc::vec::Vec;
+
+use crate::core::allocator::{FsAllocator, FsAllocatorResult, FsHandle};
 use crate::fs::ext4::constant::*;
-use crate::fs::ext4::params::Ext4Params;
-use crate::fs::ext4::utils::*;
-use crate::core::allocator::{FsAllocator, FsMetadataAllocator};
+use crate::fs::ext4::group_layout::GroupLayout;
+use crate::fs::ext4::meta::Ext4Meta;
+
+#[derive(Debug, Clone)]
+pub struct Ext4Handle {
+    pub inode: u32,
+    pub blocks: Vec<u32>,
+}
+
+impl FsHandle for Ext4Handle {}
+
+impl Ext4Handle {
+    pub fn new(inode: u32, blocks: Vec<u32>) -> Self {
+        Self { inode, blocks }
+    }
+}
 
 #[derive(Debug)]
 pub struct Ext4BlockAllocator<'p> {
-    params: &'p Ext4Params,
+    params: &'p Ext4Meta,
     current_group: usize,
     next_free: u32,
 }
 
 impl<'p> Ext4BlockAllocator<'p> {
-    pub fn new(params: &'p Ext4Params) -> Self {
+    pub fn new(params: &'p Ext4Meta) -> Self {
+        let layout = GroupLayout::compute(params, 0);
         Self {
             params,
             current_group: 0,
-            next_free: first_data_block_in_group(params, 0),
+            next_free: layout.first_data_block,
         }
     }
 
-    fn global_block_number(&self, group: usize, block_in_group: u32) -> u32 {
-        first_data_block_in_group(self.params, group as u32) + block_in_group
-    }
-}
-
-impl<'p> FsAllocator<u32> for Ext4BlockAllocator<'p> {
-    fn block_size(&self) -> usize {
-        self.params.block_size as usize
+    pub fn global_block_number(&self, group: usize, block_in_group: u32) -> u32 {
+        let layout = GroupLayout::compute(self.params, group as u32);
+        layout.first_data_block + block_in_group
     }
 
-    fn block_offset(&self, block: u32) -> u64 {
-        block as u64 * self.params.block_size as u64
-    }
-
-    fn allocate_blocks(&mut self, count: usize) -> Vec<u32> {
+    pub fn allocate_blocks_list(&mut self, count: usize) -> Vec<u32> {
         let mut blocks = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -50,19 +58,93 @@ impl<'p> FsAllocator<u32> for Ext4BlockAllocator<'p> {
             }
 
             let block = self.global_block_number(self.current_group, self.next_free);
-            self.next_free += 1;
+            self.next_free += 1; // logical increment in group
 
             blocks.push(block);
         }
-
         blocks
     }
 
-    fn used_blocks(&self) -> usize {
-        (self.current_group * self.params.blocks_per_group as usize) + (self.next_free as usize)
+    pub fn next_blocks(&mut self, count: usize) -> Vec<u32> {
+        self.allocate_blocks_list(count)
     }
 
-    fn total_blocks_count(&self) -> usize {
-        self.params.block_count as usize
+    // Helper accessors
+    pub fn block_size(&self) -> usize {
+        self.params.block_size as usize
+    }
+
+    pub fn block_offset(&self, block: u32) -> u64 {
+        block as u64 * self.params.block_size as u64
+    }
+
+    pub fn used_units(&self) -> usize {
+        (self.current_group * self.params.blocks_per_group as usize) + (self.next_free as usize)
+    }
+}
+
+#[derive(Debug)]
+pub struct Ext4MetadataAllocator {
+    next_inode: u32,
+    total_inodes: u32,
+}
+
+impl Ext4MetadataAllocator {
+    pub fn new(total_inodes: u32) -> Self {
+        Self {
+            next_inode: EXT4_FIRST_INODE,
+            total_inodes,
+        }
+    }
+
+    pub fn allocate_metadata_id(&mut self) -> u32 {
+        let id = self.next_inode;
+        self.next_inode += 1;
+        id
+    }
+
+    pub fn used_metadata(&self) -> usize {
+        (self.next_inode - EXT4_FIRST_INODE) as usize
+    }
+
+    pub fn total_metadata_count(&self) -> usize {
+        self.total_inodes as usize
+    }
+}
+
+#[derive(Debug)]
+pub struct Ext4Allocator<'p> {
+    pub blocks: Ext4BlockAllocator<'p>,
+    pub meta: Ext4MetadataAllocator,
+}
+
+impl<'p> Ext4Allocator<'p> {
+    pub fn new(params: &'p Ext4Meta) -> Self {
+        Self {
+            blocks: Ext4BlockAllocator::new(params),
+            meta: Ext4MetadataAllocator::new(params.inode_count),
+        }
+    }
+}
+
+impl<'p> FsAllocator<Ext4Handle> for Ext4Allocator<'p> {
+    fn allocate_chain(&mut self, count: usize) -> FsAllocatorResult<Ext4Handle> {
+        // Allocate 1 inode + count blocks
+        let inode = self.meta.allocate_metadata_id();
+        let blks = self.blocks.allocate_blocks_list(count);
+
+        Ok(Ext4Handle {
+            inode,
+            blocks: blks,
+        })
+    }
+
+    fn used_units(&self) -> usize {
+        self.blocks.used_units()
+    }
+
+    fn remaining_units(&self) -> usize {
+        // Based on blocks, as that's the primary space
+        (self.blocks.params.block_count as usize).saturating_sub(self.blocks.used_units())
     }
 }

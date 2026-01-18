@@ -114,10 +114,10 @@ pub fn compare_streamed_bytes<IO1, IO2>(
     io1: &mut IO1,
     io2: &mut IO2,
     range: DiffRange,
-) -> BlockIOResult<bool>
+) -> RimIOResult<bool>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -158,10 +158,10 @@ pub fn compare_streamed_bytes<IO1, IO2>(
     io1: &mut IO1,
     io2: &mut IO2,
     range: DiffRange,
-) -> BlockIOResult<bool>
+) -> RimIOResult<bool>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -206,10 +206,10 @@ pub fn first_diff_bytes<IO1, IO2>(
     io1: &mut IO1,
     io2: &mut IO2,
     range: DiffRange,
-) -> BlockIOResult<Option<(u64, u8, u8)>>
+) -> RimIOResult<Option<(u64, u8, u8)>>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -254,10 +254,10 @@ pub fn first_diff_bytes<IO1, IO2>(
     io1: &mut IO1,
     io2: &mut IO2,
     range: DiffRange,
-) -> BlockIOResult<Option<(u64, u8, u8)>>
+) -> RimIOResult<Option<(u64, u8, u8)>>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -307,10 +307,10 @@ pub fn diff_streamed_bytes_pretty<IO1, IO2>(
     io2: &mut IO2,
     range: DiffRange,
     opts: DiffPrettyOptions<'_>,
-) -> BlockIOResult<()>
+) -> RimIOResult<()>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -449,14 +449,12 @@ pub fn diff_streamed_bytes_pretty<IO1, IO2>(
     _io2: &mut IO2,
     _range: DiffRange,
     _opts: (),
-) -> BlockIOResult<()>
+) -> RimIOResult<()>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
-    Err(BlockIOError::Other(
-        "diff_streamed_bytes_pretty requires std",
-    ))
+    Err(RimIOError::Other("diff_streamed_bytes_pretty requires std"))
 }
 
 //
@@ -469,10 +467,10 @@ pub fn diff_streamed_bytes_log<IO1, IO2>(
     io2: &mut IO2,
     range: DiffRange,
     opts: DiffLogOptions,
-) -> BlockIOResult<Vec<(u64, u8, u8)>>
+) -> RimIOResult<Vec<(u64, u8, u8)>>
 where
-    IO1: BlockIO + ?Sized,
-    IO2: BlockIO + ?Sized,
+    IO1: RimIO + ?Sized,
+    IO2: RimIO + ?Sized,
 {
     debug_assert!(range.chunk_size > 0, "chunk_size must be > 0");
 
@@ -523,7 +521,7 @@ where
 mod tests {
     use super::*;
 
-    fn make_ios(size: usize) -> (MemBlockIO<'static>, MemBlockIO<'static>) {
+    fn make_ios(size: usize) -> (MemRimIO<'static>, MemRimIO<'static>) {
         let mut a = vec![0u8; size].into_boxed_slice();
         let mut b = vec![0u8; size].into_boxed_slice();
 
@@ -537,7 +535,7 @@ mod tests {
         let a: &'static mut [u8] = Box::leak(a);
         let b: &'static mut [u8] = Box::leak(b);
 
-        (MemBlockIO::new(a), MemBlockIO::new(b))
+        (MemRimIO::new(a), MemRimIO::new(b))
     }
 
     #[test]

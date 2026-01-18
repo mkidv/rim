@@ -5,19 +5,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
-default = ["mem", "std"]
+default = ["mem", "std", "fat32", "exfat", "ext4"]
 mem = ["rimio/mem"]
-std = ["rimio/std", "alloc"]
+std = ["rimio/std", "alloc", "crc32fast/std", "time/std"]
 uefi = ["rimio/uefi", "alloc"]
 alloc = []
+fat32 = ["alloc"]
+exfat = ["alloc"]
+ext4 = ["alloc"]
 
 [dependencies]
 bitflags = "2.9.1"
-crc32fast = { version ="1.4.2", default-features = false, features = ["std"] }
+crc32fast = { version ="1.4.2", default-features = false }
 rimio = { path = "../rimio" }
-time = { version = "0.3.41", default-features = false, features = ["std"] }
+time = { version = "0.3.41", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }
@@ -25,6 +32,8 @@ zerocopy = { version = "0.8.25", default-features = false, features = [
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
 tempfile = "3.20.0"
+fatfs = "0.3"
+fscommon = "0.1"
 
 [package.metadata.docs.rs]
 features = ["std"]
@@ -35,4 +44,8 @@ harness = false
 
 [[bench]]
 name = "fat32_bench"
+harness = false
+
+[[bench]]
+name = "ext4_bench"
 harness = false

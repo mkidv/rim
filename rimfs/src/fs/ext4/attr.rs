@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// rimgen/fs/ext4/attr.rs
 
-use crate::core::parser::attr::FileAttributes;
+use crate::core::traits::FileAttributes;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -40,7 +39,7 @@ impl FileAttributes {
             1 // regular file
         }
     }
-    
+
     pub fn as_ext4_mode(&self) -> Ext4Mode {
         // Determine type
         let type_bits = if self.dir {

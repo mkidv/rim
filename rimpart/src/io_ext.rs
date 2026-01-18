@@ -1,37 +1,37 @@
 // SPDX-License-Identifier: MIT
 
-//! BlockIO helpers "LBA-aware" pour éviter les `* sector_size` partout,
-//! avec overflow-check et versions `read/write_struct` sur LBA.
+//! "LBA-aware" RimIO helpers to avoid `* sector_size` everywhere,
+//! with overflow-check and `read/write_struct` versions on LBA.
 
-use rimio::errors::BlockIOError;
+use rimio::errors::RimIOError;
 use rimio::prelude::*;
 
-/// Offset = LBA * sector_size (avec overflow-check)
+/// Offset = LBA * sector_size (with overflow-check)
 #[inline]
-fn lba_offset(lba: u64, sector_size: u64) -> BlockIOResult<u64> {
+fn lba_offset(lba: u64, sector_size: u64) -> RimIOResult<u64> {
     lba.checked_mul(sector_size)
-        .ok_or(BlockIOError::Other("lba_offset overflow"))
+        .ok_or(RimIOError::Other("lba_offset overflow"))
 }
 
-/// Lecture/écriture alignée LBA (buffer)
-pub trait BlockIOLbaExt: BlockIO {
-    /// Lit `buf.len()` octets à partir d’un LBA (offset = lba * sector_size).
+/// LBA-aligned read/write (buffer)
+pub trait RimIOLbaExt: RimIO {
+    /// Reads `buf.len()` bytes starting from an LBA (offset = lba * sector_size).
     #[inline]
-    fn read_at_lba(&mut self, lba: u64, sector_size: u64, buf: &mut [u8]) -> BlockIOResult {
+    fn read_at_lba(&mut self, lba: u64, sector_size: u64, buf: &mut [u8]) -> RimIOResult {
         let off = lba_offset(lba, sector_size)?;
         self.read_at(off, buf)
     }
 
-    /// Écrit `buf.len()` octets à partir d’un LBA (offset = lba * sector_size).
+    /// Writes `buf.len()` bytes starting from an LBA (offset = lba * sector_size).
     #[inline]
-    fn write_at_lba(&mut self, lba: u64, sector_size: u64, data: &[u8]) -> BlockIOResult {
+    fn write_at_lba(&mut self, lba: u64, sector_size: u64, data: &[u8]) -> RimIOResult {
         let off = lba_offset(lba, sector_size)?;
         self.write_at(off, data)
     }
 
-    /// Lit une struct `T` à partir d’un LBA (taille = size_of::<T>()).
+    /// Reads a struct `T` starting from an LBA (size = size_of::<T>()).
     #[inline]
-    fn read_struct_lba<T>(&mut self, lba: u64, sector_size: u64) -> BlockIOResult<T>
+    fn read_struct_lba<T>(&mut self, lba: u64, sector_size: u64) -> RimIOResult<T>
     where
         T: zerocopy::FromBytes + zerocopy::KnownLayout + zerocopy::Immutable,
     {
@@ -39,9 +39,9 @@ pub trait BlockIOLbaExt: BlockIO {
         self.read_struct::<T>(off)
     }
 
-    /// Écrit une struct `T` à partir d’un LBA.
+    /// Writes a struct `T` starting from an LBA.
     #[inline]
-    fn write_struct_lba<T>(&mut self, lba: u64, sector_size: u64, val: &T) -> BlockIOResult
+    fn write_struct_lba<T>(&mut self, lba: u64, sector_size: u64, val: &T) -> RimIOResult
     where
         T: zerocopy::IntoBytes + zerocopy::KnownLayout + zerocopy::Immutable,
     {
@@ -50,4 +50,4 @@ pub trait BlockIOLbaExt: BlockIO {
     }
 }
 
-impl<T: BlockIO + ?Sized> BlockIOLbaExt for T {}
+impl<T: RimIO + ?Sized> RimIOLbaExt for T {}

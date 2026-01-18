@@ -27,13 +27,13 @@ fn main() {
 
     // 2. Subdir1
     let sub1 = &test_data_dir.join("subdir1");
-    create_dir_all(&sub1).expect("Failed to create subdir1");
+    create_dir_all(sub1).expect("Failed to create subdir1");
     create_file(sub1.join("file1.txt"), b"Hello from subdir1/file1.txt\n");
     create_file(sub1.join("file2.txt"), b"Hello from subdir1/file2.txt\n");
 
     // 3. Subdir2/deep_dir
     let deep = &test_data_dir.join("subdir2/deep_dir");
-    create_dir_all(&deep).expect("Failed to create subdir2/deep_dir");
+    create_dir_all(deep).expect("Failed to create subdir2/deep_dir");
     create_file(
         deep.join("deep_file.txt"),
         b"This is deep inside subdir2/deep_dir\n",
@@ -47,7 +47,7 @@ fn main() {
 
     // 5. Many small files
     let many = &test_data_dir.join("many_files");
-    create_dir_all(&many).expect("Failed to create many_files");
+    create_dir_all(many).expect("Failed to create many_files");
     for i in 0..100 {
         create_file(
             many.join(format!("file_{i:03}.txt")),

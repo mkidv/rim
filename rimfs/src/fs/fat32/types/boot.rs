@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::fs::fat32::{constant::*, meta::*};
+use crate::{
+    Validate,
+    core::FsParsingError,
+    fs::fat32::{constant::*, meta::*},
+};
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
@@ -118,6 +118,43 @@ impl Default for Fat32Vbr {
     }
 }
 
+impl Validate<Fat32Meta> for Fat32Vbr {
+    type Err = FsParsingError;
+
+    fn neutralized(&self) -> Self {
+        *self
+    }
+
+    fn validate(&self, meta: &Fat32Meta) -> Result<(), Self::Err> {
+        if self.signature != FAT_SIGNATURE {
+            return Err(FsParsingError::Invalid("VBR: missing 0x55AA"));
+        }
+        if &self.fs_type != FAT_FS_TYPE {
+            return Err(FsParsingError::Invalid("VBR: FS type != FAT32   "));
+        }
+        // Sanity BPB
+        let bps = self.bytes_per_sector as usize;
+        let spc = self.sectors_per_cluster as usize;
+        if bps == 0 || (bps & (bps - 1)) != 0 {
+            return Err(FsParsingError::Invalid("BPB: BytesPerSector not pow2"));
+        }
+        if spc == 0 || (spc & (spc - 1)) != 0 {
+            return Err(FsParsingError::Invalid("BPB: SectorsPerCluster not pow2"));
+        }
+        if self.num_fats == 0 {
+            return Err(FsParsingError::Invalid("BPB: NumFATs == 0"));
+        }
+        if self.fat_size_32 == 0 {
+            return Err(FsParsingError::Invalid("BPB: FATLength == 0"));
+        }
+        // Root cluster in range
+        if self.root_cluster < FAT_FIRST_CLUSTER || self.root_cluster > meta.last_data_unit() {
+            return Err(FsParsingError::Invalid("BPB: root_cluster out of range"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
 pub struct Fat32FsInfo {
@@ -155,5 +192,32 @@ impl Default for Fat32FsInfo {
             reserved2: [0u8; 12],
             trail_signature: FAT_FSINFO_TRAIL_SIGNATURE,
         }
+    }
+}
+
+impl Validate<Fat32Meta> for Fat32FsInfo {
+    type Err = FsParsingError;
+
+    fn neutralized(&self) -> Self {
+        *self
+    }
+
+    fn validate(&self, meta: &Fat32Meta) -> Result<(), Self::Err> {
+        if self.lead_signature != FAT_FSINFO_LEAD_SIGNATURE {
+            return Err(FsParsingError::Invalid("FSINFO: bad lead sig"));
+        }
+        if self.struct_signature != FAT_FSINFO_STRUCT_SIGNATURE {
+            return Err(FsParsingError::Invalid("FSINFO: bad struct sig"));
+        }
+        if self.trail_signature != FAT_FSINFO_TRAIL_SIGNATURE {
+            return Err(FsParsingError::Invalid("FSINFO: bad trail sig"));
+        }
+        if self.next_free_cluster != FAT_FSINFO_UNKNOWN {
+            let c = self.next_free_cluster;
+            if c < meta.first_data_unit() || c > meta.last_data_unit() {
+                return Err(FsParsingError::Invalid("FSINFO: next_free out of range"));
+            }
+        }
+        Ok(())
     }
 }

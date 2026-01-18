@@ -1,6 +1,6 @@
 pub use crate::core::traits::*;
 
-use rimio::BlockIO;
+use rimio::RimIO;
 
 use crate::fs::fat32::traits::*;
 
@@ -11,32 +11,32 @@ impl<'a> FsFilesystem<'a> for Fat32 {
     type AllocUnit = u32;
     type Handle = Fat32Handle;
     type Allocator = Fat32Allocator<'a>;
-    type Formatter = Fat32Formatter<'a, dyn BlockIO + 'a>;
-    type Injector = Fat32Injector<'a, dyn BlockIO + 'a>;
-    type Checker = Fat32Checker<'a, dyn BlockIO + 'a>;
-    type Parser = Fat32Resolver<'a, dyn BlockIO + 'a>;
+    type Formatter = Fat32Formatter<'a, dyn RimIO + 'a>;
+    type Injector = Fat32Injector<'a, dyn RimIO + 'a>;
+    type Checker = Fat32Checker<'a, dyn RimIO + 'a>;
+    type Parser = Fat32Resolver<'a, dyn RimIO + 'a>;
 
     fn allocator(meta: &'a Self::Meta) -> Self::Allocator {
         Fat32Allocator::new(meta)
     }
 
-    fn formatter(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Formatter {
+    fn formatter(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Formatter {
         Fat32Formatter::new(io, meta)
     }
 
     fn injector(
-        io: &'a mut (dyn BlockIO + 'a),
+        io: &'a mut (dyn RimIO + 'a),
         allocator: &'a mut Self::Allocator,
         meta: &'a Self::Meta,
-    ) -> Self::Injector {
-        Fat32Injector::new(io, allocator, meta)
+    ) -> crate::core::FsInjectorResult<Self::Injector> {
+        Ok(Fat32Injector::new(io, allocator, meta))
     }
 
-    fn checker(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Checker {
+    fn checker(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Checker {
         Fat32Checker::new(io, meta)
     }
 
-    fn parser(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Parser {
+    fn parser(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Parser {
         Fat32Resolver::new(io, meta)
     }
 

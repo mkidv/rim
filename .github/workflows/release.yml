@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Binary
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: rimgen
+            asset_name: rimgen-linux-amd64
+            use_cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: rimgen.exe
+            asset_name: rimgen-windows-amd64.exe
+            use_cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rimgen
+
+      - name: Rename & Upload Artifact
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv ${{ matrix.artifact_name }} ../../../${{ matrix.asset_name }}
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  publish-release:
+    name: Publish Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display Downloaded Artifacts
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/rimgen-linux-amd64/rimgen-linux-amd64
+            artifacts/rimgen-windows-amd64.exe/rimgen-windows-amd64.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true

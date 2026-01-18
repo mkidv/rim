@@ -12,11 +12,11 @@ pub struct TruncateReport {
 }
 
 /// Truncate the disk image to the last used sector of partitions.
-/// Works with any BlockIO (File, RAM, UEFI, ...).
+/// Works with any RimIO (File, RAM, UEFI, ...).
 ///
 /// Returns Ok(Some(TruncateReport)) if truncated, Ok(None) if no partitions.
 pub fn truncate_image_custom_sector(
-    io: &mut dyn BlockIOSetLen,
+    io: &mut dyn RimIOSetLen,
     partitions: &[gpt::GptEntry],
     total_sectors: u64,
     sector_size: u64,
@@ -43,7 +43,7 @@ pub fn truncate_image_custom_sector(
 }
 
 pub fn truncate_image(
-    io: &mut dyn BlockIOSetLen,
+    io: &mut dyn RimIOSetLen,
     partitions: &[gpt::GptEntry],
     total_sectors: u64,
 ) -> PartResult<Option<TruncateReport>> {
@@ -53,15 +53,17 @@ pub fn truncate_image(
 /// Detect the byte offset of the first partition that matches `type_guid`.
 /// - Verifies MBR is protective (0xEE)
 /// - Parses GPT and finds the first matching entry
+#[cfg(feature = "alloc")]
 pub fn detect_partition_offset_by_type_guid(
-    io: &mut dyn BlockIO,
+    io: &mut dyn RimIO,
     type_guid: &[u8; 16],
 ) -> PartResult<u64> {
     detect_partition_offset_by_type_guid_with_sector(io, type_guid, DEFAULT_SECTOR_SIZE)
 }
 
+#[cfg(feature = "alloc")]
 pub fn detect_partition_offset_by_type_guid_with_sector(
-    io: &mut dyn BlockIO,
+    io: &mut dyn RimIO,
     type_guid: &[u8; 16],
     sector_size: u64,
 ) -> PartResult<u64> {
@@ -76,13 +78,14 @@ pub fn detect_partition_offset_by_type_guid_with_sector(
 }
 
 /// Full-disk validation:
-/// - Parse & validate GPT (header + entries + overlaps/alignment déjà faits)
+/// - Parse & validate GPT (header + entries + overlaps/alignment already done)
 /// - Parse MBR & validate protective entry coherent with disk size
-pub fn validate_full_disk(io: &mut dyn BlockIO) -> PartResult<()> {
+#[cfg(feature = "alloc")]
+pub fn validate_full_disk(io: &mut dyn RimIO) -> PartResult<()> {
     // GPT (valide header + entries + overlaps/alignments via parse_gpt)
     let (header, _parts) = gpt::read_gpt(io)?;
 
-    // Cohérence MBR protectif avec la taille disque
+    // Consistency of protective MBR with disk size
     let total_sectors = header.backup_lba + 1;
     let m = mbr::read_mbr(io)?;
     m.validate_protective(total_sectors)?;
@@ -97,7 +100,7 @@ mod tests {
     #[test]
     fn truncate_image_empty() {
         let mut buf = [0u8; 512 * 100];
-        let mut io = MemBlockIO::new(&mut buf);
+        let mut io = MemRimIO::new(&mut buf);
         let result = truncate_image(&mut io, &[], 100).unwrap();
 
         assert!(result.is_none());
@@ -106,7 +109,7 @@ mod tests {
     #[test]
     fn detect_partition_offset_fail() {
         let mut buf = [0u8; 512 * 100];
-        let mut io = MemBlockIO::new(&mut buf);
+        let mut io = MemRimIO::new(&mut buf);
         assert!(detect_partition_offset_by_type_guid(&mut io, &[0u8; 16]).is_err());
     }
 }

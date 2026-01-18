@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-use rimio::{BlockIO, BlockIOStructExt, errors::BlockIOError};
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::string::{String, ToString};
+
+use rimio::errors::RimIOError;
+use rimio::{RimIO, RimIOStructExt};
 use zerocopy::FromBytes;
 
 pub use crate::core::meta::*;
 
 use crate::{
-    core::{FsResult, cursor::ClusterMeta},
+    core::{FsError, FsResult, cursor::ClusterMeta},
     fs::exfat::{constant::*, types::*, upcase::UpcaseFlavor},
 };
 
@@ -43,7 +47,7 @@ pub struct ExFatMeta {
 }
 
 impl ExFatMeta {
-    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> Self {
+    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
         // Use dynamic cluster size based on volume size
         let cluster_size = determine_cluster_size(size_bytes);
 
@@ -59,6 +63,7 @@ impl ExFatMeta {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_custom(
         volume_size_bytes: u64,
         volume_label: Option<&str>,
@@ -68,10 +73,12 @@ impl ExFatMeta {
         bytes_per_sector: u16,
         bytes_per_cluster: u32,
         upcase_flavor: UpcaseFlavor,
-    ) -> Self {
+    ) -> FsResult<Self> {
         let sectors_per_cluster = bytes_per_cluster
             .checked_div(bytes_per_sector as u32)
-            .expect("cluster_size must be a multiple of sector_size");
+            .ok_or(FsError::Invalid(
+                "cluster_size must be a multiple of sector_size",
+            ))?;
 
         let mut volume_label_safe = [0u16; 11];
         if let Some(label) = volume_label {
@@ -123,7 +130,7 @@ impl ExFatMeta {
 
         let upcase_clusters = upcase_size_bytes.div_ceil(bytes_per_cluster.into()) as u32;
 
-        Self {
+        Ok(Self {
             volume_id: vol_id,
             volume_guid: Some(guid),
             volume_label: volume_label_safe,
@@ -144,10 +151,10 @@ impl ExFatMeta {
             upcase_size_bytes,
             upcase_checksum,
             upcase_flavor,
-        }
+        })
     }
 
-    pub fn from_io<IO: BlockIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
+    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let vbr: ExFatBootSector = io.read_struct(EXFAT_VBR_SECTOR)?;
 
         let bytes_per_sector = 1u32 << vbr.bytes_per_sector_shift;
@@ -175,25 +182,25 @@ impl ExFatMeta {
                 EXFAT_ENTRY_LABEL => {
                     found_label = Some(
                         ExFatVolumeLabelEntry::read_from_bytes(entry)
-                            .map_err(|_| BlockIOError::Other("volume_label_parse"))?,
+                            .map_err(|_| RimIOError::Other("volume_label_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_BITMAP => {
                     found_bitmap = Some(
                         ExFatBitmapEntry::read_from_bytes(entry)
-                            .map_err(|_| BlockIOError::Other("bitmap_parse"))?,
+                            .map_err(|_| RimIOError::Other("bitmap_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_UPCASE => {
                     found_upcase = Some(
                         ExFatUpcaseEntry::read_from_bytes(entry)
-                            .map_err(|_| BlockIOError::Other("upcase_parse"))?,
+                            .map_err(|_| RimIOError::Other("upcase_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_GUID => {
                     found_guid = Some(
                         ExFatGuidEntry::read_from_bytes(entry)
-                            .map_err(|_| BlockIOError::Other("guid_parse"))?,
+                            .map_err(|_| RimIOError::Other("guid_parse"))?,
                     );
                 }
                 EXFAT_EOD => break, // End of Directory
@@ -203,9 +210,9 @@ impl ExFatMeta {
 
         let volume_label = found_label.map(|f| f.volume_label).unwrap_or([0u16; 11]);
 
-        let bitmap = found_bitmap.ok_or(BlockIOError::Other("bitmap_cluster"))?;
+        let bitmap = found_bitmap.ok_or(RimIOError::Other("bitmap_cluster"))?;
 
-        let upcase = found_upcase.ok_or(BlockIOError::Other("upcase_cluster"))?;
+        let upcase = found_upcase.ok_or(RimIOError::Other("upcase_cluster"))?;
 
         let guid = found_guid.map(|f| Some(f.guid)).unwrap_or(None);
 
@@ -288,6 +295,12 @@ impl FsMeta<u32> for ExFatMeta {
         self.volume_size_bytes
     }
 
+    fn label(&self) -> String {
+        String::from_utf16_lossy(&self.volume_label)
+            .trim_matches(char::from(0))
+            .to_string()
+    }
+
     fn unit_offset(&self, cluster: u32) -> u64 {
         self.cluster_heap_offset_bytes
             + ((cluster - EXFAT_FIRST_CLUSTER) as u64 * self.unit_size() as u64)
@@ -305,29 +318,34 @@ impl FsMeta<u32> for ExFatMeta {
     }
 }
 
-/// Implémentation ClusterMeta pour ExFatMeta
+/// ClusterMeta implementation for ExFatMeta
 impl ClusterMeta for ExFatMeta {
     const EOC: u32 = EXFAT_EOC;
     const FIRST_CLUSTER: u32 = EXFAT_FIRST_CLUSTER;
     const ENTRY_SIZE: usize = EXFAT_ENTRY_SIZE;
-    const ENTRY_MASK: u32 = EXFAT_MASK; // ExFAT utilise tous les 32 bits
+    const ENTRY_MASK: u32 = EXFAT_MASK; // ExFAT uses all 32 bits
 
     fn fat_entry_offset(&self, cluster: u32, fat_index: u8) -> u64 {
         self.fat_offset_bytes
             + fat_index as u64 * self.fat_size_sectors as u64 * self.bytes_per_sector as u64
             + cluster as u64 * EXFAT_ENTRY_SIZE as u64
     }
+
+    fn num_fats(&self) -> u8 {
+        self.num_fats
+    }
 }
 
-/// Convergence exFAT avec alignement 1MiB du heap pris en compte.
-/// - `sector_size`           : bytes/sector (ex. 512)
-/// - `total_sectors`         : taille volume en secteurs
-/// - `fat_offset_sectors`    : offset FAT en secteurs (déjà aligné 1MiB si tu veux)
-/// - `entry_size`            : taille d’entrée FAT (exFAT = 4)
-/// - `min_entries`           : entrées réservées (exFAT = 2)
-/// - `num_fats`              : nombre de FAT (exFAT = 1, sauf TexFAT)
+/// exFAT convergence with 1MiB heap alignment taken into account.
+/// - `sector_size`           : bytes/sector (e.g., 512)
+/// - `total_sectors`         : volume size in sectors
+/// - `fat_offset_sectors`    : FAT offset in sectors (can be pre-aligned to 1MiB)
+/// - `entry_size`            : FAT entry size (exFAT = 4)
+/// - `min_entries`           : reserved entries (exFAT = 2)
+/// - `num_fats`              : number of FATs (exFAT = 1, except TexFAT)
 /// - `sectors_per_cluster`   : SPC (2^n)
-/// - `heap_align_bytes`      : alignement du heap (ex. 1_048_576)
+/// - `heap_align_bytes`      : heap alignment (e.g., 1_048_576)
+#[allow(clippy::too_many_arguments)]
 pub fn converge_fat_layout_aligned(
     sector_size: u32,
     total_sectors: u64,
@@ -349,24 +367,24 @@ pub fn converge_fat_layout_aligned(
     let mut fat_size_sectors: u32 = 0;
     let mut heap_off_aligned_bytes: u64 = 0;
 
-    // Borne de sécurité: convergence en quelques itérations en pratique
+    // Safety bound: convergence typically reached in a few iterations
     for _ in 0..32 {
-        // 1) Taille de FAT (en secteurs) pour entries = clusters + réservés
+        // FAT size (in sectors) for entries = clusters + reserved entries
         let entries = (cluster_count as u64) + (min_entries as u64);
         let fat_size_sectors_new = (entries * (entry_size as u64)).div_ceil(ss) as u32;
 
-        // 2) Offset heap non aligné puis aligné (en bytes)
+        // Heap offset: unaligned, then aligned (in bytes)
         let heap_off_unaligned =
             fat_off_bytes + (fat_size_sectors_new as u64) * (num_fats as u64) * ss;
         let heap_off_aligned_new = heap_off_unaligned.div_ceil(align) * align;
 
-        // 3) Secteurs de data réels après alignement
+        // Actual data sectors after alignment
         let data_sectors = total_sectors.saturating_sub(heap_off_aligned_new / ss);
 
-        // 4) Nouveau cluster_count
+        // New cluster_count
         let cluster_count_new = (data_sectors / spc) as u32;
 
-        // 5) Stabilité ?
+        // Reached stability?
         if cluster_count_new == cluster_count
             && fat_size_sectors_new == fat_size_sectors
             && heap_off_aligned_new == heap_off_aligned_bytes
@@ -422,7 +440,7 @@ fn resolve_ids(
             (guid, vid)
         }
         (Some(vid), Some(guid)) => {
-            // On fait confiance aux valeurs fournies (optionnel: vérifier cohérence).
+            // Trust provided values (optional: verify consistency)
             (guid, vid)
         }
         (None, None) => derive_ids(label, size_bytes, cluster_size, user_salt),
@@ -436,7 +454,7 @@ mod tests {
     #[test]
     fn test_dynamic_cluster_size() {
         // Test small volume (8MB) → should get 4KB clusters
-        let small_meta = ExFatMeta::new(8 * 1024 * 1024, Some("SMALL"));
+        let small_meta = ExFatMeta::new(8 * 1024 * 1024, Some("SMALL")).unwrap();
         assert_eq!(
             small_meta.bytes_per_cluster,
             4 * 1024,
@@ -448,7 +466,7 @@ mod tests {
         );
 
         // Test medium volume (512MB) → should get 32KB clusters
-        let medium_meta = ExFatMeta::new(512 * 1024 * 1024, Some("MEDIUM"));
+        let medium_meta = ExFatMeta::new(512 * 1024 * 1024, Some("MEDIUM")).unwrap();
         assert_eq!(
             medium_meta.bytes_per_cluster,
             32 * 1024,
@@ -460,7 +478,7 @@ mod tests {
         );
 
         // Test large volume (64GB) → should get 128KB clusters
-        let large_meta = ExFatMeta::new(64 * 1024 * 1024 * 1024, Some("LARGE"));
+        let large_meta = ExFatMeta::new(64 * 1024 * 1024 * 1024, Some("LARGE")).unwrap();
         assert_eq!(
             large_meta.bytes_per_cluster,
             128 * 1024,
@@ -487,7 +505,7 @@ mod tests {
     #[test]
     fn test_fat_alignment() {
         // Test that FAT offset is aligned to 1MB boundary
-        let meta = ExFatMeta::new(256 * 1024 * 1024, Some("ALIGNED"));
+        let meta = ExFatMeta::new(256 * 1024 * 1024, Some("ALIGNED")).unwrap();
 
         // FAT offset should be aligned to 1MB (1048576 bytes)
         assert_eq!(
@@ -517,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_bitmap_size_calculation() {
-        let meta = ExFatMeta::new(8 * 1024 * 1024, Some("BITMAPTEST"));
+        let meta = ExFatMeta::new(8 * 1024 * 1024, Some("BITMAPTEST")).unwrap();
 
         let expected_size = meta.cluster_count.div_ceil(8) as u64;
         assert_eq!(meta.bitmap_size_bytes, expected_size);

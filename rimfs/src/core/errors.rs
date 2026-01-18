@@ -26,9 +26,12 @@ impl fmt::Display for FsAllocatorError {
     }
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for FsAllocatorError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsParsingError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Unsupported,
     Corrupted,
     Invalid(&'static str),
@@ -48,15 +51,27 @@ impl FsParsingError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsParsingError::IO(e) => Some(FsError::IO(e.clone())),
+            FsParsingError::IO(e) => Some(FsError::IO(*e)),
             _ => None,
         }
     }
 }
 
+impl fmt::Display for FsParsingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.msg())?;
+        let mut current = self.source();
+        while let Some(src) = current {
+            write!(f, "\n  caused by: {}", src.msg())?;
+            current = src.source();
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsCursorError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Parsing(FsParsingError),
     InvalidCluster(u32),
     LoopDetected,
@@ -78,8 +93,8 @@ impl FsCursorError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsCursorError::IO(e) => Some(FsError::IO(e.clone())),
-            FsCursorError::Parsing(e) => Some(FsError::Parsing(e.clone())),
+            FsCursorError::IO(e) => Some(FsError::IO(*e)),
+            FsCursorError::Parsing(e) => Some(FsError::Parsing(*e)),
             _ => None,
         }
     }
@@ -89,7 +104,7 @@ impl fmt::Display for FsCursorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.msg())?;
         if let FsCursorError::InvalidCluster(cluster) = self {
-            write!(f, " (cluster: {})", cluster)?;
+            write!(f, " (cluster: {cluster})")?;
         }
         let mut current = self.source();
         while let Some(src) = current {
@@ -102,7 +117,7 @@ impl fmt::Display for FsCursorError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsResolverError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Cursor(FsCursorError),
     Parsing(FsParsingError),
     Unsupported,
@@ -126,8 +141,8 @@ impl FsResolverError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsResolverError::IO(e) => Some(FsError::IO(e.clone())),
-            FsResolverError::Cursor(e) => Some(FsError::Cursor(e.clone())),
+            FsResolverError::IO(e) => Some(FsError::IO(*e)),
+            FsResolverError::Cursor(e) => Some(FsError::Cursor(*e)),
             _ => None,
         }
     }
@@ -147,7 +162,7 @@ impl fmt::Display for FsResolverError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsFormatterError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Invalid(&'static str),
     Other(&'static str),
 }
@@ -163,7 +178,7 @@ impl FsFormatterError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsFormatterError::IO(e) => Some(FsError::IO(e.clone())),
+            FsFormatterError::IO(e) => Some(FsError::IO(*e)),
             _ => None,
         }
     }
@@ -183,8 +198,9 @@ impl fmt::Display for FsFormatterError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsInjectorError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Allocator(FsAllocatorError),
+    Resolver(FsResolverError),
     StackUnderflow,
     Invalid(&'static str),
     Other(&'static str),
@@ -195,6 +211,7 @@ impl FsInjectorError {
         match self {
             FsInjectorError::IO(_) => "IO error",
             FsInjectorError::Allocator(_) => "Allocator error",
+            FsInjectorError::Resolver(_) => "Resolver error",
             FsInjectorError::StackUnderflow => "Stack underflow",
             FsInjectorError::Invalid(msg) => msg,
             FsInjectorError::Other(msg) => msg,
@@ -203,8 +220,9 @@ impl FsInjectorError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsInjectorError::IO(e) => Some(FsError::IO(e.clone())),
-            FsInjectorError::Allocator(e) => Some(FsError::Allocator(e.clone())),
+            FsInjectorError::IO(e) => Some(FsError::IO(*e)),
+            FsInjectorError::Allocator(e) => Some(FsError::Allocator(*e)),
+            FsInjectorError::Resolver(e) => Some(FsError::Resolver(*e)),
             _ => None,
         }
     }
@@ -224,7 +242,7 @@ impl fmt::Display for FsInjectorError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsCheckerError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Parsing(FsParsingError),
     Cursor(FsCursorError),
     Invalid(&'static str),
@@ -244,9 +262,9 @@ impl FsCheckerError {
 
     pub fn source(&self) -> Option<FsError> {
         match self {
-            FsCheckerError::IO(e) => Some(FsError::IO(e.clone())),
-            FsCheckerError::Parsing(e) => Some(FsError::Parsing(e.clone())),
-            FsCheckerError::Cursor(e) => Some(FsError::Cursor(e.clone())),
+            FsCheckerError::IO(e) => Some(FsError::IO(*e)),
+            FsCheckerError::Parsing(e) => Some(FsError::Parsing(*e)),
+            FsCheckerError::Cursor(e) => Some(FsError::Cursor(*e)),
             _ => None,
         }
     }
@@ -267,7 +285,7 @@ impl fmt::Display for FsCheckerError {
 /// Top-level error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
-    IO(BlockIOError),
+    IO(RimIOError),
     Allocator(FsAllocatorError),
     Parsing(FsParsingError),
     Resolver(FsResolverError),
@@ -275,6 +293,7 @@ pub enum FsError {
     Injector(FsInjectorError),
     Checker(FsCheckerError),
     Cursor(FsCursorError),
+    Invalid(&'static str),
     Other(&'static str),
 }
 
@@ -301,6 +320,7 @@ impl FsError {
             FsError::Injector(e) => e.msg(),
             FsError::Checker(e) => e.msg(),
             FsError::Cursor(e) => e.msg(),
+            FsError::Invalid(msg) => msg,
             FsError::Other(msg) => msg,
         }
     }
@@ -315,12 +335,13 @@ impl FsError {
             FsError::Cursor(e) => e.source(),
             FsError::IO(_) => None,
             FsError::Allocator(_) => None,
+            FsError::Invalid(_) => None,
             FsError::Other(_) => None,
         }
     }
 }
 
-// === type Fs*Result ===
+// type Fs*Result
 
 pub type FsResult<T = ()> = Result<T, FsError>;
 pub type FsAllocatorResult<T = ()> = Result<T, FsAllocatorError>;
@@ -333,7 +354,7 @@ pub type FsCursorResult<T = ()> = Result<T, FsCursorError>;
 
 crate::fs_error_wiring! {
     top => FsError {
-        BlockIOError     : IO,
+        RimIOError     : IO,
         FsAllocatorError : Allocator,
         FsParsingError    : Parsing,
         FsResolverError    : Resolver,
@@ -352,11 +373,98 @@ crate::fs_error_wiring! {
         FsCursorError,
     ],
     sub => {
-        BlockIOError     => [ FsResolverError::IO, FsFormatterError::IO, FsInjectorError::IO, FsCheckerError::IO, FsCursorError::IO ],
+        RimIOError     => [ FsResolverError::IO, FsFormatterError::IO, FsInjectorError::IO, FsCheckerError::IO, FsCursorError::IO ],
         FsAllocatorError => [ FsInjectorError::Allocator ],
         FsParsingError    => [ FsResolverError::Parsing, FsCursorError::Parsing, FsCheckerError::Parsing ],
+        FsResolverError   => [ FsInjectorError::Resolver ],
         FsCursorError    => [ FsResolverError::Cursor, FsCheckerError::Cursor]
     },
+}
+
+// std::error::Error implementations
+// These are only available when the `std` feature is enabled, providing
+// interoperability with the standard library error handling ecosystem.
+
+#[cfg(feature = "std")]
+mod std_error_impls {
+    use super::*;
+
+    impl std::error::Error for FsParsingError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsParsingError::IO(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsCursorError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsCursorError::IO(e) => Some(e),
+                FsCursorError::Parsing(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsResolverError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsResolverError::IO(e) => Some(e),
+                FsResolverError::Cursor(e) => Some(e),
+                FsResolverError::Parsing(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsFormatterError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsFormatterError::IO(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsInjectorError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsInjectorError::IO(e) => Some(e),
+                FsInjectorError::Allocator(e) => Some(e),
+                FsInjectorError::Resolver(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsCheckerError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsCheckerError::IO(e) => Some(e),
+                FsCheckerError::Parsing(e) => Some(e),
+                FsCheckerError::Cursor(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl std::error::Error for FsError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                FsError::IO(e) => Some(e),
+                FsError::Allocator(e) => Some(e),
+                FsError::Parsing(e) => Some(e),
+                FsError::Resolver(e) => Some(e),
+                FsError::Formatter(e) => Some(e),
+                FsError::Injector(e) => Some(e),
+                FsError::Checker(e) => Some(e),
+                FsError::Cursor(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -365,8 +473,8 @@ mod tests {
 
     #[test]
     fn test_error_chain_display() {
-        let low = BlockIOError::Unsupported;
-        let inj = FsInjectorError::IO(low.clone());
+        let low = RimIOError::Unsupported;
+        let inj = FsInjectorError::IO(low);
         let top = FsError::Injector(inj);
 
         println!("{top}");

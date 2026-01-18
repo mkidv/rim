@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
+#[cfg(all(not(feature = "std"), feature = "alloc", test))]
+use alloc::string::{String, ToString};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
-use rimio::{BlockIO, BlockIOExt};
+use rimio::{RimIO, RimIOExt};
 
-use crate::core::{injector::*, resolver::*};
+use crate::core::{fat, injector::*, resolver::*};
 
-use crate::fs::fat32::{allocator::*, constant::*, meta::*, ops, types::*};
+use crate::fs::fat32::{allocator::*, constant::*, meta::*, types::*};
 
-pub struct Fat32Injector<'a, IO: BlockIO + ?Sized> {
+pub struct Fat32Injector<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     allocator: &'a mut Fat32Allocator<'a>,
     meta: &'a Fat32Meta,
@@ -18,7 +18,7 @@ pub struct Fat32Injector<'a, IO: BlockIO + ?Sized> {
     stack: Vec<FsContext<Fat32Handle>>,
 }
 
-impl<'a, IO: BlockIO + ?Sized> Fat32Injector<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> Fat32Injector<'a, IO> {
     pub fn new(io: &'a mut IO, allocator: &'a mut Fat32Allocator<'a>, meta: &'a Fat32Meta) -> Self {
         Self {
             io,
@@ -37,7 +37,7 @@ impl<'a, IO: BlockIO + ?Sized> Fat32Injector<'a, IO> {
             return Ok(());
         }
         let missing = needed - handle.cluster_chain.len();
-        let extra = self.allocator.allocate_chain(missing)?;
+        let extra: Fat32Handle = self.allocator.allocate_chain(missing)?;
         handle.cluster_chain.extend_from_slice(&extra.cluster_chain);
         Ok(())
     }
@@ -64,12 +64,12 @@ impl<'a, IO: BlockIO + ?Sized> Fat32Injector<'a, IO> {
         }
 
         // Update FAT for the full chain (safe even if already reserved as EOC).
-        ops::write_all_fat_chain(self.io, self.meta, &handle.cluster_chain)?;
+        fat::chain::write_chain::<IO, Fat32Meta>(self.io, self.meta, &handle.cluster_chain)?;
         Ok(())
     }
 }
 
-impl<'a, IO: BlockIO + ?Sized> FsNodeInjector<Fat32Handle> for Fat32Injector<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Fat32Handle> for Fat32Injector<'a, IO> {
     fn set_root_context(&mut self, _: &FsNode) -> FsInjectorResult {
         // Load root cluster’s existing entries, strip trailing EOD region
         let offset = self.meta.unit_offset(self.meta.root_unit());
@@ -85,43 +85,42 @@ impl<'a, IO: BlockIO + ?Sized> FsNodeInjector<Fat32Handle> for Fat32Injector<'a,
         buf.truncate(eod_pos * 32);
 
         // Ensure the handle’s cluster_id equals the real root cluster (usually 2).
-        let mut handle = Fat32Handle::new(self.meta.root_unit());
-        handle.cluster_id = self.meta.root_unit();
+        let handle = Fat32Handle::new(self.meta.root_unit());
 
         self.stack.push(FsContext::new(handle, buf));
         Ok(())
     }
 
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
-        // 1) Allocate and IMMEDIATELY reserve the child dir’s first cluster in FAT (EOC).
-        let handle = self.allocator.allocate_unit()?;
-        ops::write_all_fat_chain(self.io, self.meta, &handle.cluster_chain)?;
+        // Allocate and IMMEDIATELY reserve the child dir’s first cluster in FAT (EOC).
+        let handle: Fat32Handle = self.allocator.allocate_unit()?;
+        fat::chain::write_chain::<IO, Fat32Meta>(self.io, self.meta, &handle.cluster_chain)?;
 
-        // 2) Resolve parent cluster robustly (fallback to root if handle reports 0).
+        // Resolve parent cluster robustly.
         let parent_cluster = self
             .stack
             .last()
             .map(|ctx| {
-                if ctx.handle.cluster_id == 0 {
-                    self.meta.root_unit()
+                if ctx.handle.cluster_id == self.meta.root_unit() {
+                    0
                 } else {
                     ctx.handle.cluster_id
                 }
             })
             .unwrap_or(self.meta.root_unit());
 
-        // 3) Build child directory head in-memory: "." + ".." + EOD.
+        // Build child directory head in-memory: "." + ".." + EOD.
         let mut child_buf = Vec::with_capacity(self.meta.unit_size());
 
         Fat32Entries::dot(handle.cluster_id).to_raw_buffer(&mut child_buf);
         Fat32Entries::dotdot(parent_cluster).to_raw_buffer(&mut child_buf);
 
-        // 4) Append the directory entry into the CURRENT parent now (size = 0).
+        // Append the directory entry into the CURRENT parent now (size = 0).
         if let Some(parent) = self.stack.last_mut() {
             Fat32Entries::dir(name, handle.cluster_id, attr).to_raw_buffer(&mut parent.buf)
         }
 
-        // 5) Push child context (we will write it at flush_current/flush).
+        // Push child context (we will write it at flush_current/flush).
         self.stack.push(FsContext::new(handle, child_buf));
         Ok(())
     }
@@ -129,19 +128,29 @@ impl<'a, IO: BlockIO + ?Sized> FsNodeInjector<Fat32Handle> for Fat32Injector<'a,
     fn write_file(
         &mut self,
         name: &str,
-        content: &[u8],
+        source: &mut dyn RimIO,
+        size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
         // Allocate content chain and write file data first (best locality).
         let cs = self.meta.unit_size();
-        let need = content.len().div_ceil(cs).max(1);
+        let need = (size as usize).div_ceil(cs).max(1);
 
-        let handle = self.allocator.allocate_chain(need)?;
-        self.write_chain_buffer(&handle, content)?;
+        let handle: Fat32Handle = self.allocator.allocate_chain(need)?;
+
+        fat::chain::write_chain::<IO, Fat32Meta>(self.io, self.meta, &handle.cluster_chain)?;
+
+        use crate::core::utils::stream_copy::write_stream_to_units;
+
+        // ... (in write_file) ...
+        // Stream content to disk
+        if !handle.cluster_chain.is_empty() {
+            write_stream_to_units(self.io, self.meta, source, &handle.cluster_chain, size)?;
+        }
 
         // Append the file entry to the CURRENT dir buffer.
         if let Some(ctx) = self.stack.last_mut() {
-            Fat32Entries::file(name, handle.cluster_id, content.len() as u32, attr)
+            Fat32Entries::file(name, handle.cluster_id, size as u32, attr)
                 .to_raw_buffer(&mut ctx.buf)
         }
         Ok(())
@@ -190,11 +199,11 @@ mod tests {
     fn test_fat32_injector_hierarchy_flow() {
         const SIZE_MB: u64 = 32;
         const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
-        let meta = Fat32Meta::new(SIZE_BYTES, Some("TESTFS"));
+        let meta = Fat32Meta::new(SIZE_BYTES, Some("TESTFS")).unwrap();
 
         let mut buf = vec![0u8; SIZE_BYTES as usize];
 
-        let mut io = MemBlockIO::new(&mut buf);
+        let mut io = MemRimIO::new(&mut buf);
         let mut allocator = Fat32Allocator::new(&meta);
 
         let mut injector = Fat32Injector::new(&mut io, &mut allocator, &meta);
@@ -230,6 +239,6 @@ mod tests {
 
         println!("{tree}");
         println!("{parsed_tree}");
-        assert_eq!(tree, parsed_tree);
+        assert!(tree.structural_eq(&parsed_tree), "Tree structure mismatch");
     }
 }

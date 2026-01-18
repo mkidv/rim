@@ -6,13 +6,12 @@ pub mod filesystem;
 pub mod formatter;
 pub mod injector;
 pub mod meta;
-mod ops;
 pub mod resolver;
 pub mod types;
 pub mod upcase;
 pub mod utils;
 
-// === Public Interface ===
+// Public Interface
 pub mod traits {
     pub use super::allocator::{ExFatAllocator, ExFatHandle};
     pub use super::checker::ExFatChecker;

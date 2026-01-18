@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
+    Validate,
     core::{errors::*, resolver::*, utils::time_utils},
+    exfat::ExFatMeta,
     fs::exfat::{constant::*, upcase::UpcaseHandle, utils},
 };
 
@@ -47,10 +47,15 @@ impl ExFatEntries {
         self.stream.first_cluster
     }
 
-    pub fn dir(name: &str, cluster: u32, attr: &FileAttributes, upcase: &UpcaseHandle) -> Self {
+    pub fn dir(
+        name: &str,
+        cluster: u32,
+        attr: &FileAttributes,
+        upcase: &UpcaseHandle,
+    ) -> FsParsingResult<Self> {
         let names = name_entries(name);
 
-        let name_length = name_length_utf16(name);
+        let name_length = name_length_utf16(name)?;
 
         let secondary_count = 1 + names.len() as u8;
 
@@ -62,11 +67,11 @@ impl ExFatEntries {
 
         primary.compute_set_checksum(&stream, &names);
 
-        Self {
+        Ok(Self {
             primary,
             stream,
             names,
-        }
+        })
     }
 
     pub fn dir_with_len(
@@ -75,9 +80,9 @@ impl ExFatEntries {
         attr: &FileAttributes,
         data_len: u64,
         upcase: &UpcaseHandle,
-    ) -> Self {
+    ) -> FsParsingResult<Self> {
         let names = name_entries(name);
-        let name_length = name_length_utf16(name);
+        let name_length = name_length_utf16(name)?;
 
         let secondary_count = 1 + names.len() as u8;
 
@@ -88,11 +93,11 @@ impl ExFatEntries {
         stream.general_secondary_flags |= 1; // AllocationPossible
 
         primary.compute_set_checksum(&stream, &names);
-        Self {
+        Ok(Self {
             primary,
             stream,
             names,
-        }
+        })
     }
 
     pub fn file(
@@ -101,9 +106,9 @@ impl ExFatEntries {
         size: u32,
         attr: &FileAttributes,
         upcase: &UpcaseHandle,
-    ) -> Self {
+    ) -> FsParsingResult<Self> {
         let names = name_entries(name);
-        let name_length = name_length_utf16(name);
+        let name_length = name_length_utf16(name)?;
         let secondary_count = 1 + names.len() as u8;
 
         let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
@@ -114,11 +119,11 @@ impl ExFatEntries {
 
         primary.compute_set_checksum(&stream, &names);
 
-        Self {
+        Ok(Self {
             primary,
             stream,
             names,
-        }
+        })
     }
 
     pub fn file_contiguous(
@@ -127,9 +132,9 @@ impl ExFatEntries {
         size: u32,
         attr: &FileAttributes,
         upcase: &UpcaseHandle,
-    ) -> Self {
+    ) -> FsParsingResult<Self> {
         let names = name_entries(name);
-        let name_length = name_length_utf16(name);
+        let name_length = name_length_utf16(name)?;
         let secondary_count = 1 + names.len() as u8;
 
         let mut primary = ExFatPrimaryEntry::new(attr, secondary_count);
@@ -141,11 +146,11 @@ impl ExFatEntries {
 
         primary.compute_set_checksum(&stream, &names);
 
-        Self {
+        Ok(Self {
             primary,
             stream,
             names,
-        }
+        })
     }
 
     #[inline(always)]
@@ -242,12 +247,12 @@ fn compute_name_hash(name: &str, upcase: &UpcaseHandle) -> u16 {
 }
 
 #[inline]
-fn name_length_utf16(name: &str) -> u8 {
+fn name_length_utf16(name: &str) -> FsParsingResult<u8> {
     let n = name.encode_utf16().count();
-    u8::try_from(n).expect("exFAT supports up to 255 UTF-16 units")
+    u8::try_from(n).map_err(|_| FsParsingError::Invalid("exFAT supports up to 255 UTF-16 units"))
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
+#[derive(Debug, Clone, Copy, IntoBytes, FromBytes, KnownLayout, Immutable)]
 #[repr(C, packed)]
 pub struct ExFatPrimaryEntry {
     pub entry_type: u8,
@@ -297,7 +302,7 @@ impl ExFatPrimaryEntry {
     pub fn compute_set_checksum(&mut self, stream: &ExFatStreamEntry, names: &[ExFatNameEntry]) {
         let mut sum = 0u16;
 
-        // Primary (ignorer SetChecksum aux offsets 2..=3)
+        // Primary (ignore SetChecksum at offsets 2..=3 during checksum calculation)
         let p = self.as_bytes();
         for (i, &b) in p.iter().enumerate() {
             if i == 2 || i == 3 {
@@ -325,6 +330,19 @@ impl ExFatPrimaryEntry {
     #[inline(always)]
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
+    }
+}
+
+impl Validate<()> for ExFatPrimaryEntry {
+    type Err = FsParsingError;
+    fn neutralized(&self) -> Self {
+        *self
+    }
+    fn validate(&self, _: &()) -> Result<(), Self::Err> {
+        if self.entry_type != EXFAT_ENTRY_PRIMARY {
+            return Err(FsParsingError::Invalid("exFAT: Primary.entry_type"));
+        }
+        Ok(())
     }
 }
 
@@ -359,7 +377,7 @@ impl ExFatStreamEntry {
         }
     }
 
-    /// Flag NoFatChain (contiguous) : bit1 de `general_secondary_flags`
+    /// NoFatChain flag (contiguous): bit 1 of `general_secondary_flags`
     #[inline]
     pub fn is_contiguous(&self) -> bool {
         (self.general_secondary_flags & 0x02) != 0
@@ -368,6 +386,32 @@ impl ExFatStreamEntry {
     #[inline(always)]
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
+    }
+}
+
+impl Validate<ExFatMeta> for ExFatStreamEntry {
+    type Err = FsParsingError;
+    fn neutralized(&self) -> Self {
+        *self
+    }
+    fn validate(&self, meta: &ExFatMeta) -> Result<(), Self::Err> {
+        if self.entry_type != EXFAT_ENTRY_STREAM {
+            return Err(FsParsingError::Invalid("exFAT: Stream.entry_type"));
+        }
+        // Head cluster must be in range (0 is allowed if the file is empty)
+        let c = self.first_cluster;
+        if c != 0 {
+            let first = EXFAT_FIRST_CLUSTER;
+            let last = EXFAT_FIRST_CLUSTER + meta.cluster_count - 1;
+            if c < first || c > last {
+                return Err(FsParsingError::Invalid("exFAT: Stream.first_cluster OOR"));
+            }
+        }
+        // valid_data_length <= data_length (exFAT rule)
+        if self.valid_data_length > self.data_length {
+            return Err(FsParsingError::Invalid("exFAT: VDL > DataLength"));
+        }
+        Ok(())
     }
 }
 
@@ -394,6 +438,19 @@ impl ExFatNameEntry {
     }
 }
 
+impl Validate<()> for ExFatNameEntry {
+    type Err = FsParsingError;
+    fn neutralized(&self) -> Self {
+        *self
+    }
+    fn validate(&self, _: &()) -> Result<(), Self::Err> {
+        if self.entry_type != EXFAT_ENTRY_NAME {
+            return Err(FsParsingError::Invalid("exFAT: Name.entry_type"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, Default)]
 #[repr(C, packed)]
 pub struct ExFatEodEntry {
@@ -412,4 +469,63 @@ impl ExFatEodEntry {
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
     }
+}
+
+impl Validate<()> for ExFatEodEntry {
+    type Err = FsParsingError;
+    fn neutralized(&self) -> Self {
+        *self
+    }
+    fn validate(&self, _: &()) -> Result<(), Self::Err> {
+        if self.entry_type != EXFAT_EOD {
+            return Err(FsParsingError::Invalid("exFAT: EOD.entry_type"));
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_exfat_set(
+    primary: &ExFatPrimaryEntry,
+    stream: &ExFatStreamEntry,
+    names: &[ExFatNameEntry],
+    upcase: &UpcaseHandle,
+) -> Result<(), FsParsingError> {
+    // Count secondary entries
+    let expected = 1 + names.len() as u8; // stream + names
+    if primary.secondary_count != expected {
+        return Err(FsParsingError::Invalid("exFAT: secondary_count mismatch"));
+    }
+    // name_length (UTF-16 units) vs concatenated names
+    let mut len_units = 0usize;
+    for n in names {
+        let name_chars = n.name_chars;
+        for &cu in &name_chars {
+            if cu == 0 || cu == 0xFFFF {
+                break;
+            }
+            len_units += 1;
+        }
+    }
+    if stream.name_length as usize != len_units {
+        return Err(FsParsingError::Invalid("exFAT: name_length mismatch"));
+    }
+    // Name hash verification (optional but useful)
+    let got_hash = stream.name_hash;
+    let real_hash = compute_name_hash(
+        &decode_name(names).map_err(|_| FsParsingError::Invalid("exFAT: name decode"))?,
+        upcase,
+    );
+    if got_hash != real_hash {
+        return Err(FsParsingError::Invalid("exFAT: name_hash mismatch"));
+    }
+    // Set checksum
+    let p = *primary;
+    let s = *stream;
+    let ns = names.to_vec();
+    let mut recompute = p;
+    recompute.compute_set_checksum(&s, &ns);
+    if p.set_checksum != recompute.set_checksum {
+        return Err(FsParsingError::Invalid("exFAT: set_checksum mismatch"));
+    }
+    Ok(())
 }

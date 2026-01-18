@@ -1,4 +1,7 @@
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::{string::String, vec::Vec};
 use core::cmp::Ordering;
+
 use core::fmt;
 
 // SPDX-License-Identifier: MIT
@@ -91,37 +94,37 @@ impl VerifyReport {
         self.findings.iter().filter(|f| f.sev == s).count()
     }
 
-    /// Afficher avec des options (filtrage, prefix, résumé…)
-    pub fn display_with<'a>(&'a self, opts: RenderOpts) -> ReportDisplay<'a> {
+    /// Display with options (filtering, prefix, summary...)
+    pub fn display_with<'a>(&'a self, opts: ReportDisplayOpts) -> ReportDisplay<'a> {
         ReportDisplay::new(self, opts)
     }
 
-    /// Affichage "only errors", prefix par défaut, sans résumé
+    /// Display "only errors", default prefix, no summary
     pub fn errors_only<'a>(&'a self) -> ReportDisplay<'a> {
-        self.display_with(RenderOpts {
+        self.display_with(ReportDisplayOpts {
             min_level: Severity::Error,
-            ..RenderOpts::default()
+            ..ReportDisplayOpts::default()
         })
     }
 
-    /// Affichage "warn + error"
+    /// Display "warn + error"
     pub fn warn_and_errors<'a>(&'a self) -> ReportDisplay<'a> {
-        self.display_with(RenderOpts {
+        self.display_with(ReportDisplayOpts {
             min_level: Severity::Warn,
-            ..RenderOpts::default()
+            ..ReportDisplayOpts::default()
         })
     }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct RenderOpts {
+pub struct ReportDisplayOpts {
     pub min_level: Severity,
     pub prefix: &'static str,
     pub show_summary: bool,
     pub pad_code: usize,
 }
 
-impl RenderOpts {
+impl ReportDisplayOpts {
     fn new(min_level: Severity, prefix: &'static str, show_summary: bool, pad_code: usize) -> Self {
         Self {
             min_level,
@@ -132,19 +135,19 @@ impl RenderOpts {
     }
 }
 
-impl Default for RenderOpts {
+impl Default for ReportDisplayOpts {
     fn default() -> Self {
-        Self::new(Severity::Info, "[rimfs] ", false, 12)
+        Self::new(Severity::Info, "", false, 12)
     }
 }
 
 pub struct ReportDisplay<'a> {
     rep: &'a VerifyReport,
-    opts: RenderOpts,
+    opts: ReportDisplayOpts,
 }
 
 impl<'a> ReportDisplay<'a> {
-    pub fn new(rep: &'a VerifyReport, opts: RenderOpts) -> Self {
+    pub fn new(rep: &'a VerifyReport, opts: ReportDisplayOpts) -> Self {
         Self { rep, opts }
     }
 }
@@ -196,7 +199,7 @@ impl fmt::Display for VerifyReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         ReportDisplay {
             rep: self,
-            opts: RenderOpts::default(),
+            opts: ReportDisplayOpts::default(),
         }
         .fmt(f)
     }
@@ -211,12 +214,12 @@ bitflags! {
         const ROOT       = 1 << 3;
         const CROSSREF   = 1 << 4;
         const CONTENT    = 1 << 5;
-        const CUSTOM     = 1 << 6; // libre pour FS
+        const CUSTOM     = 1 << 6; // free for FS
         const ALL        = u32::MAX;
     }
 }
 
-/// Options génériques que le FS peut encapsuler/étendre.
+/// Generic options that the FS can encapsulate/extend.
 pub trait VerifierOptionsLike {
     fn phases(&self) -> VerifyPhases {
         VerifyPhases::ALL

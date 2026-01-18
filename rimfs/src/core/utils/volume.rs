@@ -48,9 +48,11 @@ pub fn generate_volume_id_128() -> u128 {
 
     let seconds = now.unix_timestamp() as u128;
     let millis = now.millisecond() as u128;
+    let micros = now.microsecond() as u128;
     let counter = COUNTER.fetch_add(5, core::sync::atomic::Ordering::Relaxed) as u128;
 
-    let mut id = (seconds & 0xFFFF) | (seconds << 64) | ((millis & 0xFF) << 16) | ((millis >> 8) << 32) | counter;
+    let mut id =
+        (seconds & 0xFFFF) | (seconds << 64) | ((millis & 0xFF) << 16) | ((micros >> 8) << 32);
 
     // Mix 1 LSB of the counter into byte 0
     id ^= counter & 0xFF;
@@ -87,7 +89,6 @@ pub fn derive_ids(
     cluster_size: u32,
     user_salt: u32,
 ) -> ([u8; 16], u32) {
-    let mut seed = 0u32;
     let mut tmp = [0u8; 8 + 4 + 64];
     let mut n = 0;
 
@@ -102,7 +103,7 @@ pub fn derive_ids(
     tmp[n..n + 4].copy_from_slice(&user_salt.to_le_bytes());
     n += 4;
 
-    seed = crc32_ieee(0, &tmp[..n]);
+    let seed = crc32_ieee(0, &tmp[..n]);
 
     let mut x = xorshift32(seed ^ 0x9E37_79B9);
     let mut guid = [0u8; 16];
@@ -131,7 +132,6 @@ pub fn guid_from_volume_id(seed: u32) -> [u8; 16] {
     out
 }
 
-/// Volume serial 32-bit (FAT/ExFAT) dérivé du GUID.
 #[inline]
 pub fn volume_id_from_guid(guid: &[u8; 16]) -> u32 {
     crc32_ieee(0, guid)

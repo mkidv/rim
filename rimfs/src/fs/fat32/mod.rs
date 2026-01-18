@@ -6,12 +6,11 @@ pub mod filesystem;
 pub mod formatter;
 pub mod injector;
 pub mod meta;
-mod ops;
 pub mod resolver;
 pub mod types;
 pub mod utils;
 
-// === Public Interface ===
+// Public Interface
 pub mod traits {
     pub use super::allocator::{Fat32Allocator, Fat32Handle};
     pub use super::checker::Fat32Checker;

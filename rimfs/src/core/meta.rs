@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-pub use crate::core::utils::volume_utils::*;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use ::alloc::string::String;
+
+pub use crate::core::utils::volume::*;
 
 /// Trait implemented by each FS-specific Meta structure.
 /// Provides access to static metadata needed during formatting, allocation, injection, or checking.
@@ -25,6 +28,9 @@ pub trait FsMeta<Unit: Ord + Copy> {
 
     /// Total size in bytes of the FS.
     fn size_bytes(&self) -> u64;
+
+    /// Volume label.
+    fn label(&self) -> String;
 
     /// Check if a given unit is valid for this FS.
     fn is_valid_unit(&self, unit: Unit) -> bool {

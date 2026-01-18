@@ -4,14 +4,14 @@ use alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
-use rimio::{BlockIO, BlockIOExt};
+use rimio::{RimIO, RimIOExt};
 use zerocopy::IntoBytes;
 
 pub use crate::core::formatter::*;
 
 use crate::{
-    core::cursor::ClusterMeta,
-    fs::fat32::{constant::*, meta::*, ops, types::*},
+    core::{cursor::ClusterMeta, fat},
+    fs::fat32::{constant::*, meta::*, types::*},
 };
 
 /// Fat32Formatter:
@@ -19,12 +19,30 @@ use crate::{
 /// - Prepares VBR, FSINFO, FAT initial entries, and Root Directory.
 /// - Does not pre-allocate full FAT chains (injector is responsible for filling remaining data).
 /// - Suitable for image generators (rimgen), bootable FS, and validated FAT32 structures.
-pub struct Fat32Formatter<'a, IO: BlockIO + ?Sized> {
+pub struct Fat32Formatter<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     meta: &'a Fat32Meta,
 }
 
-impl<'a, IO: BlockIO + ?Sized> Fat32Formatter<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> FsFormatter for Fat32Formatter<'a, IO> {
+    fn format(&mut self, full_format: bool) -> FsFormatterResult {
+        self.write_vbr()?;
+        self.write_fsinfo()?;
+        self.write_fat_region()?;
+
+        if full_format {
+            self.zero_cluster_heap()?;
+        }
+
+        self.write_root_dir_cluster()?;
+        self.allocate_system_clusters()?;
+
+        self.io.flush()?;
+        Ok(())
+    }
+}
+
+impl<'a, IO: RimIO + ?Sized> Fat32Formatter<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a Fat32Meta) -> Self {
         Self { io, meta }
     }
@@ -58,23 +76,29 @@ impl<'a, IO: BlockIO + ?Sized> Fat32Formatter<'a, IO> {
     }
 
     fn write_fat_region(&mut self) -> FsFormatterResult {
-        let total = self.meta.fat_size_sectors as usize * self.meta.bytes_per_sector as usize;
+        // Streaming implementation to avoid excessive RAM usage on large disks.
+        // We only allocate one sector for the first entries, then zero-fill the rest.
+        let bps = self.meta.bytes_per_sector as usize;
+        let mut first_sector_buf = vec![0u8; bps];
 
-        let mut buf = vec![0u8; total];
+        // Init first 2 entries: Media Descriptor & EOC
+        first_sector_buf[0..4]
+            .copy_from_slice(&(0x0FFFFFF8 | (FAT_MEDIA_DESCRIPTOR as u32)).to_le_bytes());
+        first_sector_buf[4..8].copy_from_slice(&FAT_EOC.to_le_bytes());
 
-        buf[0..4].copy_from_slice(&(0x0FFFFFF8 | (FAT_MEDIA_DESCRIPTOR as u32)).to_le_bytes());
-        buf[4..8].copy_from_slice(&FAT_EOC.to_le_bytes());
+        let fat_size_bytes = self.meta.fat_size_sectors as u64 * self.meta.bytes_per_sector as u64;
 
         for fat_index in 0..self.meta.num_fats {
             let offset = self.meta.fat_entry_offset(0, fat_index);
 
-            self.io.write_at(offset, &buf)?;
+            // 1. Write the first sector (critical entries)
+            self.io.write_at(offset, &first_sector_buf)?;
 
-            let written = buf.len() as u64;
-            let total_fat_bytes =
-                self.meta.fat_size_sectors as u64 * self.meta.bytes_per_sector as u64;
-            let remaining = total_fat_bytes.saturating_sub(written);
-            self.io.zero_fill(offset + written, remaining as usize)?;
+            // 2. Zero-fill the rest of this FAT copy
+            if fat_size_bytes > bps as u64 {
+                let remaining = fat_size_bytes - bps as u64;
+                self.io.zero_fill(offset + bps as u64, remaining as usize)?;
+            }
         }
         Ok(())
     }
@@ -93,39 +117,12 @@ impl<'a, IO: BlockIO + ?Sized> Fat32Formatter<'a, IO> {
 
     fn allocate_system_clusters(&mut self) -> FsFormatterResult {
         let root = self.meta.root_unit();
-        ops::write_all_fat_chain(self.io, self.meta, &[root])?;
+        fat::chain::write_chain::<IO, Fat32Meta>(self.io, self.meta, &[root])?;
         Ok(())
     }
 
     fn zero_cluster_heap(&mut self) -> FsFormatterResult {
-        let first = self.meta.first_data_unit();
-        let last = self.meta.last_data_unit(); // inclusif
-        if first > last {
-            return Ok(());
-        }
-
-        let start = self.meta.unit_offset(first);
-        let end = self.meta.unit_offset(last) + self.meta.unit_size() as u64; // inclure le dernier cluster
-        let len = end.saturating_sub(start) as usize;
-
-        self.io.zero_fill(start, len)?;
-        Ok(())
-    }
-}
-
-impl<'a, IO: BlockIO + ?Sized> FsFormatter for Fat32Formatter<'a, IO> {
-    fn format(&mut self, full_format: bool) -> FsFormatterResult {
-        self.write_vbr()?;
-        self.write_fsinfo()?;
-        self.write_fat_region()?;
-        self.write_root_dir_cluster()?;
-        self.allocate_system_clusters()?;
-
-        if full_format {
-            self.zero_cluster_heap()?;
-        }
-        self.io.flush()?;
-        Ok(())
+        crate::core::formatter::zero_cluster_heap(self.io, self.meta)
     }
 }
 
@@ -136,14 +133,14 @@ mod tests {
 
     fn make_meta_32mb() -> Fat32Meta {
         const SIZE: u64 = 32 * 1024 * 1024;
-        Fat32Meta::new(SIZE, Some("TESTFS"))
+        Fat32Meta::new(SIZE, Some("TESTFS")).unwrap()
     }
 
     #[test]
     fn test_format_writes_vbr_fsinfo_fat_and_root() {
         let meta = make_meta_32mb();
         let mut img = vec![0u8; meta.volume_size_bytes as usize];
-        let mut io = MemBlockIO::new(&mut img);
+        let mut io = MemRimIO::new(&mut img);
 
         let mut fmt = Fat32Formatter::new(&mut io, &meta);
         fmt.format(false).expect("format failed");
@@ -199,21 +196,21 @@ mod tests {
     fn test_full_format_zeroes_cluster_heap_once() {
         let meta = make_meta_32mb();
         let mut img = vec![0u8; meta.volume_size_bytes as usize];
-        let mut io = MemBlockIO::new(&mut img);
+        let mut io = MemRimIO::new(&mut img);
 
-        // Pré-remplit la heap avec 0xAA pour vérifier que full_format zère bien
+        // Pre-fill the heap with 0xAA to verify that full_format properly zeroes it out
         let first = meta.first_data_unit();
         let last = meta.last_data_unit();
         let start = meta.unit_offset(first);
         let end = meta.unit_offset(last) + meta.unit_size() as u64;
         let len = (end - start) as usize;
-        let mut pattern = vec![0xAAu8; len];
+        let pattern = vec![0xAAu8; len];
         io.write_at(start, &pattern).unwrap();
 
         let mut fmt = Fat32Formatter::new(&mut io, &meta);
         fmt.format(true).expect("format(full) failed");
 
-        // Relit cette plage → doit être 0x00
+        // Read this range back → must be 0x00
         let mut back = vec![0u8; len];
         io.read_at(start, &mut back).unwrap();
         assert!(
@@ -224,14 +221,14 @@ mod tests {
 
     #[test]
     fn test_fsinfo_layout_and_signatures() {
-        let meta = Fat32Meta::new(32 * 1024 * 1024, Some("T"));
+        let meta = Fat32Meta::new(32 * 1024 * 1024, Some("T")).unwrap();
         let mut img = vec![0u8; meta.volume_size_bytes as usize];
-        let mut io = MemBlockIO::new(&mut img);
+        let mut io = MemRimIO::new(&mut img);
 
         Fat32Formatter::new(&mut io, &meta).format(false).unwrap();
         let off = FAT_FSINFO_SECTOR * meta.bytes_per_sector as u64;
 
-        // Option A: si tu as read_struct_at
+        // Use read_struct to verify the header directly
         let fsi: Fat32FsInfo = io.read_struct(off).unwrap();
 
         assert_eq!(fsi.lead_signature, FAT_FSINFO_LEAD_SIGNATURE);

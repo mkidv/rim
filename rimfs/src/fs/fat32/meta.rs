@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::string::{String, ToString};
+
+use crate::core::errors::{FsError, FsResult};
 pub use crate::core::meta::*;
 
 use crate::{core::cursor::ClusterMeta, fs::fat32::constant::*};
@@ -20,14 +24,14 @@ pub struct Fat32Meta {
     pub fat_offset_bytes: u64,
     pub fat_size_sectors: u32,
 
-    pub cluster_heap_offset: u64,
+    pub cluster_heap_offset_bytes: u64,
     pub cluster_count: u32,
 
     root_cluster: u32,
 }
 
 impl Fat32Meta {
-    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> Self {
+    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
         Self::new_custom(
             size_bytes,
             volume_label,
@@ -47,11 +51,12 @@ impl Fat32Meta {
         bytes_per_sector: u16,
         bytes_per_cluster: u32,
         reserved_sectors: u32,
-    ) -> Self {
+    ) -> FsResult<Self> {
         let sectors_per_cluster = bytes_per_cluster
             .checked_div(bytes_per_sector as u32)
-            .expect("cluster_size must be a multiple of sector_size")
-            as u8;
+            .ok_or(FsError::Invalid(
+                "cluster_size must be a multiple of sector_size",
+            ))? as u8;
 
         let mut volume_label_safe = [b' '; 11];
         if let Some(label) = &volume_label {
@@ -73,10 +78,10 @@ impl Fat32Meta {
         );
 
         let fat_offset_bytes = reserved_sectors as u64 * bytes_per_sector as u64;
-        let cluster_heap_offset =
+        let cluster_heap_offset_bytes =
             fat_offset_bytes + fat_size_sectors as u64 * num_fats as u64 * bytes_per_sector as u64;
 
-        Self {
+        Ok(Self {
             volume_id,
             volume_label: volume_label_safe,
             bytes_per_sector,
@@ -87,10 +92,10 @@ impl Fat32Meta {
             num_fats,
             fat_offset_bytes,
             fat_size_sectors,
-            cluster_heap_offset,
+            cluster_heap_offset_bytes,
             cluster_count,
             root_cluster: FAT_ROOT_CLUSTER,
-        }
+        })
     }
 
     #[inline]
@@ -129,8 +134,15 @@ impl FsMeta<u32> for Fat32Meta {
         self.volume_size_bytes
     }
 
+    fn label(&self) -> String {
+        String::from_utf8_lossy(&self.volume_label)
+            .trim()
+            .to_string()
+    }
+
     fn unit_offset(&self, cluster: u32) -> u64 {
-        self.cluster_heap_offset + ((cluster - FAT_FIRST_CLUSTER) as u64 * self.unit_size() as u64)
+        self.cluster_heap_offset_bytes
+            + ((cluster - FAT_FIRST_CLUSTER) as u64 * self.unit_size() as u64)
     }
 
     fn first_data_unit(&self) -> u32 {
@@ -146,12 +158,16 @@ impl ClusterMeta for Fat32Meta {
     const EOC: u32 = FAT_EOC;
     const FIRST_CLUSTER: u32 = FAT_FIRST_CLUSTER;
     const ENTRY_SIZE: usize = FAT_ENTRY_SIZE;
-    const ENTRY_MASK: u32 = FAT_MASK; // FAT32 utilise 28 bits
+    const ENTRY_MASK: u32 = FAT_MASK; // FAT32 uses 28 bits
 
     fn fat_entry_offset(&self, cluster: u32, fat_index: u8) -> u64 {
         self.fat_offset_bytes
             + fat_index as u64 * self.fat_size_sectors as u64 * self.bytes_per_sector as u64
             + cluster as u64 * FAT_ENTRY_SIZE as u64
+    }
+
+    fn num_fats(&self) -> u8 {
+        self.num_fats
     }
 }
 

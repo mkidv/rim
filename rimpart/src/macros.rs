@@ -14,7 +14,7 @@
 /// # Example
 /// ```rust
 /// use rimpart::define_partition_types;
-/// 
+///
 /// define_partition_types! {
 ///     EFI => "EFI System Partition", [0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B],
 ///     LINUX_FS => "Linux Filesystem", [0x0F, 0xC6, 0x69, 0xE8, 0xE8, 0x3A, 0xC1, 0x4D, 0x9A, 0x3E, 0x4B, 0xB1, 0x6E, 0xD6, 0x49, 0xFA],
@@ -29,7 +29,7 @@
 /// # Generated Items
 /// For each partition type:
 /// - `pub const GPT_PARTITION_TYPE_<NAME>: [u8; 16]`
-/// - `pub fn detect_<name>_partition_offset(io: &mut dyn BlockIO) -> PartResult<u64>`
+/// - `pub fn detect_<name>_partition_offset(io: &mut dyn RimIO) -> PartResult<u64>`
 /// - `pub fn is_<name>_partition(entry: &GptEntry) -> bool`
 ///
 /// Also generates:
@@ -51,7 +51,7 @@ macro_rules! define_partition_types {
 
                 #[doc = concat!("Returns the offset of the first GPT partition of type: ", $desc)]
                 pub fn [<detect_ $name:lower _partition_offset>](
-                    io: &mut dyn rimio::prelude::BlockIO,
+                    io: &mut dyn rimio::prelude::RimIO,
                 ) -> $crate::errors::PartResult<u64> {
                     $crate::utils::detect_partition_offset_by_type_guid(io, &[<GPT_PARTITION_TYPE_ $name:upper>])
                 }

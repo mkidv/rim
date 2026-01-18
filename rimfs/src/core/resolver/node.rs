@@ -1,17 +1,19 @@
 pub use crate::core::resolver::attr::FileAttributes;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::string::ToString;
 use core::fmt;
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 extern crate alloc;
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FsNodeCounts {
     pub dirs: usize,
     pub files: usize,
-    // optionnel: total de bytes si tu veux l’afficher
+    // optional: total bytes if you want to display it
     pub bytes: u64,
 }
 
@@ -123,7 +125,7 @@ impl FsNode {
                     }
                 }
                 FsNode::Container { children, .. } => {
-                    // on ne compte pas le container lui-même
+                    // we don't count the container itself
                     for c in children {
                         walk(c, acc);
                     }
@@ -135,23 +137,100 @@ impl FsNode {
         out
     }
 
-    pub fn fmt_tree_with(&self, f: &mut fmt::Formatter<'_>, opts: FsTreeOpts) -> fmt::Result {
-        fmt::Display::fmt(&FsTreeDisplay::new(self, opts), f)
+    pub fn display_with<'a>(&'a self, opts: FsTreeDisplayOpts) -> FsTreeDisplay<'a> {
+        FsTreeDisplay::new(self, opts)
+    }
+
+    /// Compares structure and content, ignoring timestamps and mode in attributes.
+    /// Useful for tests where the filesystem sets its own timestamps.
+    pub fn structural_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                FsNode::File {
+                    name: n1,
+                    content: c1,
+                    attr: a1,
+                },
+                FsNode::File {
+                    name: n2,
+                    content: c2,
+                    attr: a2,
+                },
+            ) => n1 == n2 && c1 == c2 && a1.structural_eq(a2),
+            (
+                FsNode::Dir {
+                    name: n1,
+                    children: ch1,
+                    attr: a1,
+                },
+                FsNode::Dir {
+                    name: n2,
+                    children: ch2,
+                    attr: a2,
+                },
+            ) => {
+                n1 == n2
+                    && a1.structural_eq(a2)
+                    && ch1.len() == ch2.len()
+                    && ch1.iter().zip(ch2).all(|(c1, c2)| c1.structural_eq(c2))
+            }
+            (
+                FsNode::Container {
+                    children: ch1,
+                    attr: a1,
+                },
+                FsNode::Container {
+                    children: ch2,
+                    attr: a2,
+                },
+            ) => {
+                a1.structural_eq(a2)
+                    && ch1.len() == ch2.len()
+                    && ch1.iter().zip(ch2).all(|(c1, c2)| c1.structural_eq(c2))
+            }
+            _ => false,
+        }
+    }
+
+    /// Creates a new directory node.
+    pub fn new_dir(name: impl Into<String>) -> Self {
+        Self::Dir {
+            name: name.into(),
+            children: Vec::new(),
+            attr: FileAttributes::new_dir(),
+        }
+    }
+
+    /// Creates a new file node with content.
+    pub fn new_file(name: impl Into<String>, content: Vec<u8>) -> Self {
+        Self::File {
+            name: name.into(),
+            content,
+            attr: FileAttributes::default(),
+        }
+    }
+
+    /// Creates a new container node (anonymous).
+    pub fn new_container(children: Vec<FsNode>) -> Self {
+        Self::Container {
+            children,
+            attr: FileAttributes::default(),
+        }
     }
 }
 
-/// Options d’affichage
+/// Display Options
 #[derive(Clone, Copy)]
-pub struct FsTreeOpts {
-    pub max_depth: usize,  // 0 = illimité
-    pub max_lines: usize,  // 0 = illimité
-    pub name_width: usize, // troncature des noms
+pub struct FsTreeDisplayOpts {
+    pub max_depth: usize,  // 0 = unlimited
+    pub max_lines: usize,  // 0 = unlimited
+    pub name_width: usize, // name truncation
     pub show_sizes: bool,
     pub human_size: bool,
     pub show_attrs: bool,
 }
 
-impl FsTreeOpts {
+impl FsTreeDisplayOpts {
     pub fn new(
         max_depth: usize,
         max_lines: usize,
@@ -170,19 +249,19 @@ impl FsTreeOpts {
         }
     }
 }
-impl Default for FsTreeOpts {
+impl Default for FsTreeDisplayOpts {
     fn default() -> Self {
         Self::new(0, 0, 40, true, true, false)
     }
 }
 
-/// Afficheur
+/// Formatter / Display
 pub struct FsTreeDisplay<'a> {
     root: &'a FsNode,
-    opts: FsTreeOpts,
+    opts: FsTreeDisplayOpts,
 }
 impl<'a> FsTreeDisplay<'a> {
-    pub fn new(root: &'a FsNode, opts: FsTreeOpts) -> Self {
+    pub fn new(root: &'a FsNode, opts: FsTreeDisplayOpts) -> Self {
         Self { root, opts }
     }
 }
@@ -268,7 +347,7 @@ fn pretty_bytes(n: u64) -> String {
 }
 
 fn sep_u64(mut n: u64) -> String {
-    // séparateur de milliers « fine »: 12 345 678
+    // "thin" thousand separator: 12 345 678
     if n < 1_000 {
         return n.to_string();
     }
@@ -279,7 +358,7 @@ fn sep_u64(mut n: u64) -> String {
     }
     parts.push(n.to_string());
     parts.reverse();
-    parts.join(" ") // espace fine insécable
+    parts.join(" ") // non-breaking thin space
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -291,6 +370,6 @@ fn truncate(s: &str, max: usize) -> &str {
 
 impl fmt::Display for FsNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_tree_with(f, FsTreeOpts::default())
+        FsTreeDisplay::new(self, FsTreeDisplayOpts::default()).fmt(f)
     }
 }

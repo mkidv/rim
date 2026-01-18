@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec};
 
 use rimio::prelude::*;
 use zerocopy::{FromBytes, IntoBytes};
 
 pub use crate::core::checker::*;
 
-use crate::core::cursor::read_fat_entry;
-use crate::fs::exfat::utils::{accumulate_checksum, accumulate_vbr_checksum};
+use crate::core::fat;
+use crate::core::utils::checksum_utils::{accumulate_checksum, accumulate_checksum_with_escape};
 use crate::fs::exfat::{constant::*, meta::*, types::*};
+
+mod walker;
 
 #[derive(Clone, Debug)]
 pub struct ExFatCheckOptions {
     pub phases: VerifyPhases,
     pub fail_fast: bool,
-    /// Échantillonnage FAT (0 = off)
+    /// FAT sampling (0 = off)
     pub fat_sample: u32,
-    /// Marche profonde sur toute la FAT (détecte boucles/overflow) — coûteux
+    /// Deep walk on the entire FAT (detects loops/overflow) — expensive
     pub deep_fat_walk: bool,
 }
 
@@ -42,28 +42,28 @@ impl VerifierOptionsLike for ExFatCheckOptions {
     }
 }
 
-pub struct ExFatChecker<'a, IO: BlockIO + ?Sized> {
+pub struct ExFatChecker<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     meta: &'a ExFatMeta,
 }
 
-impl<'a, IO: BlockIO + ?Sized> ExFatChecker<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> ExFatChecker<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExFatMeta) -> Self {
         Self { io, meta }
     }
 }
 
-impl<'a, IO: BlockIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
     type Options = ExFatCheckOptions;
 
     fn check_boot(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
         let bps = self.meta.bytes_per_sector as usize;
 
-        // VBR main + backup checksum + miroir (neutralise champs volatils)
+        // Main VBR + backup checksum + mirroring (neutralizes volatile fields)
         check_boot_checksum(self.io, 0, bps, rep)?;
         compare_vbr_main_backup(self.io, bps, rep)?;
 
-        // Géométrie (BPB) cohérente
+        // Consistent geometry (BPB)
         let vbr: ExFatBootSector = self.io.read_struct(EXFAT_VBR_SECTOR)?;
         let spc = self.meta.sectors_per_cluster as usize;
         check_bpb_geometry(&vbr, bps, spc, rep)?;
@@ -71,11 +71,11 @@ impl<'a, IO: BlockIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
     }
 
     fn check_chain(&mut self, opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
-        // Échantillonnage rapide (I/O faible)
+        // Fast sampling (low I/O)
         if opt.fat_sample > 0 {
             sample_fat(self.io, self.meta, opt.fat_sample, rep)?;
         }
-        // Marche profonde optionnelle (détection boucles/indices hors bornes)
+        // Optional deep walk (detects loops and out-of-bounds indices)
         if opt.deep_fat_walk {
             if let Err(e) = check_fat_chains_deep(self.io, self.meta) {
                 rep.push(Finding::err("FAT.DEEP", format!("FAT chain walk: {e}")));
@@ -87,7 +87,7 @@ impl<'a, IO: BlockIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
     }
 
     fn check_root(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
-        // Entrées critiques du root + Up-Case checksum
+        // Critical root entries + Up-Case checksum
         let crit = scan_root_for_critical_with_meta(self.io, self.meta, rep)?;
         if let (Some(fc), Some(len), Some(exp)) =
             (crit.upcase_fc, crit.upcase_len, crit.upcase_table_checksum)
@@ -102,20 +102,86 @@ impl<'a, IO: BlockIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
         _opt: &Self::Options,
         rep: &mut VerifyReport,
     ) -> FsCheckerResult<()> {
-        // Bitmap couvre Bitmap/UpCase/Root
+        // Bitmap couvre Bitmap/UpCase/Root - Scan First to satisfy borrow checker
         let crit = scan_root_for_critical_with_meta(self.io, self.meta, rep)?;
+
+        let mut walker = walker::ExFatWalker::new(self.io, self.meta);
+        let mut stats = walker::WalkerStats::default();
+        walker.walk_tree(rep, &mut stats)?;
+
+        // Manually mark critical system clusters (Bitmap, Upcase, Root) as reachable
+        // because walker only follows namespace.
+        // Bitmap
+        let bm_fc = crit.bitmap_fc.unwrap_or(self.meta.bitmap_cluster);
+        let bm_len = crit.bitmap_len.unwrap_or(self.meta.bitmap_size_bytes);
+        walker.mark_reachable(bm_fc, bm_len)?;
+        // Upcase
+        let uc_fc = crit.upcase_fc.unwrap_or(self.meta.upcase_cluster);
+        let uc_len = crit.upcase_len.unwrap_or(EXFAT_UPCASE_FULL_LENGTH as u64);
+        walker.mark_reachable(uc_fc, uc_len)?;
+        // Root (is walked by walker, so should be marked, but ensure coverage of chain logic)
+        // Root is marked by walker.walk_tree -> ClusterCursor
+
+        let reachable_bitmap = walker.reachable_bitmap;
+        let mut orphans = 0usize;
+        let mut samples = 0usize;
+
+        let bitmap_clus = crit.bitmap_fc.unwrap_or(self.meta.bitmap_cluster);
+        let bpos = self.meta.unit_offset(bitmap_clus);
+        let bsize = self
+            .meta
+            .unit_size()
+            .min(self.meta.bitmap_size_bytes as usize);
+        // Note: simplified reading of just first cluster of bitmap if > 1 cluster
+        // Real implementation should chain-read bitmap.
+        // For now, let's assume small disk or just check 1st bitmap cluster coverage
+        let mut bitmap_data = vec![0u8; bsize];
+        self.io
+            .read_at(bpos, &mut bitmap_data)
+            .map_err(FsCheckerError::IO)?;
+
+        let start_c = EXFAT_FIRST_CLUSTER;
+
+        for (i, &used) in bitmap_data.iter().enumerate() {
+            let reach = *reachable_bitmap.get(i).unwrap_or(&0);
+
+            // If used bit is set but reachable bit is not set -> Orphan
+            let diff = used & !reach;
+            if diff != 0 {
+                for b in 0..8 {
+                    if (diff & (1 << b)) != 0 {
+                        orphans += 1;
+                        if samples < 5 {
+                            let c = start_c + (i as u32 * 8) + b;
+                            rep.push(Finding::warn("WALK.ORPHAN", format!("Orphan cluster {c}")));
+                            samples += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if orphans > 0 {
+            rep.push(Finding::err(
+                "WALK.ORPHAN",
+                format!("Found {orphans} orphan clusters"),
+            ));
+        } else {
+            rep.push(Finding::info("WALK.ORPHAN", "No orphan clusters found"));
+        }
+
         bitmap_covers_critical(self.io, self.meta, &crit, rep)?;
 
-        // Bitmap vs FAT (cohérence stricte cluster-par-cluster) — ton check existant
+        // Bitmap vs FAT (strict cluster-by-cluster consistency)
         match check_bitmap_fat_consistency(self.io, self.meta) {
-            Ok(()) => rep.push(Finding::info("XREF.BITMAPFAT", "Bitmap & FAT cohérents")),
+            Ok(()) => rep.push(Finding::info("XREF.BITMAPFAT", "Bitmap & FAT consistent")),
             Err(e) => rep.push(Finding::err("XREF.BITMAPFAT", format!("{e}"))),
         }
         Ok(())
     }
 
     fn fast_check(&mut self) -> FsCheckerResult {
-        // Quick policy: phases clés, marche profonde FAT activée, pas d’échantillonnage
+        // Quick policy: key phases, deep FAT walk enabled, no sampling
         let opt = ExFatCheckOptions {
             phases: VerifyPhases::BOOT
                 | VerifyPhases::GEOMETRY
@@ -137,11 +203,11 @@ impl<'a, IO: BlockIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
 }
 
 /* =========================================================================
-Impl des anciens checks, factorisés / adaptés
+Implementation of old checks, factorized / adapted
 ========================================================================= */
 
-/// Deep walk des chaînes FAT (détection boucles/overflow/indices invalides)
-fn check_fat_chains_deep<IO: BlockIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsCheckerResult {
+/// Deep walk of FAT chains (detects loops, overflow, and invalid indices)
+fn check_fat_chains_deep<IO: RimIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsCheckerResult {
     let first_cluster = meta.first_data_unit();
     let last_cluster = meta.last_data_unit();
     let cluster_span = (last_cluster - first_cluster) as usize;
@@ -179,7 +245,7 @@ fn check_fat_chains_deep<IO: BlockIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) ->
 
             mark_visited(&mut visited_bitmap, first_cluster, current);
 
-            let next = read_fat_entry(io, meta, current, 0)?;
+            let next = fat::chain::read_entry(io, meta, current, 0)?;
             chain_len += 1;
             if chain_len > meta.cluster_count as usize {
                 return Err(FsCheckerError::Invalid("Invalid FAT chain length"));
@@ -194,8 +260,8 @@ fn check_fat_chains_deep<IO: BlockIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) ->
     Ok(())
 }
 
-/// Cohérence stricte Bitmap <-> FAT (reprend ton impl d’origine)
-fn check_bitmap_fat_consistency<IO: BlockIO + ?Sized>(
+/// Strict Bitmap <-> FAT consistency
+fn check_bitmap_fat_consistency<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
 ) -> FsCheckerResult {
@@ -229,11 +295,11 @@ fn check_bitmap_fat_consistency<IO: BlockIO + ?Sized>(
 
         let bitmap_set = (bitmap[byte_index] & bit_mask) != 0;
         let fat_used = match fat_entry {
-            0x00000000 => false,             // libre
-            0x00000001 => true,              // réservé
-            0x00000002..=0xFFFFFFF6 => true, // chaînage
+            0x00000000 => false,             // free
+            0x00000001 => true,              // reserved
+            0x00000002..=0xFFFFFFF6 => true, // chaining
             0xFFFFFFF7 => false,             // bad
-            0xFFFFFFF8..=0xFFFFFFFF => true, // réservé/EOC
+            0xFFFFFFF8..=0xFFFFFFFF => true, // reserved/EOC
         };
 
         if bitmap_set != fat_used {
@@ -259,8 +325,8 @@ fn boot_backup_lba512(main_lba512: u64, bps: usize) -> u64 {
     main_lba512 + (EXFAT_BOOT_REGION_SECTORS as u64) * (bps as u64 / 512)
 }
 
-/// Calcule et vérifie le checksum d’une boot region (11 data + 1 checksum sector)
-fn check_boot_checksum<IO: BlockIO + ?Sized>(
+/// Calculates and verifies the checksum of a boot region (11 data sectors + 1 checksum sector)
+fn check_boot_checksum<IO: RimIO + ?Sized>(
     io: &mut IO,
     lba512: u64,
     bps: usize,
@@ -269,16 +335,18 @@ fn check_boot_checksum<IO: BlockIO + ?Sized>(
     let base = lba512 * 512;
     let mut sum: u32 = 0;
 
-    // 1 seul buffer réutilisé
+    // Single reused buffer
     let mut sec = vec![0u8; bps];
 
-    // Secteurs 0..10
-    for i in 0..=10 {
-        io.read_at(base + (bps as u64) * (i as u64), &mut sec)?;
-        accumulate_vbr_checksum(&mut sum, &sec, i);
+    // Sectors 0..10
+    for s in 0..=10 {
+        io.read_at(base + (bps as u64) * (s as u64), &mut sec)?;
+        accumulate_checksum_with_escape(&mut sum, &sec, |i, _b| {
+            s == 0 && (i == 106 || i == 107 || i == 112)
+        });
     }
 
-    // Secteur 11 (checksum répété)
+    // Sector 11 (repeated checksum)
     io.read_at(base + (bps as u64) * 11, &mut sec)?;
     let mut ok = true;
     let mut bad_off = None;
@@ -312,8 +380,8 @@ fn check_boot_checksum<IO: BlockIO + ?Sized>(
     Ok(ok)
 }
 
-/// Compare les secteurs 0 (main/backup) en neutralisant les champs volatils
-fn compare_vbr_main_backup<IO: BlockIO + ?Sized>(
+/// Compares sectors 0 (main vs backup) while neutralizing volatile fields
+fn compare_vbr_main_backup<IO: RimIO + ?Sized>(
     io: &mut IO,
     bps: usize,
     rep: &mut VerifyReport,
@@ -323,8 +391,8 @@ fn compare_vbr_main_backup<IO: BlockIO + ?Sized>(
     io.read_at(0, &mut main_raw)?;
     io.read_at(boot_backup_lba512(0, bps) * 512, &mut bak_raw)?;
 
-    // Parse struct → neutralise → re-sérialise
-    if let (Ok(mut m0), Ok(mut b0)) = (
+    // Parse struct -> neutralize -> re-serialize
+    if let (Ok(m0), Ok(b0)) = (
         ExFatBootSector::read_from_bytes(&main_raw),
         ExFatBootSector::read_from_bytes(&bak_raw),
     ) {
@@ -334,22 +402,22 @@ fn compare_vbr_main_backup<IO: BlockIO + ?Sized>(
         if m.as_bytes() == b.as_bytes() {
             rep.push(Finding::info(
                 "VBR.MIRROR",
-                "Backup VBR = Main (hors flags)",
+                "Backup VBR = Main (excluding flags)",
             ));
         } else {
             rep.push(Finding::warn(
                 "VBR.MIRROR",
-                "Backup VBR ≠ Main (hors flags)",
+                "Backup VBR ≠ Main (excluding flags)",
             ));
         }
         Ok(())
     } else {
-        rep.push(Finding::err("VBR.MIRROR", "VBR illisible (parse struct)"));
+        rep.push(Finding::err("VBR.MIRROR", "Unreadable VBR (struct parse)"));
         Err(FsCheckerError::Invalid("Invalid VBR layout"))
     }
 }
 
-/// Validation cohérence BPB / géométrie
+/// BPB / geometry consistency validation
 fn check_bpb_geometry(
     vbr: &ExFatBootSector,
     bps: usize,
@@ -376,7 +444,7 @@ fn check_bpb_geometry(
     if !(fat_begin < fat_end && fat_end <= heap_off && heap_off < vol_bytes) {
         rep.push(Finding::err(
             "BPB.ORDER",
-            "Ordre FAT/Heap/Volume incohérent",
+            "Inconsistent FAT/Heap/Volume ordering",
         ));
     }
 
@@ -385,7 +453,7 @@ fn check_bpb_geometry(
     if fat_bytes < need_bytes {
         rep.push(Finding::err(
             "BPB.FATL",
-            format!("FATLength trop petite ({} < {})", fat_bytes, need_bytes),
+            format!("FATLength too small ({fat_bytes} < {need_bytes})"),
         ));
     }
 
@@ -394,7 +462,7 @@ fn check_bpb_geometry(
     {
         rep.push(Finding::err(
             "BPB.ROOT",
-            "RootDir cluster hors plage valide",
+            "RootDir cluster out of valid range",
         ));
     }
 
@@ -411,7 +479,7 @@ fn check_bpb_geometry(
 
 /* -------------------- FAT sampling -------------------- */
 
-fn sample_fat<IO: BlockIO + ?Sized>(
+fn sample_fat<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     sample: u32,
@@ -426,10 +494,10 @@ fn sample_fat<IO: BlockIO + ?Sized>(
     let mut bad = 0u32;
 
     for i in (0..meta.fat_size_sectors).step_by(step as usize) {
-        let off = (meta.fat_offset_bytes + (i as u64) * bps as u64);
+        let off = meta.fat_offset_bytes + (i as u64) * bps as u64;
         if let Err(e) = io.read_at(off, &mut buf) {
             bad += 1;
-            rep.push(Finding::warn("FAT.IO", format!("read sector {}: {e:?}", i)));
+            rep.push(Finding::warn("FAT.IO", format!("read sector {i}: {e:?}")));
         }
     }
     if bad == 0 {
@@ -443,7 +511,7 @@ fn sample_fat<IO: BlockIO + ?Sized>(
 
 /* -------------------- ROOT & CRITICAL ENTRIES -------------------- */
 
-fn scan_root_for_critical_with_meta<IO: BlockIO + ?Sized>(
+fn scan_root_for_critical_with_meta<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     rep: &mut VerifyReport,
@@ -475,7 +543,7 @@ fn scan_root_for_critical_with_meta<IO: BlockIO + ?Sized>(
                         format!("Bitmap fc={fc} len={len} bytes"),
                     ));
                 } else {
-                    rep.push(Finding::err("ROOT.BITMAP", "Bitmap entry illisible"));
+                    rep.push(Finding::err("ROOT.BITMAP", "Unreadable Bitmap entry"));
                 }
                 i += 32;
             }
@@ -489,7 +557,7 @@ fn scan_root_for_critical_with_meta<IO: BlockIO + ?Sized>(
                         format!("Up-Case fc={fc} len={len} bytes chk=0x{chk:08X}"),
                     ));
                 } else {
-                    rep.push(Finding::err("ROOT.UPCASE", "Up-Case entry illisible"));
+                    rep.push(Finding::err("ROOT.UPCASE", "Unreadable Up-Case entry"));
                 }
                 i += 32;
             }
@@ -516,13 +584,13 @@ fn scan_root_for_critical_with_meta<IO: BlockIO + ?Sized>(
         }
     }
 
-    // Fallbacks “méta”
+    // "Meta" fallbacks
     if out.bitmap_fc.is_none() {
         out.bitmap_fc = Some(meta.bitmap_cluster);
         out.bitmap_len = Some(meta.bitmap_size_bytes);
         rep.push(Finding::warn(
             "ROOT.MISS",
-            "Bitmap introuvable → fallback meta()",
+            "Bitmap not found → fallback to meta()",
         ));
     }
     if out.upcase_fc.is_none() {
@@ -530,14 +598,14 @@ fn scan_root_for_critical_with_meta<IO: BlockIO + ?Sized>(
         out.upcase_len = Some(EXFAT_UPCASE_FULL_LENGTH as u64);
         rep.push(Finding::warn(
             "ROOT.MISS",
-            "Up-Case introuvable → fallback meta()",
+            "Up-Case not found → fallback to meta()",
         ));
     }
 
     Ok(out)
 }
 
-fn verify_upcase_checksum_over_file<IO: BlockIO + ?Sized>(
+fn verify_upcase_checksum_over_file<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     first_cluster: u32,
@@ -545,7 +613,7 @@ fn verify_upcase_checksum_over_file<IO: BlockIO + ?Sized>(
     rep: &mut VerifyReport,
     expected: u32,
 ) -> FsCheckerResult<()> {
-    // Cas trivial
+    // Trivial case
     if len_bytes == 0 {
         let got = 0u32;
         if got == expected {
@@ -572,12 +640,12 @@ fn verify_upcase_checksum_over_file<IO: BlockIO + ?Sized>(
     let mut walked = 0usize;
 
     while remain > 0 {
-        // bornes basiques
+        // Basic bounds check
         if cur < EXFAT_FIRST_CLUSTER || cur >= meta.last_data_unit() {
             return Err(FsCheckerError::Invalid("Up-Case cluster out of range"));
         }
 
-        // Lire cluster courant
+        // Read current cluster
         let mut buf = vec![0u8; bytes_per_cluster];
         io.read_at(meta.unit_offset(cur), &mut buf)?;
 
@@ -589,10 +657,10 @@ fn verify_upcase_checksum_over_file<IO: BlockIO + ?Sized>(
             break;
         }
 
-        // Suivre la chaîne FAT
-        let next = read_fat_entry(io, meta, cur, 0)?;
+        // Follow FAT chain
+        let next = fat::chain::read_entry(io, meta, cur, 0)?;
         if next == EXFAT_EOC {
-            // chaîne trop courte par rapport à len_bytes déclaré
+            // Chain too short compared to declared length
             return Err(FsCheckerError::Invalid("Up-Case chain shorter than length"));
         }
         cur = next;
@@ -619,7 +687,7 @@ fn verify_upcase_checksum_over_file<IO: BlockIO + ?Sized>(
 
 /* -------------------- BITMAP vs FAT -------------------- */
 
-fn bitmap_covers_critical<IO: BlockIO + ?Sized>(
+fn bitmap_covers_critical<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     crit: &RootCritical,
@@ -653,7 +721,7 @@ fn bitmap_covers_critical<IO: BlockIO + ?Sized>(
     Ok(())
 }
 
-fn bitmap_has_cluster_meta<IO: BlockIO + ?Sized>(
+fn bitmap_has_cluster_meta<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     bfc: u32,
@@ -677,8 +745,8 @@ fn bitmap_has_cluster_meta<IO: BlockIO + ?Sized>(
         let bit = (idx % 8) as u8;
         Ok((byte & (1 << bit)) != 0)
     } else {
-        // TODO: suivre FAT si bitmap > 1 cluster
-        Ok(true) // éviter faux négatif en MVP
+        // TODO: follow FAT if bitmap > 1 cluster
+        Ok(true) // avoid false negatives in MVP
     }
 }
 
@@ -697,13 +765,13 @@ fn parse_upcase_entry(raw: &[u8]) -> Option<(u32, u64, u32)> {
 
 fn check_file_entry_set(raw: &[u8]) -> (bool, usize, String) {
     if raw.len() < 64 || raw[0] != EXFAT_ENTRY_PRIMARY {
-        return (false, 32, "File set: signature absente".into());
+        return (false, 32, "File set: missing signature".into());
     }
     if raw[32] != EXFAT_ENTRY_STREAM {
         return (
             false,
             64,
-            format!("File set: attente Stream(0xC0), vu 0x{:02X}", raw[32]),
+            format!("File set: expected Stream(0xC0), found 0x{:02X}", raw[32]),
         );
     }
     let mut off = 64usize;
@@ -713,7 +781,7 @@ fn check_file_entry_set(raw: &[u8]) -> (bool, usize, String) {
         names += 1;
     }
     if names == 0 {
-        return (false, off, "File set: aucun FileName(0xC1)".into());
+        return (false, off, "File set: no FileName(0xC1)".into());
     }
     (true, off, format!("File entry set OK ({names} FileName)"))
 }

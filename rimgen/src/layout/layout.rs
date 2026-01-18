@@ -13,6 +13,13 @@ pub struct Layout {
     #[serde(skip)]
     pub base_dir: PathBuf,
     pub partitions: Vec<Partition>,
+    pub disk: Option<DiskConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DiskConfig {
+    pub alignment: Option<String>,
+    pub guid: Option<uuid::Uuid>,
 }
 
 impl Layout {
@@ -32,7 +39,7 @@ impl Layout {
     pub fn resolve_partition(&mut self) -> anyhow::Result<()> {
         for part in &mut self.partitions {
             if let Size::Auto = part.size {
-                let source_path = self.base_dir.join(&part.mountpoint.as_deref().unwrap_or(""));
+                let source_path = self.base_dir.join(part.mountpoint.as_deref().unwrap_or(""));
                 let size_bytes = calculate_needed_bytes(&source_path)?;
                 let size_mb = ((size_bytes as f64 * 1.1) / (1024.0 * 1024.0))
                     .ceil()
@@ -64,6 +71,17 @@ impl Layout {
 
 impl core::fmt::Display for Layout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Some(disk) = &self.disk {
+            writeln!(f, "Disk Configuration:")?;
+            if let Some(align) = &disk.alignment {
+                writeln!(f, "  Alignment: {align}")?;
+            }
+            if let Some(guid) = &disk.guid {
+                writeln!(f, "  Disk GUID: {guid}")?;
+            }
+            writeln!(f)?;
+        }
+
         writeln!(
             f,
             "\n  ┌────┬──────────────────────────────┬────────┬────────────┬─────────┬──────┐"

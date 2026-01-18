@@ -1,17 +1,15 @@
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::{boxed::Box, vec};
+
 // exfat/upcase.rs
 use crate::{
-    FsMeta,
-    core::{
-        FsResolverResult,
-        cursor::{ClusterCursor, LinearCursor},
-    },
+    core::{FsResolverResult, cursor::LinearCursor, utils::checksum_utils::accumulate_checksum},
     fs::exfat::{
         constant::{
             EXFAT_UPCASE_FULL, EXFAT_UPCASE_FULL_CHECKSUM, EXFAT_UPCASE_FULL_LENGTH,
             EXFAT_UPCASE_MINIMAL, EXFAT_UPCASE_MINIMAL_CHECKSUM, EXFAT_UPCASE_MINIMAL_LENGTH,
         },
         meta::ExFatMeta,
-        utils::accumulate_checksum, // tu l'as déjà
     },
 };
 use rimio::prelude::*;
@@ -60,8 +58,7 @@ impl UpcaseHandle {
         &self.bytes
     }
 
-    pub fn from_io<IO: BlockIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsResolverResult<Self> {
-        let cs = meta.unit_size(); // bytes par cluster/unité
+    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsResolverResult<Self> {
         let len = meta.upcase_size_bytes as usize;
 
         if len == 0 {
@@ -74,7 +71,7 @@ impl UpcaseHandle {
         // buffer destination complet
         let mut cur =
             LinearCursor::from_len_bytes(meta, meta.upcase_cluster, meta.upcase_size_bytes);
-        
+
         let mut blob = vec![0u8; len].into_boxed_slice();
         cur.read_into(io, blob.len(), &mut blob)?;
         // Checksum en une passe

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::fs::exfat::{constant::*, meta::*, types::flags::VolumeFlags};
+use crate::{
+    Validate,
+    core::FsParsingError,
+    fs::exfat::{constant::*, meta::*, types::flags::VolumeFlags},
+};
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
@@ -141,6 +145,82 @@ impl Default for ExFatBootSector {
     }
 }
 
+impl Validate<ExFatMeta> for ExFatBootSector {
+    type Err = FsParsingError;
+
+    fn neutralized(&self) -> Self {
+        // Volatiles: flags / percent_in_use
+        let mut v = *self;
+        v.volume_flags = VolumeFlags::from_bits(0);
+        v.percent_in_use = 0xFF; // "unknown" is tolerated
+        v
+    }
+
+    fn validate(&self, meta: &ExFatMeta) -> Result<(), Self::Err> {
+        if self.signature != EXFAT_SIGNATURE {
+            return Err(FsParsingError::Invalid("exFAT: VBR missing 0x55AA"));
+        }
+        if &self.fs_name != EXFAT_FS_NAME {
+            return Err(FsParsingError::Invalid("exFAT: FSName != 'EXFAT   '"));
+        }
+        if self.number_of_fats == 0 {
+            return Err(FsParsingError::Invalid("exFAT: NumFATs == 0"));
+        }
+
+        // Consistent shifts
+        let bps = 1u32
+            .checked_shl(self.bytes_per_sector_shift as u32)
+            .ok_or(FsParsingError::Invalid("exFAT: bytes_per_sector_shift"))?;
+        let spc = 1u32
+            .checked_shl(self.sectors_per_cluster_shift as u32)
+            .ok_or(FsParsingError::Invalid("exFAT: sectors_per_cluster_shift"))?;
+        if bps == 0 || (bps & (bps - 1)) != 0 {
+            // pow2
+            return Err(FsParsingError::Invalid("exFAT: BytesPerSector not pow2"));
+        }
+        if spc == 0 || (spc & (spc - 1)) != 0 {
+            return Err(FsParsingError::Invalid("exFAT: SectorsPerCluster not pow2"));
+        }
+
+        // Geometry fields vs metadata
+        if self.volume_length != meta.volume_size_sectors {
+            return Err(FsParsingError::Invalid("exFAT: volume_length mismatch"));
+        }
+        if self.fat_length != meta.fat_size_sectors {
+            return Err(FsParsingError::Invalid("exFAT: fat_length mismatch"));
+        }
+        let fat_off_expect = (meta.fat_offset_bytes / meta.bytes_per_sector as u64) as u32;
+        if self.fat_offset != fat_off_expect {
+            return Err(FsParsingError::Invalid("exFAT: fat_offset mismatch"));
+        }
+        let heap_off_expect =
+            (meta.cluster_heap_offset_bytes / meta.bytes_per_sector as u64) as u32;
+        if self.cluster_heap_offset != heap_off_expect {
+            return Err(FsParsingError::Invalid(
+                "exFAT: cluster_heap_offset mismatch",
+            ));
+        }
+        if self.cluster_count != meta.cluster_count {
+            return Err(FsParsingError::Invalid("exFAT: cluster_count mismatch"));
+        }
+
+        // Root cluster must be within data range
+        if self.root_dir_cluster < EXFAT_FIRST_CLUSTER
+            || self.root_dir_cluster > (EXFAT_FIRST_CLUSTER + meta.cluster_count - 1)
+        {
+            return Err(FsParsingError::Invalid(
+                "exFAT: root_dir_cluster out of range",
+            ));
+        }
+
+        // percent_in_use: 0xFF (unknown) ou <=100
+        if self.percent_in_use != 0xFF && self.percent_in_use > 100 {
+            return Err(FsParsingError::Invalid("exFAT: percent_in_use > 100"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
 #[repr(C, packed)]
 pub struct ExFatExBootSector {
@@ -168,5 +248,18 @@ impl ExFatExBootSector {
 impl Default for ExFatExBootSector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Validate<()> for ExFatExBootSector {
+    type Err = FsParsingError;
+    fn neutralized(&self) -> Self {
+        *self
+    }
+    fn validate(&self, _: &()) -> Result<(), Self::Err> {
+        if self.signature != EXFAT_SIGNATURE {
+            return Err(FsParsingError::Invalid("exFAT: ExBoot missing 0x55AA"));
+        }
+        Ok(())
     }
 }

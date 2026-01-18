@@ -11,56 +11,12 @@ use rimio::prelude::*;
 use crate::{
     DEFAULT_SECTOR_SIZE,
     errors::*,
-    gpt::{self, GptEntry, GptHeader},
+    gpt::{self, GptHeader},
     guids::GptPartitionKind,
-    io_ext::BlockIOLbaExt,
     mbr::{self, Mbr, MbrKind, PROTECTIVE_GPT},
 };
 
-/// Options pour le scan disque
-#[derive(Clone, Copy, Debug)]
-pub struct DiskScanOptions {
-    /// Taille logique d’un secteur (LBA) en octets
-    pub sector_size: u64,
-    /// Valider le CRC du header/entries GPT
-    pub validate_crc: bool,
-    /// Vérifier les bornes des partitions (overlaps, etc.)
-    pub validate_bounds: bool,
-}
-
-impl Default for DiskScanOptions {
-    fn default() -> Self {
-        Self {
-            sector_size: DEFAULT_SECTOR_SIZE,
-            validate_crc: true,
-            validate_bounds: true,
-        }
-    }
-}
-
-impl DiskScanOptions {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Pratique pour désactiver rapidement les checks lourds
-    pub fn no_crc(mut self) -> Self {
-        self.validate_crc = false;
-        self
-    }
-
-    pub fn no_bounds(mut self) -> Self {
-        self.validate_bounds = false;
-        self
-    }
-
-    pub fn with_sector_size(mut self, sz: u64) -> Self {
-        self.sector_size = sz;
-        self
-    }
-}
-
-/// Infos d’une partition
+/// Partition information
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct PartitionInfo {
@@ -75,7 +31,7 @@ pub struct PartitionInfo {
     pub name: String,
 }
 
-/// Résultat global du scan
+/// Global scan result
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct DiskInfo {
@@ -106,7 +62,7 @@ impl core::fmt::Display for DiskInfo {
                 p.index, p.name, p.kind, p.start_lba, p.end_lba, p.size_bytes
             )?;
         }
-        f
+        Ok(())
     }
 
     #[cfg(feature = "std")]
@@ -158,18 +114,13 @@ impl core::fmt::Display for DiskInfo {
     }
 }
 
-/// Décode un nom GPT (UTF-16LE, 36 * u16) en String rust.
-/// Stoppe au premier 0, remplace les code points invalides.
+/// Main scan: detects MBR (empty/protective/legacy), GPT, and partitions
 #[cfg(feature = "alloc")]
-fn decode_gpt_name(name: &[u16; 36]) -> String {
-    let end = name.iter().position(|&c| c == 0).unwrap_or(36);
-    String::from_utf16_lossy(&name[..end])
-}
-
-/// Scan principal : détecte MBR (vide/protectif/legacy), GPT et partitions
-#[cfg(feature = "alloc")]
-pub fn scan_disk<IO: BlockIO + ?Sized>(io: &mut IO, opts: DiskScanOptions) -> PartResult<DiskInfo> {
-    // 1) Lire l’MBR brut (on n’échoue pas si non-protectif)
+pub fn scan_disk_with_sector<IO: RimIO + ?Sized>(
+    io: &mut IO,
+    sector_size: u64,
+) -> PartResult<DiskInfo> {
+    // Read raw MBR (don't fail if non-protective)
     let mbr: Mbr = io.read_struct(0)?;
     let mbr_kind = {
         if mbr.signature != mbr::MBR_SIGNATURE {
@@ -183,20 +134,12 @@ pub fn scan_disk<IO: BlockIO + ?Sized>(io: &mut IO, opts: DiskScanOptions) -> Pa
         }
     };
 
-    // 2) S’il y a GPT, lire header+entries (avec ou sans validations)
+    // If GPT present, read header+entries (with or without validations)
     let mut gpt_header: Option<GptHeader> = None;
     let mut parts: Vec<PartitionInfo> = Vec::new();
 
     if matches!(mbr_kind, MbrKind::Protective) {
-        let (header, entries) = gpt::read_gpt_with_sector(io, opts.sector_size)?;
-
-        header.validate_header()?;
-        if opts.validate_crc {
-            header.validate_crc(&entries)?;
-        }
-        if opts.validate_bounds {
-            header.validate_entries(&entries, opts.sector_size)?;
-        }
+        let (header, entries) = gpt::read_gpt_with_sector(io, sector_size)?;
 
         gpt_header = Some(header);
 
@@ -204,14 +147,14 @@ pub fn scan_disk<IO: BlockIO + ?Sized>(io: &mut IO, opts: DiskScanOptions) -> Pa
             let start_lba = e.start_lba;
             let end_lba = e.end_lba;
             let start_bytes = start_lba
-                .checked_mul(opts.sector_size)
+                .checked_mul(sector_size)
                 .ok_or(PartError::Other("start_bytes overflow"))?;
             let size_lba = end_lba
                 .checked_sub(start_lba)
                 .and_then(|n| n.checked_add(1))
                 .ok_or(PartError::Other("size_lba underflow"))?;
             let size_bytes = size_lba
-                .checked_mul(opts.sector_size)
+                .checked_mul(sector_size)
                 .ok_or(PartError::Other("size_bytes overflow"))?;
 
             let name = e.name;
@@ -225,17 +168,22 @@ pub fn scan_disk<IO: BlockIO + ?Sized>(io: &mut IO, opts: DiskScanOptions) -> Pa
                 start_bytes,
                 size_bytes,
                 attrs: e.attributes,
-                name: decode_gpt_name(&name),
+                name: gpt::decode_gpt_name(&name),
             });
         }
     }
 
     Ok(DiskInfo {
         mbr_kind,
-        sector_size: opts.sector_size,
+        sector_size,
         gpt_header,
         partitions: parts,
     })
+}
+
+#[cfg(feature = "alloc")]
+pub fn scan_disk<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<DiskInfo> {
+    scan_disk_with_sector(io, DEFAULT_SECTOR_SIZE)
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -245,7 +193,7 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..max]
 }
 
-#[cfg(all(feature = "std", feature = "alloc"))]
+#[cfg(feature = "alloc")]
 fn pretty_bytes(n: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut val = n as f64;
@@ -261,9 +209,9 @@ fn pretty_bytes(n: u64) -> String {
     }
 }
 
-#[cfg(all(feature = "std", feature = "alloc"))]
+#[cfg(feature = "alloc")]
 fn sep_u64(mut n: u64) -> String {
-    // séparateur de milliers « fine »: 12 345 678
+    // thousands separator "fine": 12 345 678
     if n < 1_000 {
         return n.to_string();
     }
@@ -274,23 +222,26 @@ fn sep_u64(mut n: u64) -> String {
     }
     parts.push(n.to_string());
     parts.reverse();
-    parts.join(" ") // espace fine insécable
+    parts.join(" ") // non-breaking narrow space
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gpt, guids, mbr};
+    use crate::{
+        gpt::{self, GptEntry},
+        guids, mbr,
+    };
 
     #[test]
-    fn scan_protective_gpt_happy_path() {
+    fn scan_protective_gpt() {
         let mut buf = vec![0u8; 512 * 20_000];
-        let mut io = rimio::prelude::MemBlockIO::new(&mut buf);
+        let mut io = rimio::prelude::MemRimIO::new(&mut buf);
 
-        // 1) MBR protectif
+        // Protective MBR
         mbr::write_mbr_protective(&mut io, 20_000).unwrap();
 
-        // 2) GPT avec 2 partitions
+        // GPT with 2 partitions
         let p1 = GptEntry::new(
             guids::GPT_PARTITION_TYPE_ESP,
             [1; 16],
@@ -307,10 +258,10 @@ mod tests {
             0,
             "rootfs",
         );
-        gpt::write_gpt(&mut io, &[p1, p2], 20_000, [0xAB; 16]).unwrap();
+        gpt::write_gpt_from_entries(&mut io, &[p1, p2], 20_000, [0xAB; 16]).unwrap();
 
-        // 3) Scan
-        let info = scan_disk(&mut io, DiskScanOptions::default()).unwrap();
+        // Scan
+        let info = scan_disk(&mut io).unwrap();
 
         assert!(matches!(info.mbr_kind, MbrKind::Protective));
         assert_eq!(info.partitions.len(), 2);
@@ -322,31 +273,7 @@ mod tests {
         assert_eq!(info.partitions[0].start_lba, 2048);
         assert_eq!(info.partitions[1].name, "rootfs");
 
-        // 4) Display (smoke)
+        // Display (smoke)
         println!("{info}");
-    }
-
-    #[test]
-    fn scan_without_crc_validation() {
-        let mut buf = vec![0u8; 512 * 20_000];
-        let mut io = rimio::prelude::MemBlockIO::new(&mut buf);
-
-        mbr::write_mbr_protective(&mut io, 20_000).unwrap();
-
-        // GPT minimal : une partition
-        let p = GptEntry::new(
-            guids::GPT_PARTITION_TYPE_DATA,
-            [9; 16],
-            2048,
-            3071,
-            0,
-            "data",
-        );
-        gpt::write_gpt(&mut io, &[p], 20_000, [0xAB; 16]).unwrap();
-
-        // Scan rapide sans CRC
-        let info = scan_disk(&mut io, DiskScanOptions::new().no_crc()).unwrap();
-        assert_eq!(info.partitions.len(), 1);
-        assert_eq!(info.partitions[0].name, "data");
     }
 }

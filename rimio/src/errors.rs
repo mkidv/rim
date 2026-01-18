@@ -2,37 +2,42 @@
 
 use core::fmt;
 
-/// Result type for BlockIO operations.
-pub type BlockIOResult<T = ()> = core::result::Result<T, BlockIOError>;
+/// Result type for RimIO operations.
+pub type RimIOResult<T = ()> = core::result::Result<T, RimIOError>;
 
-/// Error type for BlockIO operations.
+/// Error type for RimIO operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlockIOError {
+pub enum RimIOError {
     Other(&'static str),
+    Invalid(&'static str),
     OutOfBounds,
     Unsupported,
 }
 
-impl BlockIOError {
+impl RimIOError {
     pub fn msg(&self) -> &'static str {
         match self {
-            BlockIOError::Other(msg) => msg,
-            BlockIOError::OutOfBounds => "Out of bounds",
-            BlockIOError::Unsupported => "Unsupported operation",
+            RimIOError::Other(msg) => msg,
+            RimIOError::Invalid(msg) => msg,
+            RimIOError::OutOfBounds => "Out of bounds",
+            RimIOError::Unsupported => "Unsupported operation",
         }
     }
 }
 
-impl From<&'static str> for BlockIOError {
+impl From<&'static str> for RimIOError {
     #[inline]
     fn from(msg: &'static str) -> Self {
-        BlockIOError::Other(msg)
+        RimIOError::Other(msg)
     }
 }
 
-impl fmt::Display for BlockIOError {
+impl fmt::Display for RimIOError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.msg())?;
         Ok(())
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for RimIOError {}

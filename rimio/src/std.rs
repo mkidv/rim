@@ -4,18 +4,18 @@
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 #[cfg(feature = "std")]
-use crate::BlockIOSetLen;
-use crate::{BlockIO, BlockIOError, BlockIOResult};
+use crate::RimIOSetLen;
+use crate::{RimIO, RimIOError, RimIOResult};
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
-pub struct StdBlockIO<'a, T: Read + Write + Seek> {
+pub struct StdRimIO<'a, T: Read + Write + Seek> {
     io: &'a mut T,
     partition_offset: u64,
 }
 
 #[cfg(feature = "std")]
-impl<'a, T: Read + Write + Seek> StdBlockIO<'a, T> {
+impl<'a, T: Read + Write + Seek> StdRimIO<'a, T> {
     #[inline]
     pub fn new(io: &'a mut T) -> Self {
         Self {
@@ -23,7 +23,7 @@ impl<'a, T: Read + Write + Seek> StdBlockIO<'a, T> {
             partition_offset: 0,
         }
     }
-    
+
     #[inline]
     pub fn new_with_offset(io: &'a mut T, partition_offset: u64) -> Self {
         Self {
@@ -34,22 +34,22 @@ impl<'a, T: Read + Write + Seek> StdBlockIO<'a, T> {
 }
 
 #[cfg(feature = "std")]
-impl<'a, T: Read + Write + Seek> BlockIO for StdBlockIO<'a, T> {
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> BlockIOResult {
+impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         let abs_offset = self.partition_offset + offset;
         self.io.seek(SeekFrom::Start(abs_offset))?;
         self.io.write_all(data)?;
         Ok(())
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> BlockIOResult {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let abs_offset = self.partition_offset + offset;
         self.io.seek(SeekFrom::Start(abs_offset))?;
         self.io.read_exact(buf)?;
         Ok(())
     }
 
-    fn flush(&mut self) -> BlockIOResult {
+    fn flush(&mut self) -> RimIOResult {
         self.io.flush()?;
         Ok(())
     }
@@ -67,8 +67,8 @@ impl<'a, T: Read + Write + Seek> BlockIO for StdBlockIO<'a, T> {
 }
 
 #[cfg(feature = "std")]
-impl<'a> BlockIOSetLen for StdBlockIO<'a, std::fs::File> {
-    fn set_len(&mut self, len: u64) -> BlockIOResult {
+impl<'a> RimIOSetLen for StdRimIO<'a, std::fs::File> {
+    fn set_len(&mut self, len: u64) -> RimIOResult {
         self.io.set_len(self.partition_offset + len)?;
         self.flush()?;
         self.io.seek(SeekFrom::Start(0))?;
@@ -77,13 +77,13 @@ impl<'a> BlockIOSetLen for StdBlockIO<'a, std::fs::File> {
 }
 
 #[cfg(feature = "std")]
-impl From<Error> for BlockIOError {
+impl From<Error> for RimIOError {
     #[cold]
     #[inline(never)]
     fn from(e: Error) -> Self {
         // Leak the string to produce a 'static str. Acceptable for error mapping.
         let leaked_str: &'static str = Box::leak(e.to_string().into_boxed_str());
-        BlockIOError::Other(leaked_str)
+        RimIOError::Other(leaked_str)
     }
 }
 
@@ -96,7 +96,7 @@ mod test {
     #[test]
     fn test_rw() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
         io.write_at(10, &[1, 2, 3, 4]).unwrap();
 
         let mut output = [0u8; 4];
@@ -107,7 +107,7 @@ mod test {
     #[test]
     fn test_set_len_safe() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
 
         io.set_len(512).unwrap();
         assert!(io.set_len(u64::MAX).is_err());
@@ -116,7 +116,7 @@ mod test {
     #[test]
     fn test_best_effort_rw_unaligned() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
 
         let input = [0xAB; 17];
         let mut output = [0u8; 17];
@@ -130,7 +130,7 @@ mod test {
     #[test]
     fn test_multi_rw() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
 
         let cluster_size = 8;
         let clusters = 4;
@@ -149,7 +149,7 @@ mod test {
     #[test]
     fn test_chunks_streamed_rw() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
 
         io.write_chunks_streamed::<4, _>(0, 10, 5, |i| (i as u32).to_le_bytes())
             .unwrap();
@@ -168,7 +168,7 @@ mod test {
     #[test]
     fn test_zero_fill() {
         let mut file = tempfile().unwrap();
-        let mut io = StdBlockIO::new(&mut file);
+        let mut io = StdRimIO::new(&mut file);
 
         io.write_at(42, &[0xFF; 8]).unwrap();
         io.zero_fill(42, 8).unwrap();

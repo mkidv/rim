@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// rimgen/fs/ext4/utils.rs
 
-use crate::fs::ext4::{constant::*, params::{Ext4Params, GroupLayout}};
+use crate::fs::ext4::{constant::*, group_layout::GroupLayout, meta::Ext4Meta};
 
 pub fn is_sparse_super_group(group_id: u32) -> bool {
     if group_id == 0 {
@@ -21,7 +20,7 @@ pub fn is_sparse_super_group(group_id: u32) -> bool {
     false
 }
 
-pub fn compute_used_blocks_in_group(group: GroupLayout, params: &Ext4Params) -> u32 {
+pub fn compute_used_blocks_in_group(group: GroupLayout, params: &Ext4Meta) -> u32 {
     let table_blocks =
         (params.inodes_per_group * EXT4_DEFAULT_INODE_SIZE / params.block_size).div_ceil(1);
 

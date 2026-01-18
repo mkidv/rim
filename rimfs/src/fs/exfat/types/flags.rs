@@ -3,7 +3,7 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Volume Flags pour exFAT Boot Sector
-/// 
+///
 /// Ces flags indiquent l'état du volume et des paramètres de fonctionnement.
 /// Ils sont stockés dans le champ volume_flags du Boot Sector (offset 106-107).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromBytes, IntoBytes, KnownLayout, Immutable)]
@@ -17,7 +17,7 @@ impl VolumeFlags {
     /// En pratique, exFAT n'utilise qu'une seule FAT, donc ce bit est généralement 0
     pub const ACTIVE_FAT: u16 = 0x0001;
 
-    /// Volume Dirty flag (bit 1) 
+    /// Volume Dirty flag (bit 1)
     /// Indique que le volume n'a pas été correctement démonté
     /// Set par le pilote lors du montage, cleared lors du démontage propre
     pub const VOLUME_DIRTY: u16 = 0x0002;
@@ -154,7 +154,7 @@ mod tests {
         flags = flags.mark_dirty();
         assert!(flags.is_dirty());
         assert_eq!(flags.bits(), 0x0002);
-        
+
         flags = flags.mark_clean();
         assert!(!flags.is_dirty());
         assert_eq!(flags.bits(), 0x0000);

@@ -8,7 +8,7 @@
 //! These functions are typically used in tests to validate
 //! that the content injected or parsed matches expectations.
 
-use crate::core::{FsError, FsResult, resolver::FsResolver};
+use crate::core::{FsResult, resolver::FsResolver};
 
 /// Checks if a file exists at the given path.
 ///
@@ -64,7 +64,7 @@ mod tests {
         check_dir_exists(&mut parser, "src").expect("Expected 'src' to be a directory");
 
         // This file (fs_test_utils.rs) must exist:
-        check_file_exists(&mut parser, "src/core/utils/fs_utils.rs")
+        check_file_exists(&mut parser, "src/core/utils/exists_utils.rs")
             .expect("Expected fs_utils.rs to exist");
     }
 }

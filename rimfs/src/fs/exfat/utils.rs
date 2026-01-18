@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
 use crate::{
     core::{resolver::*, utils::time_utils},
@@ -51,37 +49,31 @@ pub fn datetime_now() -> (u32, u8, u8) {
     datetime_from(ts)
 }
 
-pub fn write_bitmap<IO: BlockIO + ?Sized>(
+pub fn write_bitmap<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     clusters: &[u32],
-) -> BlockIOResult {
-    let offset = meta.unit_offset(meta.bitmap_cluster);
-    let mut bitmap = vec![0u8; meta.unit_size()];
-    io.read_block_best_effort(offset, &mut bitmap, meta.unit_size())?;
+) -> RimIOResult {
+    let clusters_count = meta.bitmap_clusters() as usize;
+    let cs = meta.unit_size();
+    let mut bitmap = vec![0u8; clusters_count * cs];
+    for i in 0..clusters_count {
+        let off = meta.unit_offset(meta.bitmap_cluster + i as u32);
+        io.read_block_best_effort(off, &mut bitmap[i * cs..(i + 1) * cs], cs)?;
+    }
 
+    // Flip bits
     for &cluster in clusters {
         let (byte_index, bit_mask) = meta.bitmap_entry_offset(cluster);
-        bitmap[byte_index] |= bit_mask;
-    }
-
-    io.write_block_best_effort(offset, &bitmap, meta.unit_size())?;
-    Ok(())
-}
-
-#[inline(always)]
-pub fn accumulate_checksum(sum: &mut u32, data: &[u8]) {
-    for &b in data.iter() {
-        *sum = sum.rotate_right(1).wrapping_add(b as u32);
-    }
-}
-
-#[inline(always)]
-pub fn accumulate_vbr_checksum(sum: &mut u32, data: &[u8], sector_index: usize) {
-    for (i, &byte) in data.iter().enumerate() {
-        if sector_index == 0 && (i == 106 || i == 107 || i == 112) {
-            continue;
+        if byte_index < bitmap.len() {
+            bitmap[byte_index] |= bit_mask;
         }
-        *sum = sum.rotate_right(1).wrapping_add(byte as u32);
     }
+
+    // Write back
+    for i in 0..clusters_count {
+        let off = meta.unit_offset(meta.bitmap_cluster + i as u32);
+        io.write_block_best_effort(off, &bitmap[i * cs..(i + 1) * cs], cs)?;
+    }
+    Ok(())
 }

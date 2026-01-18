@@ -32,7 +32,7 @@ use crate::core::utils::path_utils::*;
 ///
 /// Notes:
 /// - Paths use `/` as separator (normalized).
-/// - Wildcards (`path/*`) are supported by [`build_node`] and [`parse_tree`].
+/// - Wildcards (`path/*`) are supported by [`Self::build_node`] and [`Self::parse_tree`].
 pub trait FsResolver {
     /// Returns the list of immediate entries (files and directories) inside the given directory path.
     ///
@@ -61,7 +61,7 @@ pub trait FsResolver {
     /// If `path` points to a file:
     /// - An [`FsNode::File`] is created with its content.
     ///
-    /// Returns an [`FsParserResult`] wrapping the built [`FsNode`].
+    /// Returns an [`FsResolverResult`] wrapping the built [`FsNode`].
     fn build_node(&mut self, path: &str, recurse: bool) -> FsResolverResult<FsNode> {
         if is_wildcard(path) {
             let base_path = strip_wildcard(path);
@@ -106,14 +106,14 @@ pub trait FsResolver {
 
     /// Parses an entire directory tree starting from `path`.
     ///
-    /// Equivalent to calling [`build_node`] with `recurse = true`.
+    /// Equivalent to calling [`Self::build_node`] with `recurse = true`.
     fn parse_tree(&mut self, path: &str) -> FsResolverResult<FsNode> {
         self.build_node(path, true)
     }
 
     /// Parses a single path (file or directory), without recursing into subdirectories.
     ///
-    /// Equivalent to calling [`build_node`] with `recurse = false`.
+    /// Equivalent to calling [`Self::build_node`] with `recurse = false`.
     fn parse_path(&mut self, path: &str) -> FsResolverResult<FsNode> {
         self.build_node(path, false)
     }

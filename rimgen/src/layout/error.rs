@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum LayoutError {
     SizeTooLarge(&'static str, u64),

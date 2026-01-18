@@ -2,20 +2,20 @@
 macro_rules! fs_error_wiring {
     (
         top => $top:ty {
-            $($top_src:ty : $top_variant:ident),+ $(,)?   // sous-erreurs -> FsError::<Variant>
+            $($top_src:ty : $top_variant:ident),+ $(,)?   // sub-errors -> FsError::<Variant>
         },
         str_into => [ $($str_tgt:ty),* $(,)? ],           // &str -> each tgt::Other + top::Other
         sub => {
             $($src_sub:ty => [ $($dst_sub:ident::$dst_variant:ident),+ ] ),* $(,)?  // S -> D::Variant
         } $(,)?
     ) => {
-        // 1) sous-erreurs -> FsError::<Variant>
+        // Sub-errors -> FsError::<Variant>
         $crate::__impl_into_fserror!{ $top; $( $top_src => $top_variant ),+ }
 
-        // 2) &str -> each::Other + top::Other
+        // &str -> each::Other + top::Other
         $crate::__impl_str_into_errors!{ $top; $( $str_tgt ),* }
 
-        // 3) conversions inter-couches
+        // Inter-layer conversions
         $crate::__impl_sub_into_error!{ $( $src_sub => [ $( $dst_sub :: $dst_variant ),+ ] ),* }
     };
 }
@@ -65,11 +65,15 @@ macro_rules! __impl_sub_into_error {
 #[macro_export]
 macro_rules! ensure {
     ($cond:expr, $err:expr) => {
-        if !$cond { return Err($err.into()); }
+        if !$cond {
+            return Err($err.into());
+        }
     };
 }
 
 #[macro_export]
 macro_rules! bail {
-    ($err:expr) => { return Err($err.into()); };
+    ($err:expr) => {
+        return Err($err.into());
+    };
 }

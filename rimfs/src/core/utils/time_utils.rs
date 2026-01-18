@@ -3,7 +3,7 @@
 //! Time utilities for filesystem timestamps.
 //!
 //! Provides UTC time handling with `no_std` fallback support.
-//! 
+//!
 //! - In `std` mode, uses system clock.
 //! - In `no_std`, returns UNIX_EPOCH as fixed timestamp.
 //!

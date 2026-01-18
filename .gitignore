@@ -6,9 +6,6 @@
 /Cargo.lock
 **/Cargo.lock
 
-# Optional if you want to version Cargo.lock for binaries only:
-# !/Cargo.lock
-
 # ────────────────
 # Backup & temp
 # ────────────────
@@ -51,9 +48,9 @@ Desktop.ini
 # ────────────────
 # Git
 # ────────────────
-.git/
-.gitmodules
-.gitattributes
+# .git/
+# .gitmodules
+# .gitattributes
 
 # ────────────────
 # Build tools / output

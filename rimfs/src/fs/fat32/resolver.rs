@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
+#[cfg(all(not(feature = "std"), feature = "alloc", test))]
+use alloc::string::ToString;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
-use rimio::{BlockIO, BlockIOExt};
+use rimio::{RimIO, RimIOExt};
 
 use crate::core::cursor::ClusterCursor;
 pub use crate::core::resolver::*;
@@ -11,18 +13,18 @@ use crate::core::FsCursorError;
 use crate::core::utils::path_utils::*;
 use crate::fs::fat32::{attr::*, constant::*, meta::*, types::*};
 
-pub struct Fat32Resolver<'a, IO: BlockIO + ?Sized> {
+pub struct Fat32Resolver<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     meta: &'a Fat32Meta,
 }
 
-impl<'a, IO: BlockIO + ?Sized> Fat32Resolver<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> Fat32Resolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a Fat32Meta) -> Self {
         Self { io, meta }
     }
 }
 
-impl<'a, IO: BlockIO + ?Sized> FsResolver for Fat32Resolver<'a, IO> {
+impl<'a, IO: RimIO + ?Sized> FsResolver for Fat32Resolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, cluster, _) = self.resolve_path(path)?;
         if !is_dir {
@@ -119,7 +121,7 @@ impl<'a, IO: BlockIO + ?Sized> FsResolver for Fat32Resolver<'a, IO> {
     }
 }
 
-fn read_dir_entries<IO: BlockIO + ?Sized>(
+fn read_dir_entries<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &Fat32Meta,
     start_cluster: u32,
@@ -148,7 +150,10 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
             let attr = chunk[11];
 
             if attr == Fat32Attributes::LFN.bits() {
-                lfn_stack.push(chunk.try_into().unwrap());
+                // Safe: chunks_exact(32) guarantees length 32
+                if let Ok(arr) = chunk.try_into() {
+                    lfn_stack.push(arr);
+                }
                 continue;
             }
 
@@ -183,9 +188,9 @@ fn read_dir_entries<IO: BlockIO + ?Sized>(
     Ok(out)
 }
 
-/// Recherche `target` (insensible à la casse si ton Fat32Entries le gère déjà) dans le dir `dir_cluster`.
-/// Retourne la première entrée correspondante, sinon None.
-pub fn find_in_dir<IO: BlockIO + ?Sized>(
+/// Search for `target` (case-insensitive if handled by `Fat32Entries`) in directory `dir_cluster`.
+/// Returns the first matching entry, or `None`.
+pub fn find_in_dir<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &Fat32Meta,
     dir_cluster: u32,
@@ -193,14 +198,14 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
 ) -> FsResolverResult<Option<Fat32Entries>> {
     let cs = meta.unit_size();
 
-    // Répertoires → autoriser clusters système (root=2)
+    // Directories -> allow system clusters (root=2)
     let mut cur = ClusterCursor::new(meta, dir_cluster);
 
-    // LFN persistantes entre clusters ET entre runs
+    // LFNs persistent across clusters AND across runs
     let mut lfn_stack: Vec<[u8; 32]> = Vec::new();
     let mut found: Option<Fat32Entries> = None;
 
-    // On lit un run complet en un seul read, puis on itère par tranches de 32 octets
+    // We read a full run in a single operation, then iterate by 32-byte chunks
     let res = cur.for_each_run(io, |io, run_start, run_len| {
         let total = (run_len as usize) * cs;
         let mut data = vec![0u8; total];
@@ -220,7 +225,10 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
             let attr = chunk[11];
 
             if attr == Fat32Attributes::LFN.bits() {
-                lfn_stack.push(chunk.try_into().unwrap());
+                // Safe: chunks_exact(32) guarantees length 32
+                if let Ok(arr) = chunk.try_into() {
+                    lfn_stack.push(arr);
+                }
                 continue;
             }
 
@@ -238,13 +246,13 @@ pub fn find_in_dir<IO: BlockIO + ?Sized>(
                 continue;
             }
 
-            // Entrée SFN
+            // SFN entry
             let e = Fat32Entries::from_raw(&lfn_stack, chunk)?;
             lfn_stack.clear();
 
             if e.name_bytes_eq(target) {
                 found = Some(e);
-                // Early-exit du run (et donc du for_each_run) via une erreur “sentinelle”
+                // Early-exit from the run (and thus from for_each_run) via a "sentinel" error
                 return Err(FsCursorError::Other("found"));
             }
         }

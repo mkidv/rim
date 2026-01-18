@@ -16,9 +16,15 @@ use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Instant};
 
 use crate::utils::log::LogLevel;
+use colored::Colorize;
 
 #[derive(Parser)]
-#[command(name = "rimgen", version, about = "Rust Image Generator", long_about = None)]
+#[command(
+    name = "rimgen",
+    version,
+    about = "Rust Image Maker Generator",
+    long_about = "rimgen is a declarative disk image generator.\n\nIt automates the creation of partitioned and formatted disk images with file injection, suitable for OS testing, embedded systems flashing, and bootable media creation."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -26,47 +32,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build a disk image from layout.toml
+    /// Build a disk image from a declarative layout file.
+    ///
+    /// Supported input: TOML layout files.
+    /// Supported output formats: Raw (.img), VHD (.vhd), VMDK (.vmdk), QCOW2 (.qcow2), VDI (.vdi).
     Build {
-        /// Layout path
+        /// Layout configuration file path (TOML)
         #[arg(short, long, default_value = "layout/layout.toml")]
         layout: PathBuf,
-        /// Output path
+
+        /// Output image structure. Extension determines format: .img, .vhd, .vmdk, .qcow2, .vdi
         #[arg(short, long, default_value = "output.img")]
         output: PathBuf,
 
-        /// Only print what would be done, don't write the image
+        /// Simulate the build process without writing any data to disk
         #[arg(long)]
         dry_run: bool,
+
+        /// Overwrite existing output file if it exists
         #[arg(long)]
         truncate: bool,
+
+        /// Increase logging verbosity (-v, -vv)
         #[arg(long, short, action = clap::ArgAction::Count)]
         verbose: u8,
 
+        /// Suppress all output except errors
         #[arg(long, short)]
         quiet: bool,
-    },
-    /// Flash image to a physical device
-    Flash {
-        /// Layout path
-        #[arg(short, long, default_value = "layout/layout.toml")]
-        layout: PathBuf,
-
-        /// Target block device (e.g., /dev/sdX, \\.\PhysicalDrive1)
-        #[arg(short, long)]
-        device: PathBuf,
-
-        /// Only print what would be done, don't write the image
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Require confirmation to flash
-        #[arg(long, default_value_t = true)]
-        no_confirm: bool,
-
-        /// Compare written image with device
-        #[arg(long)]
-        no_verify: bool,
     },
 }
 
@@ -88,7 +81,10 @@ fn main() -> anyhow::Result<()> {
                 crate::utils::set_log_level(LogLevel::Verbose);
             }
             let t0 = Instant::now();
-            crate::log_info!("🚀 Rust Image Maker — v{}", env!("CARGO_PKG_VERSION"));
+            crate::log_info!(
+                "{}",
+                format!("🚀 Rust Image Maker — v{}", env!("CARGO_PKG_VERSION")).bold()
+            );
 
             if dry_run {
                 crate::log_normal!("🌀 Dry run mode: no data will be written.");
@@ -114,7 +110,37 @@ fn main() -> anyhow::Result<()> {
                         DryRunMode::Off
                     },
                 ),
+                Output::Qcow2 => qcow2::create(
+                    &layout,
+                    &output,
+                    &truncate,
+                    if dry_run {
+                        DryRunMode::Tempfile
+                    } else {
+                        DryRunMode::Off
+                    },
+                ),
+                Output::Vdi => vdi::create(
+                    &layout,
+                    &output,
+                    &truncate,
+                    if dry_run {
+                        DryRunMode::Tempfile
+                    } else {
+                        DryRunMode::Off
+                    },
+                ),
                 Output::Vhd => vhd::create(
+                    &layout,
+                    &output,
+                    &truncate,
+                    if dry_run {
+                        DryRunMode::Tempfile
+                    } else {
+                        DryRunMode::Off
+                    },
+                ),
+                Output::Vmdk => vmdk::create(
                     &layout,
                     &output,
                     &truncate,
@@ -137,7 +163,7 @@ fn main() -> anyhow::Result<()> {
                     e
                 );
                 std::process::exit(1);
-            } else if (dry_run) {
+            } else if dry_run {
                 crate::log_normal!(
                     "🌀 Dry-run successful — simulated image {} in {:.2}s (no bytes written)",
                     output.display(),
@@ -146,20 +172,13 @@ fn main() -> anyhow::Result<()> {
             } else {
                 let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
                 crate::log_normal!(
-                    "✨ Wrote {} ({} in {:.2}s) — with ❤️  from RIM",
-                    output.display(),
-                    utils::pretty_bytes(bytes),
-                    dt
+                    "✨ Wrote {} ({} in {}s) — with ❤️  from RIM",
+                    output.display().to_string().bold(),
+                    utils::pretty_bytes(bytes).cyan(),
+                    format!("{dt:.2}").yellow()
                 );
             }
         }
-        Commands::Flash {
-            layout,
-            device,
-            dry_run,
-            no_confirm,
-            no_verify,
-        } => {}
     }
 
     Ok(())

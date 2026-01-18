@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-use crate::{BlockIO, BlockIOError, BlockIOResult};
+use crate::{RimIO, RimIOError, RimIOResult};
 
 use uefi::boot::ScopedProtocol;
 use uefi::proto::media::block::{BlockIO as UefiBlockIo, BlockIOMedia, Lba};
@@ -13,18 +13,18 @@ use alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
-/// UEFI BlockIO backend for `BlockIO`.
+/// UEFI BlockIO backend for `RimIO`.
 ///
 /// Works for arbitrary block sizes:
 /// - Without `alloc`: supports block_size <= 512 (stack buf), otherwise `Unsupported`.
 /// - With `alloc` uses stack up to 4KiB, heap beyond.
-pub struct UefiBlockIO {
+pub struct UefiRimIO {
     blk: ScopedProtocol<UefiBlockIo>,
     partition_offset: u64,
 }
 
-impl UefiBlockIO {
-     #[inline]
+impl UefiRimIO {
+    #[inline]
     pub fn new(blk: ScopedProtocol<UefiBlockIo>) -> Self {
         Self {
             blk,
@@ -32,7 +32,7 @@ impl UefiBlockIO {
         }
     }
 
-     #[inline]
+    #[inline]
     pub fn new_with_offset(blk: ScopedProtocol<UefiBlockIo>, partition_offset: u64) -> Self {
         Self {
             blk,
@@ -62,12 +62,12 @@ impl UefiBlockIO {
     }
 
     #[inline]
-    fn check_bounds(&self, abs_off: u64, len: usize) -> BlockIOResult {
+    fn check_bounds(&self, abs_off: u64, len: usize) -> RimIOResult {
         let end = abs_off
             .checked_add(len as u64)
-            .ok_or(BlockIOError::OutOfBounds)?;
+            .ok_or(RimIOError::OutOfBounds)?;
         if end > self.media_len() {
-            return Err(BlockIOError::OutOfBounds);
+            return Err(RimIOError::OutOfBounds);
         }
         Ok(())
     }
@@ -78,25 +78,23 @@ impl UefiBlockIO {
         ((abs_off / bs) as Lba, (abs_off % bs) as usize)
     }
 
-    fn read_block_exact(&mut self, lba: Lba, buf: &mut [u8]) -> BlockIOResult {
+    fn read_block_exact(&mut self, lba: Lba, buf: &mut [u8]) -> RimIOResult {
         debug_assert_eq!(buf.len(), self.block_size());
         self.blk
             .read_blocks(self.media_id(), lba, buf)
-            .map_err(|_| BlockIOError::Other("UEFI read_blocks failed"))
+            .map_err(|_| RimIOError::Other("UEFI read_blocks failed"))
     }
 
-    fn write_block_exact(&mut self, lba: Lba, buf: &[u8]) -> BlockIOResult {
+    fn write_block_exact(&mut self, lba: Lba, buf: &[u8]) -> RimIOResult {
         debug_assert_eq!(buf.len(), self.block_size());
         let media_id = self.media_id();
         self.blk
             .write_blocks(media_id, lba, buf)
-            .map_err(|_| BlockIOError::Other("UEFI write_blocks failed"))
+            .map_err(|_| RimIOError::Other("UEFI write_blocks failed"))
     }
 
-    // --- replace fn temp_block_buf(...) by this version ---
-
     #[inline]
-    fn temp_block_buf(&self) -> Result<TempBlockBuf, BlockIOError> {
+    fn temp_block_buf(&self) -> Result<TempBlockBuf, RimIOError> {
         let bs = self.block_size();
 
         // No-alloc: only 512B blocks are supported (stack)
@@ -105,7 +103,7 @@ impl UefiBlockIO {
             if bs <= 512 {
                 Ok(TempBlockBuf::Stack512([0u8; 512], bs))
             } else {
-                Err(BlockIOError::Unsupported)
+                Err(RimIOError::Unsupported)
             }
         }
 
@@ -151,6 +149,10 @@ impl TempBlockBuf {
             #[cfg(any(feature = "std", feature = "alloc"))]
             TempBlockBuf::Heap(b, n) => {
                 if b.len() != *n {
+                    // SAFETY:
+                    // 1. We allocated the vector with `bs` zeros in `new()`.
+                    // 2. `n` comes from `bs` (block size) which is <= capacity.
+                    // 3. We are merely restoring the length to the full block size.
                     unsafe {
                         b.set_len(*n);
                     }
@@ -161,8 +163,8 @@ impl TempBlockBuf {
     }
 }
 
-impl BlockIO for UefiBlockIO {
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> BlockIOResult {
+impl RimIO for UefiRimIO {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         let abs_off = self.partition_offset + offset;
         self.check_bounds(abs_off, data.len())?;
 
@@ -211,7 +213,7 @@ impl BlockIO for UefiBlockIO {
         Ok(())
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> BlockIOResult {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let abs_off = self.partition_offset + offset;
         self.check_bounds(abs_off, buf.len())?;
 
@@ -258,10 +260,10 @@ impl BlockIO for UefiBlockIO {
         Ok(())
     }
 
-    fn flush(&mut self) -> BlockIOResult {
+    fn flush(&mut self) -> RimIOResult {
         self.blk
             .flush_blocks()
-            .map_err(|_| BlockIOError::Other("UEFI flush_blocks failed"))
+            .map_err(|_| RimIOError::Other("UEFI flush_blocks failed"))
     }
 
     #[inline]

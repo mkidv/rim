@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use rimio::BlockIO;
+use rimio::RimIO;
 
 use crate::core::traits::{
     FsAllocator, FsChecker, FsFormatter, FsHandle, FsMeta, FsNodeInjector, FsResolver,
@@ -36,19 +36,19 @@ pub trait FsFilesystem<'a> {
     fn allocator(meta: &'a Self::Meta) -> Self::Allocator;
 
     /// Creates a new instance of the formatter.
-    fn formatter(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Formatter;
+    fn formatter(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Formatter;
 
     /// Creates a new injector instance from the allocator.
     fn injector(
-        io: &'a mut (dyn BlockIO + 'a),
+        io: &'a mut (dyn RimIO + 'a),
         allocator: &'a mut Self::Allocator,
         meta: &'a Self::Meta,
-    ) -> Self::Injector;
+    ) -> crate::core::FsInjectorResult<Self::Injector>;
 
     /// Creates a new checker from the metadata.
-    fn checker(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Checker;
+    fn checker(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Checker;
 
-    fn parser(io: &'a mut (dyn BlockIO + 'a), meta: &'a Self::Meta) -> Self::Parser;
+    fn parser(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Parser;
 
     /// Optional: FS name for dynamic identification (usable in a registry)
     fn identifier() -> &'static str {

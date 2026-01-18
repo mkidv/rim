@@ -17,11 +17,11 @@ mountpoint = "data/*"
 size = "300M"
 fs = "exfat"
 
-# [[partitions]]
-# name = "RIM EXT4"
-# mountpoint = "data/*"
-# size = "300M"
-# fs = "ext4"
+[[partitions]]
+name = "RIM EXT4"
+mountpoint = "data/*"
+size = "300M"
+fs = "ext4"
 
 # [[partitions]]
 # name = "NATIVE NTFS"

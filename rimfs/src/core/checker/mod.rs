@@ -2,7 +2,16 @@
 
 mod types;
 
-pub use types::{Finding, Severity, VerifierOptionsLike, VerifyPhases, VerifyReport};
+pub use types::{
+    Finding, ReportDisplay, ReportDisplayOpts, Severity, VerifierOptionsLike, VerifyPhases,
+    VerifyReport,
+};
+
+pub mod stats;
+pub use stats::WalkerStats;
+
+pub mod tracker;
+pub use tracker::ReachabilityTracker;
 
 pub use crate::core::errors::{FsCheckerError, FsCheckerResult};
 
@@ -13,6 +22,7 @@ pub use crate::core::errors::{FsCheckerError, FsCheckerResult};
 pub trait FsChecker {
     type Options: VerifierOptionsLike + Default;
 
+    #[must_use = "check result must be examined"]
     fn check_with(&mut self, opt: &Self::Options) -> FsCheckerResult<VerifyReport> {
         let mut rep = VerifyReport::default();
         self.run_phase(opt, &mut rep, VerifyPhases::BOOT, Self::check_boot)?;
@@ -30,10 +40,12 @@ pub trait FsChecker {
         Ok(rep)
     }
 
+    #[must_use = "check result must be examined"]
     fn check_all(&mut self) -> FsCheckerResult<VerifyReport> {
         self.check_with(&Self::Options::default())
     }
 
+    #[must_use = "check result must be examined"]
     fn fast_check(&mut self) -> FsCheckerResult {
         Ok(())
     }

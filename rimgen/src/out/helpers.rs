@@ -13,7 +13,7 @@ pub fn partition_to_gpt_partition_entry(
     end: u64,
 ) -> Result<GptEntry> {
     let type_guid = gpt_type_guid_for_kind(&partition.effective_kind());
-    
+
     let unique_guid = partition
         .guid
         .ok_or_else(|| anyhow::anyhow!("Missing GUID for '{}'", partition.name))?
@@ -52,6 +52,7 @@ pub fn size_to_sectors(size: &Size) -> u64 {
 }
 
 /// Convert Size to number of bytes.
+#[allow(dead_code)]
 pub fn size_to_bytes(size: &Size) -> u64 {
     match size {
         Size::Fixed(mib) => mib * 1024 * 1024,

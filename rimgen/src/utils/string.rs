@@ -1,5 +1,3 @@
-
-
 pub fn pretty_bytes(n: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut val = n as f64;
@@ -16,7 +14,7 @@ pub fn pretty_bytes(n: u64) -> String {
 }
 
 pub fn sep_u64(mut n: u64) -> String {
-    // séparateur de milliers « fine »: 12 345 678
+    // thousands separator "fine": 12 345 678
     if n < 1_000 {
         return n.to_string();
     }
@@ -27,9 +25,10 @@ pub fn sep_u64(mut n: u64) -> String {
     }
     parts.push(n.to_string());
     parts.reverse();
-    parts.join(" ") // espace fine insécable
+    parts.join(" ") // non-breaking narrow space
 }
 
+#[allow(dead_code)]
 pub fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
