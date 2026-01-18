@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::core::meta::FsMeta;
-use rimio::RimIO;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec;
+use rimio::{RimIO, RimIOExt};
 
 /// Writes data from a source stream to a sequence of value units (clusters/blocks) on the destination.
 ///
@@ -34,6 +36,11 @@ where
     let mut remaining = total_size;
     let mut src_offset = 0;
 
+    // Allocate a buffer once to avoid allocation churn in copy_from
+    // Use unit_size or a reasonable chunk size (e.g. 16KB) to balance memory usage
+    let buf_size = unit_size.min(16 * 1024) as usize;
+    let mut buf = vec![0u8; buf_size];
+
     for &unit in units {
         if remaining == 0 {
             break;
@@ -42,7 +49,7 @@ where
         let dst_offset = meta.unit_offset(unit);
         let to_copy = remaining.min(unit_size);
 
-        dest.copy_from(source, src_offset, dst_offset, to_copy)?;
+        dest.copy_from_using_buffer(source, src_offset, dst_offset, to_copy, &mut buf)?;
 
         remaining -= to_copy;
         src_offset += to_copy;

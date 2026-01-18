@@ -432,7 +432,10 @@ fn format_inject_ext4(
 
     let mut parser = Ext4Resolver::new(io, &meta);
     let fs_root = parser.parse_tree("/*")?;
-    let counts = fs_root.counts();
+
+    // We use the source node counts for the report to strictly reflect what was "injected",
+    // excluding system directories like `lost+found` created by the formatter.
+    let counts = node.counts();
 
     crate::log_verbose!("On disk \n{}", fs_root);
 

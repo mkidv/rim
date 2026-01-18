@@ -113,8 +113,8 @@ impl Ext4Inode {
         let mut inode = Self {
             i_mode: mode,
             i_links_count: links,
-            i_blocks_lo: block * 8, // 512-byte units
-            i_size_lo: 4096,        // One block for directory
+            i_blocks_lo: block, // Already in 512-byte units
+            i_size_lo: 4096,    // One block for directory
             ..Default::default()
         };
         inode.set_extent(extent);
@@ -126,7 +126,7 @@ impl Ext4Inode {
         let mut inode = Self {
             i_mode: mode,
             i_links_count: 1,
-            i_blocks_lo: blocks * 8, // 512-byte units
+            i_blocks_lo: blocks, // Already in 512-byte units
             i_size_lo: size,
             ..Default::default()
         };
@@ -216,7 +216,7 @@ impl Ext4Inode {
             i_size_lo: (size & 0xFFFF_FFFF) as u32,
             i_size_high: size_high,
             i_links_count: links,
-            i_blocks_lo: blocks * 8, // Convert to 512-byte units
+            i_blocks_lo: blocks, // Already in 512-byte units from caller
             i_atime: atime,
             i_ctime: ctime,
             i_mtime: mtime,

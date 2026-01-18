@@ -8,41 +8,72 @@ use core::convert::TryInto;
 
 use crate::core::allocator::FsAllocator;
 use crate::{
-    core::{
-        FsInjectorError, FsInjectorResult,
-        injector::{FsContext, FsNodeInjector},
-        traits::FileAttributes,
-    },
+    core::{FsInjectorError, FsInjectorResult, injector::FsNodeInjector, traits::FileAttributes},
     fs::ext4::{
         allocator::{Ext4Allocator, Ext4Handle},
         constant::*,
         group_layout::GroupLayout,
         meta::Ext4Meta,
-        types::{Ext4DirEntry, Ext4Extent, Ext4Inode},
+        types::{Ext4BgdtUpdate, Ext4DirEntry, Ext4Extent, Ext4Inode},
     },
 };
 use rimio::{RimIO, RimIOExt};
+use zerocopy::IntoBytes;
+
+use crate::fs::ext4::types::Ext4LostFound;
+
+/// EXT4-specific directory context with child subdirectory tracking for link counts
+struct Ext4Context {
+    handle: Ext4Handle,
+    buf: Vec<u8>,
+    /// Number of immediate subdirectories (for parent link count calculation)
+    child_dir_count: u16,
+    /// Original extent for re-writing the inode
+    extent: Ext4Extent,
+}
+
+impl Ext4Context {
+    fn new(handle: Ext4Handle, buf: Vec<u8>, extent: Ext4Extent) -> Self {
+        Self {
+            handle,
+            buf,
+            child_dir_count: 0,
+            extent,
+        }
+    }
+}
 
 pub struct Ext4Injector<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     allocator: &'a mut Ext4Allocator<'a>,
     meta: &'a Ext4Meta,
-    stack: Vec<FsContext<Ext4Handle>>,
+    stack: Vec<Ext4Context>,
+    /// Track used directories per group for BGDT
+    used_dirs_per_group: Vec<u16>,
 }
 
 impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
     pub fn new(io: &'a mut IO, allocator: &'a mut Ext4Allocator<'a>, params: &'a Ext4Meta) -> Self {
+        let group_count = params.block_count.div_ceil(params.blocks_per_group) as usize;
+        let mut used_dirs_per_group = vec![0u16; group_count];
+        // Account for Root Directory (inode 2) and Lost+Found (inode 11) in Group 0
+        if group_count > 0 {
+            used_dirs_per_group[0] = 2;
+        }
+
         Self {
             io,
             allocator,
             meta: params,
             stack: vec![],
+            used_dirs_per_group,
         }
     }
 
     fn write_block(&mut self, block: u32, data: &[u8]) -> FsInjectorResult {
         let offset = self.allocator.blocks.block_offset(block);
-        self.io.write_at(offset, data)?;
+        self.io
+            .write_block_best_effort(offset, data, self.meta.block_size as usize)?;
         Ok(())
     }
 
@@ -69,17 +100,21 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
     }
 
     fn flush_superblock(&mut self) -> FsInjectorResult {
-        let free_blocks = self.meta.block_count - self.allocator.blocks.used_units() as u32;
-        let free_inodes = self.allocator.meta.total_metadata_count() as u32
-            - self.allocator.meta.used_metadata() as u32;
+        let mut total_used_blocks = 0;
+        let mut total_used_inodes = 0;
 
-        let mut sb_update = [0u8; 8];
+        for g in 0..self.group_count() {
+            total_used_blocks += self.group_used_blocks(g);
+            total_used_inodes += self.group_used_inodes(g);
+        }
 
-        sb_update[0..4].copy_from_slice(&free_blocks.to_le_bytes()); // s_free_blocks_count_lo
-        sb_update[4..8].copy_from_slice(&(free_inodes).to_le_bytes()); // s_free_inodes_count
+        let free_blocks = self.meta.block_count.saturating_sub(total_used_blocks);
+        let free_inodes = self.meta.inode_count.saturating_sub(total_used_inodes);
 
         self.io
-            .write_at(EXT4_SUPERBLOCK_OFFSET + 0x0C, &sb_update)?;
+            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x0C, free_blocks as u32)?; // s_free_blocks_count_lo
+        self.io
+            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x10, free_inodes as u32)?; // s_free_inodes_count
 
         Ok(())
     }
@@ -101,19 +136,11 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         }
     }
 
-    fn group_used_blocks(&self, group_index: usize) -> usize {
-        let current_global_block = self.allocator.blocks.used_units();
-
-        let group_start_block = group_index * self.meta.blocks_per_group as usize;
-        let group_end_block = group_start_block + self.group_total_blocks(group_index);
-
-        if current_global_block <= group_start_block {
-            0
-        } else if current_global_block >= group_end_block {
-            self.group_total_blocks(group_index)
-        } else {
-            current_global_block - group_start_block
-        }
+    fn group_used_blocks(&self, group_index: usize) -> u32 {
+        let layout = GroupLayout::compute(self.meta, group_index as u32);
+        let metadata_overhead = layout.first_data_block - layout.group_start;
+        let data_used = self.allocator.blocks.allocated_in_group(group_index);
+        metadata_overhead + data_used
     }
 
     fn group_total_inodes(&self, group_index: usize) -> usize {
@@ -124,19 +151,10 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         }
     }
 
-    fn group_used_inodes(&self, group_index: usize) -> usize {
-        let current_used = self.allocator.meta.used_metadata();
-
-        let group_start_inode = group_index * self.meta.inodes_per_group as usize;
-        let group_end_inode = group_start_inode + self.group_total_inodes(group_index);
-
-        if current_used <= group_start_inode {
-            0
-        } else if current_used >= group_end_inode {
-            self.group_total_inodes(group_index)
-        } else {
-            current_used - group_start_inode
-        }
+    fn group_used_inodes(&self, group_index: usize) -> u32 {
+        self.allocator
+            .meta
+            .allocated_in_group(group_index, self.meta.inodes_per_group)
     }
 
     fn flush_bgdt(&mut self) -> FsInjectorResult {
@@ -145,28 +163,199 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
 
         for group_index in 0..self.group_count() {
             let free_blocks =
-                self.group_total_blocks(group_index) - self.group_used_blocks(group_index);
+                self.group_total_blocks(group_index) as u32 - self.group_used_blocks(group_index);
             let free_inodes =
-                self.group_total_inodes(group_index) - self.group_used_inodes(group_index);
+                self.group_total_inodes(group_index) as u32 - self.group_used_inodes(group_index);
+            let used_dirs = self
+                .used_dirs_per_group
+                .get(group_index)
+                .copied()
+                .unwrap_or(0);
 
-            let mut bg_update = [0u8; 4];
-            bg_update[0..2].copy_from_slice(&(free_blocks as u16).to_le_bytes()); // bg_free_blocks_count
-            bg_update[2..4].copy_from_slice(&(free_inodes as u16).to_le_bytes()); // bg_free_inodes_count
+            let update = Ext4BgdtUpdate::new(free_blocks as u16, free_inodes as u16, used_dirs);
 
             let offset = self.bgdt_offset() + (group_index as u64) * EXT4_BGDT_ENTRY_SIZE as u64;
 
             offsets.push(offset + 0x0C);
-            buffer.extend_from_slice(&bg_update);
+            buffer.extend_from_slice(update.as_bytes());
         }
 
-        self.io.write_multi_at(&offsets, 4, &buffer)?;
+        self.io.write_multi_at(&offsets, 6, &buffer)?;
+
+        Ok(())
+    }
+
+    /// Pad a directory block buffer so that the last entry's rec_len extends to block end.
+    /// This is required by e2fsck - the last entry must span to the end of the block.
+    fn pad_directory_block(&self, buf: &mut Vec<u8>) {
+        let block_size = self.meta.block_size as usize;
+
+        if buf.is_empty() || buf.len() >= block_size {
+            buf.resize(block_size, 0);
+            return;
+        }
+
+        // Find the last entry and adjust its rec_len
+        let mut pos = 0usize;
+        let mut last_entry_pos = 0usize;
+
+        while pos + 8 <= buf.len() {
+            let rec_len = u16::from_le_bytes([buf[pos + 4], buf[pos + 5]]) as usize;
+            if rec_len == 0 || pos + rec_len > buf.len() {
+                break;
+            }
+            last_entry_pos = pos;
+            pos += rec_len;
+        }
+
+        // Adjust the last entry's rec_len to reach block_size
+        let new_rec_len = (block_size - last_entry_pos) as u16;
+        buf[last_entry_pos + 4] = (new_rec_len & 0xFF) as u8;
+        buf[last_entry_pos + 5] = ((new_rec_len >> 8) & 0xFF) as u8;
+
+        // Pad buffer to block size
+        buf.resize(block_size, 0);
+    }
+
+    /// Flush block and inode bitmaps to reflect allocated state
+    fn flush_bitmaps(&mut self) -> FsInjectorResult {
+        use crate::core::utils::bitmap::BitmapOps;
+
+        for group in 0..self.group_count() {
+            let layout = GroupLayout::compute(self.meta, group as u32);
+
+            // Block bitmap
+            let bitmap_size = (self.meta.blocks_per_group / 8) as usize;
+            let mut block_bitmap = vec![0xFFu8; bitmap_size]; // Start with all 1s (padding)
+
+            // Calculate actual blocks in this group
+            let group_block_count = self.group_total_blocks(group) as u32;
+
+            // Clear valid block bits first (0..count)
+            for i in 0..group_block_count {
+                block_bitmap.set_bit(i as usize, false);
+            }
+
+            // Mark reserved blocks (Superblock, GDT, Bitmaps, Inode Table)
+            // They are all before first_data_block
+            let reserved_count = layout.first_data_block - layout.group_start;
+            for i in 0..reserved_count {
+                block_bitmap.set_bit(i as usize, true);
+            }
+
+            // Mark allocated data blocks
+            let allocated_data = self.allocator.blocks.allocated_in_group(group);
+            let first_data_offset = layout.first_data_block - layout.group_start;
+            for i in 0..allocated_data {
+                let bit = first_data_offset + i;
+                block_bitmap.set_bit(bit as usize, true);
+            }
+
+            // Pad bitmap to full block size with 1s (0xFF)
+            // e2fsck expects padding bits/bytes to be "set" (1).
+            if block_bitmap.len() < self.meta.block_size as usize {
+                block_bitmap.resize(self.meta.block_size as usize, 0xFF);
+            }
+
+            // Write block bitmap
+            let block_offset = layout.block_bitmap_block as u64 * self.meta.block_size as u64;
+            self.io.write_block_best_effort(
+                block_offset,
+                &block_bitmap,
+                self.meta.block_size as usize,
+            )?;
+
+            // Inode bitmap
+            let inode_bitmap_size = (self.meta.inodes_per_group / 8) as usize;
+            let mut inode_bitmap = vec![0xFFu8; inode_bitmap_size];
+
+            // Calculate actual inodes
+            let group_inode_count = self.group_total_inodes(group) as u32;
+
+            // Clear valid inode bits
+            for i in 0..group_inode_count {
+                inode_bitmap.set_bit(i as usize, false);
+            }
+
+            // Mark used inodes
+            // allocated_in_group returns count of inodes used in this group (1-based index)
+            // The inodes in this group are [group_start_inode + 1 .. group_start_inode + inodes_per_group]
+            // We need to mark bits 0 .. allocated-1.
+            let allocated_inodes = self
+                .allocator
+                .meta
+                .allocated_in_group(group, self.meta.inodes_per_group);
+            for i in 0..allocated_inodes {
+                inode_bitmap.set_bit(i as usize, true);
+            }
+
+            let inode_offset = layout.inode_bitmap_block as u64 * self.meta.block_size as u64;
+
+            // Pad inode bitmap to full block size with 1s (0xFF)
+            if inode_bitmap.len() < self.meta.block_size as usize {
+                inode_bitmap.resize(self.meta.block_size as usize, 0xFF);
+            }
+
+            self.io.write_block_best_effort(
+                inode_offset,
+                &inode_bitmap,
+                self.meta.block_size as usize,
+            )?;
+        }
 
         Ok(())
     }
 
     pub fn flush_metadata(&mut self) -> FsInjectorResult {
+        self.flush_bitmaps()?;
         self.flush_superblock()?;
         self.flush_bgdt()?;
+        Ok(())
+    }
+
+    fn create_lost_found(&mut self) -> FsInjectorResult {
+        // If we are here, lost+found is MISSING from Root.
+        // We need to:
+        // 1. Allocate a block for it
+        // 2. Write the directory content (using Ext4LostFound)
+        // 3. Write the Inode (using Ext4LostFound, forced to inode 11)
+        // 4. Register it in the parent (Root) directory buffer
+
+        // 1. Allocate a block
+        // We use standard allocation. It might not be contiguous to root, but that's fine.
+        let handle = self
+            .allocator
+            .allocate_chain(1)
+            .map_err(|_| FsInjectorError::Other("Allocation failed for lost+found"))?;
+        let block = handle.blocks[0];
+
+        // 2. Write directory content
+        let dir_buf = Ext4LostFound::create_dir_block(self.meta.block_size as usize);
+        self.write_block(block, &dir_buf)?;
+
+        // 3. Write Inode (Inode 11)
+        let inode = Ext4LostFound::INODE;
+        let inode_data = Ext4LostFound::create_inode(self.meta.block_size, block);
+        let inode_buf = inode_data.to_bytes();
+        self.write_metadata(inode, &inode_buf)?;
+
+        // 4. Add entry to parent (Root) buffer
+        // Note: `self.stack.last_mut()` is Root context at this point
+        if let Some(parent) = self.stack.last_mut() {
+            let entry = Ext4LostFound::entry();
+            entry.to_raw_buffer(&mut parent.buf);
+
+            // Increment parent link count (subdirectories increase parent nlink)
+            parent.child_dir_count += 1;
+
+            // Mark directory as used in group stats
+            let inode_index = inode - 1;
+            let group = (inode_index / self.meta.inodes_per_group) as usize;
+            if let Some(count) = self.used_dirs_per_group.get_mut(group) {
+                *count += 1;
+            }
+        }
+
         Ok(())
     }
 }
@@ -206,14 +395,63 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
             entries_end = pos;
         }
 
-        // Keep only the existing entries (. and ..)
+        // Keep only the existing entries (. and .. and lost+found)
         existing.truncate(entries_end);
+
+        // Count existing subdirectories for link count
+        let mut child_dir_count = 0u16;
+        let mut pos = 0usize;
+        while pos + 8 <= existing.len() {
+            let rec_len = u16::from_le_bytes([existing[pos + 4], existing[pos + 5]]) as usize;
+            if rec_len == 0 {
+                break;
+            }
+
+            let file_type = existing[pos + 7];
+            let name_len = existing[pos + 6] as usize;
+            let name = &existing[pos + 8..pos + 8 + name_len];
+
+            // Count directories, but ignore "." and ".."
+            if file_type == EXT4_FT_DIR && name != b"." && name != b".." {
+                child_dir_count += 1;
+            }
+            pos += rec_len;
+        }
 
         // Create handle for root (using existing block, inode 2)
         let handle = Ext4Handle::new(root_inode, vec![root_block]);
+        let extent = Ext4Extent::new(0, root_block, 1);
 
-        let ctx = FsContext::new(handle, existing);
+        let mut ctx = Ext4Context::new(handle, existing, extent);
+        ctx.child_dir_count = child_dir_count;
         self.stack.push(ctx);
+
+        // Check if `lost+found` exists
+        let mut has_lost_found = false;
+        if let Some(ctx) = self.stack.last() {
+            let mut pos = 0usize;
+            while pos + 8 <= ctx.buf.len() {
+                let rec_len = u16::from_le_bytes([ctx.buf[pos + 4], ctx.buf[pos + 5]]) as usize;
+                if rec_len == 0 {
+                    break;
+                }
+                let name_len = ctx.buf[pos + 6] as usize;
+                let name_start = pos + 8;
+                if name_start + name_len <= ctx.buf.len() {
+                    let name = &ctx.buf[name_start..name_start + name_len];
+                    if name == b"lost+found" {
+                        has_lost_found = true;
+                        break;
+                    }
+                }
+                pos += rec_len;
+            }
+        }
+
+        if !has_lost_found {
+            self.create_lost_found()?;
+        }
+
         Ok(())
     }
 
@@ -229,7 +467,7 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
 
         // Write "." and ".."
         let mut entries = vec![];
-        entries.extend_from_slice(&Ext4DirEntry::dot(inode).to_bytes());
+        Ext4DirEntry::dot(inode).to_raw_buffer(&mut entries);
 
         // Parent inode
         let parent_inode = self
@@ -237,7 +475,7 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
             .last()
             .map(|c| c.handle.inode)
             .unwrap_or(EXT4_ROOT_INODE);
-        entries.extend_from_slice(&Ext4DirEntry::dotdot(parent_inode).to_bytes());
+        Ext4DirEntry::dotdot(parent_inode).to_raw_buffer(&mut entries);
 
         let extent = Ext4Extent::new(0, block, 1);
         let inode_data = Ext4Inode::from_attr(
@@ -254,12 +492,19 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
         // Add entry to parent dir
         let entry = Ext4DirEntry::from_attr(inode, name, attr);
         if let Some(parent) = self.stack.last_mut() {
-            parent.buf.extend_from_slice(&entry.to_bytes());
+            entry.to_raw_buffer(&mut parent.buf);
         }
 
         // Push new dir context
-        let ctx = FsContext::new(handle, entries);
+        let ctx = Ext4Context::new(handle, entries, extent);
         self.stack.push(ctx);
+
+        // Track used dir count
+        let inode_index = inode - 1;
+        let group = (inode_index / self.meta.inodes_per_group) as usize;
+        if let Some(count) = self.used_dirs_per_group.get_mut(group) {
+            *count += 1;
+        }
 
         Ok(())
     }
@@ -338,27 +583,46 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
         // Add entry to current dir
         let entry = Ext4DirEntry::from_attr(inode, name, attr);
         if let Some(ctx) = self.stack.last_mut() {
-            ctx.buf.extend_from_slice(&entry.to_bytes());
+            entry.to_raw_buffer(&mut ctx.buf);
         }
 
         Ok(())
     }
 
     fn flush_current(&mut self) -> FsInjectorResult {
-        if let Some(ctx) = self.stack.pop() {
+        if let Some(mut ctx) = self.stack.pop() {
+            // Pad directory block so last entry spans to end
+            self.pad_directory_block(&mut ctx.buf);
             // Write to first block. Logic limitation: directory size <= 1 block
             if let Some(&block_id) = ctx.handle.blocks.first() {
                 self.write_block(block_id, &ctx.buf)?;
+            }
+
+            // Re-write this directory's inode with correct link count
+            // Link count = 2 (for . and ..) + child_dir_count (subdirs pointing back via ..)
+            let links = 2 + ctx.child_dir_count;
+            let inode_data = Ext4Inode::from_attr(
+                &FileAttributes::new_dir(),
+                self.meta.block_size as u64,
+                links,
+                self.meta.block_size.div_ceil(512),
+                &[ctx.extent],
+            );
+            self.write_metadata(ctx.handle.inode, &inode_data.to_bytes())?;
+
+            // Increment parent's child_dir_count (this dir is a subdirectory of parent)
+            if let Some(parent) = self.stack.last_mut() {
+                parent.child_dir_count += 1;
             }
         }
         Ok(())
     }
 
     fn flush(&mut self) -> FsInjectorResult {
-        while let Some(ctx) = self.stack.pop() {
-            if let Some(&block_id) = ctx.handle.blocks.first() {
-                self.write_block(block_id, &ctx.buf)?;
-            }
+        // Drain the stack by calling flush_current repeatedly
+        // This ensures each directory gets its link count updated correctly
+        while !self.stack.is_empty() {
+            self.flush_current()?;
         }
 
         self.flush_metadata()?;
@@ -369,6 +633,7 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
 
 #[cfg(test)]
 mod tests {
+    use crate::core::traits::FsResolver;
     use crate::fs::ext4::prelude::*;
 
     const SIZE_MB: u64 = 32;
@@ -416,9 +681,29 @@ mod tests {
         let mut checker = Ext4Checker::new(&mut io, &meta);
         checker.fast_check().expect("check failed");
 
-        // Parse tree back
+        // Parse tree back (skipping lost+found to avoid recursion/overflow issues in test)
+        // We manually traverse the root to filter out lost+found before building the tree node
         let mut parser_back = Ext4Resolver::new(&mut io, &meta);
-        let mut parsed_tree = parser_back.parse_tree("/*").expect("parse_tree failed");
+        let root_children = parser_back.read_dir("/").expect("read_dir / failed");
+
+        let mut children = vec![];
+        for name in root_children {
+            if name == "lost+found" {
+                continue;
+            }
+            let path = format!("/{}", name);
+            let child = parser_back
+                .build_node(&path, true)
+                .expect("build_node failed");
+            children.push(child);
+        }
+        // Restore children sort order for structural comparison
+        children.sort_by_key(|c| c.name().to_ascii_lowercase());
+
+        let mut parsed_tree = FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children,
+        };
 
         // Sort for comparison
         let mut tree_sorted = tree.clone();

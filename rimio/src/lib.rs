@@ -171,6 +171,32 @@ pub trait RimIOExt: RimIO {
 
         Ok(())
     }
+
+    /// Copies data from a source `RimIO` into this one using a provided buffer.
+    ///
+    /// This avoids internal allocation and allows buffer reuse.
+    fn copy_from_using_buffer(
+        &mut self,
+        src: &mut dyn RimIO,
+        src_offset: u64,
+        dest_offset: u64,
+        mut len: u64,
+        buf: &mut [u8],
+    ) -> RimIOResult {
+        let mut s_off = src_offset;
+        let mut d_off = dest_offset;
+
+        while len > 0 {
+            let to_process = len.min(buf.len() as u64) as usize;
+            src.read_at(s_off, &mut buf[..to_process])?;
+            self.write_at(d_off, &buf[..to_process])?;
+
+            len -= to_process as u64;
+            s_off += to_process as u64;
+            d_off += to_process as u64;
+        }
+        Ok(())
+    }
     /// Reads a block or range of blocks of `block_size` starting at `offset`.
     ///
     /// If offset and length are aligned to `block_size`, performs a single fast read.

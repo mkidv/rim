@@ -67,6 +67,7 @@ impl Ext4BlockGroupDesc {
         inode_table: u32,
         free_blocks: u16,
         free_inodes: u16,
+        used_dirs: u16,
     ) -> Self {
         Self {
             bg_block_bitmap_lo: block_bitmap,
@@ -74,6 +75,7 @@ impl Ext4BlockGroupDesc {
             bg_inode_table_lo: inode_table,
             bg_free_blocks_count_lo: free_blocks,
             bg_free_inodes_count_lo: free_inodes,
+            bg_used_dirs_count_lo: used_dirs,
             ..Default::default()
         }
     }

@@ -4,6 +4,15 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-01-18
+### Fixed
+*   **EXT4 e2fsck Compatibility**: resolved multiple consistency errors including:
+    *   Set `EXT4_FEATURE_INCOMPAT_FILETYPE` flag in superblock.
+    *   Corrected directory entry `rec_len` calculations and block spanning.
+    *   Fixed parent directory link counts.
+    *   Synchronized block/inode bitmaps and free counts.
+*   **Code Cleanup**: Refactored `Ext4Injector` to use `RimIO` primitive writers, removing manual byte packing.
+
 ## [0.5.0] - 2026-01-17
 ### Added
 *   **EXT4 Support**: Full read/write implementation for EXT4 filesystems.

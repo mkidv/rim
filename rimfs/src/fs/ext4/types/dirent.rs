@@ -4,7 +4,26 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec::Vec;
 
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
 use crate::fs::ext4::constant::*;
+
+/// EXT4 Directory Entry header (fixed 8 bytes)
+///
+/// This is the fixed-size header portion of a directory entry.
+/// The name field follows immediately after and is variable length.
+#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
+#[repr(C, packed)]
+pub struct Ext4DirEntryHeader {
+    /// Inode number
+    pub inode: u32,
+    /// Record length (total size of this entry including padding)
+    pub rec_len: u16,
+    /// Name length (excluding null terminator)
+    pub name_len: u8,
+    /// File type (EXT4_FT_* constants)
+    pub file_type: u8,
+}
 
 /// EXT4 Directory Entry structure
 ///
@@ -72,30 +91,25 @@ impl Ext4DirEntry {
     }
 
     /// Encode to bytes for writing to disk
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.rec_len as usize);
-
-        // inode (4 bytes)
-        buf.extend_from_slice(&self.inode.to_le_bytes());
-
-        // rec_len (2 bytes)
-        buf.extend_from_slice(&self.rec_len.to_le_bytes());
-
-        // name_len (1 byte)
-        buf.push(self.name_len);
-
-        // file_type (1 byte)
-        buf.push(self.file_type);
+    /// Uses Ext4DirEntryHeader for the fixed header, then appends name
+    pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
+        let header = Ext4DirEntryHeader {
+            inode: self.inode,
+            rec_len: self.rec_len,
+            name_len: self.name_len,
+            file_type: self.file_type,
+        };
+        buf.extend_from_slice(header.as_bytes());
 
         // name (variable)
         buf.extend_from_slice(&self.name);
 
         // Padding to rec_len
-        while buf.len() < self.rec_len as usize {
-            buf.push(0);
+        let current_len = 8 + self.name.len();
+        if self.rec_len as usize > current_len {
+            let padding = self.rec_len as usize - current_len;
+            buf.extend(core::iter::repeat(0).take(padding));
         }
-
-        buf
     }
 
     /// Parse from raw bytes

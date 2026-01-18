@@ -1,5 +1,22 @@
 // SPDX-License-Identifier: MIT
 
+// Creator Tag (stored at end of s_reserved in superblock)
+
+pub const EXT4_CREATOR_TAG: &[u8; 8] = b"RIM     ";
+
+/// Returns the creator tag with version appended (e.g., "RIM0.1.0")
+pub fn oem_name() -> [u8; 8] {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    let mut out = *EXT4_CREATOR_TAG;
+    let ver = VERSION.as_bytes();
+    let mut i = 0;
+    while i < ver.len() && 3 + i < 8 {
+        out[3 + i] = ver[i];
+        i += 1;
+    }
+    out
+}
+
 // Superblock
 
 // Magic number EXT4 (in s_magic)

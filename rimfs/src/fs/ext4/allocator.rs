@@ -31,17 +31,43 @@ pub struct Ext4BlockAllocator<'p> {
 
 impl<'p> Ext4BlockAllocator<'p> {
     pub fn new(params: &'p Ext4Meta) -> Self {
-        let layout = GroupLayout::compute(params, 0);
+        // next_free is a logical index relative to the first_data_block of the group.
+        // It should start at 0.
         Self {
             params,
             current_group: 0,
-            next_free: layout.first_data_block,
+            next_free: 2, // Skip Root (0) and lost+found (1)
         }
     }
 
     pub fn global_block_number(&self, group: usize, block_in_group: u32) -> u32 {
         let layout = GroupLayout::compute(self.params, group as u32);
         layout.first_data_block + block_in_group
+    }
+
+    /// Returns the number of *data* blocks allocated in a specific group.
+    pub fn allocated_in_group(&self, group: usize) -> u32 {
+        if group > self.current_group {
+            return 0;
+        }
+
+        if group == self.current_group {
+            return self.next_free;
+        }
+
+        // For full previous groups, we need to calculate how many data blocks fit.
+        // The allocator fills until global_block_number >= group_end.
+        // global = first_data + count
+        // group_end = group_start + blocks_per_group
+        // count_max = group_start + blocks_per_group - first_data
+        let layout = GroupLayout::compute(self.params, group as u32);
+        let group_end = layout.group_start + self.params.blocks_per_group;
+
+        if layout.first_data_block >= group_end {
+            0
+        } else {
+            group_end - layout.first_data_block
+        }
     }
 
     pub fn allocate_blocks_list(&mut self, count: usize) -> Vec<u32> {
@@ -78,7 +104,11 @@ impl<'p> Ext4BlockAllocator<'p> {
         block as u64 * self.params.block_size as u64
     }
 
+    /// Returns the total 'logical' units used across all groups.
+    /// Note: This is not a direct block count because groups vary in data capacity.
     pub fn used_units(&self) -> usize {
+        // Only used for debugging or rough estimates now.
+        // Precise usage should be queried via allocated_in_group.
         (self.current_group * self.params.blocks_per_group as usize) + (self.next_free as usize)
     }
 }
@@ -92,7 +122,8 @@ pub struct Ext4MetadataAllocator {
 impl Ext4MetadataAllocator {
     pub fn new(total_inodes: u32) -> Self {
         Self {
-            next_inode: EXT4_FIRST_INODE,
+            // Start after lost+found (inode 11)
+            next_inode: EXT4_FIRST_INODE + 1,
             total_inodes,
         }
     }
@@ -109,6 +140,25 @@ impl Ext4MetadataAllocator {
 
     pub fn total_metadata_count(&self) -> usize {
         self.total_inodes as usize
+    }
+
+    // Helper to get allocated count in a group
+    pub fn allocated_in_group(&self, group: usize, inodes_per_group: u32) -> u32 {
+        let start_inode = group as u32 * inodes_per_group + 1; // 1-based
+        // Check overlap with allocated range [EXT4_FIRST_INODE, next_inode)
+        // Adjust for 1-based vs 0-based logic carefully.
+        // Allocated range is: 1..next_inode.
+
+        let end_inode = start_inode + inodes_per_group; // exclusive
+
+        // We use next_inode as the *next free*, so allocated are < next_inode.
+        if self.next_inode <= start_inode {
+            0
+        } else if self.next_inode >= end_inode {
+            inodes_per_group
+        } else {
+            self.next_inode - start_inode
+        }
     }
 }
 

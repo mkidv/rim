@@ -6,7 +6,7 @@ use zerocopy::IntoBytes;
 use crate::core::traits::FileAttributes;
 use crate::core::{FsFormatterResult, formatter::FsFormatter};
 use crate::fs::ext4::types::{
-    Ext4BlockGroupDesc, Ext4DirEntry, Ext4Extent, Ext4Inode, Ext4Superblock,
+    Ext4BlockGroupDesc, Ext4DirEntry, Ext4Extent, Ext4Inode, Ext4LostFound, Ext4Superblock,
 };
 use crate::fs::ext4::utils::*;
 use crate::fs::ext4::{constant::*, group_layout::GroupLayout, meta::Ext4Meta};
@@ -23,6 +23,7 @@ impl<'a, IO: RimIO + ?Sized> FsFormatter for Ext4Formatter<'a, IO> {
         Self::write_bitmaps(self.io, self.meta)?;
         Self::write_inode_tables(self.io, self.meta)?;
         Self::write_root_dir(self.io, self.meta)?;
+        Self::write_lost_found_dir(self.io, self.meta)?;
 
         self.io.flush()?;
         Ok(())
@@ -47,12 +48,20 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
 
             // root dir block → only for group 0
             if group == 0 {
-                used_blocks += 1;
+                used_blocks += 1; // Root Directory
+                used_blocks += 1; // Lost+Found Directory
             }
         }
 
-        // Inodes used
-        let used_inodes: u32 = EXT4_ROOT_INODE; // inode 1 (bad blocks) + inode 2 (root dir)
+        // Inodes used:
+        // 1 (bad blocks) .. 10 (reserved)
+        // 11 (lost+found)
+        // Total reserved inodes are usually up to 10. `lost+found` uses 11.
+        // So we consider "used" up to 11 implicitly if we allocate it.
+        // It's cleaner to count actual used count.
+        // Inode 1-10 are reserved.
+        // Inode 11 is lost+found.
+        let used_inodes: u32 = 11;
 
         // Create superblock using struct
         let sb = Ext4Superblock::from_meta(meta, used_blocks, used_inodes);
@@ -86,6 +95,9 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
             let free_inodes =
                 (meta.inodes_per_group - compute_used_inodes_in_group(group as u32)) as u16;
 
+            // Used directories: Group 0 has 2 (Root + lost+found), others 0 initially
+            let used_dirs = if group == 0 { 2 } else { 0 };
+
             // Create block group descriptor using struct
             let bgd = Ext4BlockGroupDesc::new(
                 layout.block_bitmap_block,
@@ -93,6 +105,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
                 layout.inode_table_block,
                 free_blocks,
                 free_inodes,
+                used_dirs,
             );
 
             let group_offset = group * EXT4_BGDT_ENTRY_SIZE;
@@ -150,7 +163,11 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
             }
 
             if group == 0 {
+                // Root directory + lost+found blocks
+                // Root is at first_data_block
+                // lost+found is at first_data_block + 1
                 block_bitmap.set_bit((layout.first_data_block - group_start) as usize, true);
+                block_bitmap.set_bit((layout.first_data_block + 1 - group_start) as usize, true);
             }
 
             // Zero high bits at end of block_bitmap:
@@ -171,6 +188,12 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
 
             if group == 0 {
                 inode_bitmap.set_bit((EXT4_ROOT_INODE - 1) as usize, true); // EXT4_ROOT_INODE = 2 so bit 1
+                // Mark reserved inodes 1..10 as used (usually done by system, but acceptable here)
+                // Mark lost+found (inode 11)
+                for i in 1..EXT4_FIRST_INODE {
+                    inode_bitmap.set_bit((i - 1) as usize, true);
+                }
+                inode_bitmap.set_bit((Ext4LostFound::INODE - 1) as usize, true);
             }
 
             // Zero high bits at end of inode_bitmap:
@@ -221,9 +244,11 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
         let mut dir_buf = vec![];
 
         // "." entry
-        dir_buf.extend_from_slice(&Ext4DirEntry::dot(EXT4_ROOT_INODE).to_bytes());
+        Ext4DirEntry::dot(EXT4_ROOT_INODE).to_raw_buffer(&mut dir_buf);
         // ".." entry
-        dir_buf.extend_from_slice(&Ext4DirEntry::dotdot(EXT4_ROOT_INODE).to_bytes());
+        Ext4DirEntry::dotdot(EXT4_ROOT_INODE).to_raw_buffer(&mut dir_buf);
+        // "lost+found" entry
+        Ext4LostFound::entry().to_raw_buffer(&mut dir_buf);
 
         // Pad rest of block
         while dir_buf.len() < meta.block_size as usize {
@@ -239,7 +264,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
         let root_inode = Ext4Inode::from_attr(
             &FileAttributes::new_dir(),
             meta.block_size as u64,
-            EXT4_ROOT_DIR_LINKS_COUNT,
+            EXT4_ROOT_DIR_LINKS_COUNT + 1, // +1 for lost+found
             meta.block_size.div_ceil(512),
             &[extent],
         );
@@ -252,6 +277,31 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
             inode_table_offset + (EXT4_ROOT_INODE as u64 - 1) * EXT4_DEFAULT_INODE_SIZE as u64;
 
         io.write_at(inode_offset, &root_inode_buf)?;
+        Ok(())
+    }
+
+    fn write_lost_found_dir(io: &mut IO, meta: &Ext4Meta) -> FsFormatterResult {
+        let layout = GroupLayout::compute(meta, 0);
+        // lost+found is placed at the block immediately following root dir
+        let lf_block = layout.first_data_block + 1;
+
+        // Content
+        let dir_buf = Ext4LostFound::create_dir_block(meta.block_size as usize);
+
+        // Write block
+        let block_offset = lf_block as u64 * meta.block_size as u64;
+        io.write_at(block_offset, &dir_buf)?;
+
+        // Write Inode
+        let inode_data = Ext4LostFound::create_inode(meta.block_size, lf_block);
+        let inode_buf = inode_data.to_bytes();
+
+        let inode_table_block = layout.inode_table_block;
+        let inode_table_offset = inode_table_block as u64 * meta.block_size as u64;
+        let inode_offset =
+            inode_table_offset + (Ext4LostFound::INODE as u64 - 1) * EXT4_DEFAULT_INODE_SIZE as u64;
+
+        io.write_at(inode_offset, &inode_buf)?;
         Ok(())
     }
 }

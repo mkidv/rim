@@ -105,6 +105,11 @@ pub struct Ext4Superblock {
 
 impl Default for Ext4Superblock {
     fn default() -> Self {
+        // Put creator tag at the end of s_reserved
+        let mut reserved = [0u8; 768];
+        let tag = oem_name();
+        reserved[768 - 8..].copy_from_slice(&tag);
+
         Self {
             s_inodes_count: 0,
             s_blocks_count_lo: 0,
@@ -143,7 +148,7 @@ impl Default for Ext4Superblock {
             s_algorithm_usage_bitmap: 0,
             s_padding_1: [0; 50],
             s_desc_size: 0,
-            s_reserved: [0; 768],
+            s_reserved: reserved,
         }
     }
 }
@@ -177,7 +182,9 @@ impl Ext4Superblock {
             // Features
             s_feature_compat: EXT4_FEATURE_COMPAT_EXT_ATTR | EXT4_FEATURE_COMPAT_DIR_INDEX,
             // Enable 64BIT to support 64-byte block group descriptors
-            s_feature_incompat: EXT4_FEATURE_INCOMPAT_EXTENTS | EXT4_FEATURE_INCOMPAT_64BIT,
+            s_feature_incompat: EXT4_FEATURE_INCOMPAT_EXTENTS
+                | EXT4_FEATURE_INCOMPAT_64BIT
+                | EXT4_FEATURE_INCOMPAT_FILETYPE,
             s_feature_ro_compat: EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
                 | EXT4_FEATURE_RO_COMPAT_LARGE_FILE
                 | EXT4_FEATURE_RO_COMPAT_DIR_NLINK
