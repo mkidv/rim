@@ -89,28 +89,8 @@ jobs:
       - name: Build rimgen (Release)
         run: cargo build --release -p rimgen
 
-      - name: Create Test Layout
-        run: |
-          cat > layout.toml <<EOF
-          [[partitions]]
-          name = "efi"
-          size = { Fixed = 32 }
-          fs = "fat32"
-          bootable = true
-
-          [[partitions]]
-          name = "data"
-          size = { Fixed = 32 }
-          fs = "exfat"
-
-          [[partitions]]
-          name = "linux"
-          size = { Fixed = 64 }
-          fs = "ext4"
-          EOF
-
       - name: Generate Disk Image
-        run: ./target/release/rimgen build --layout layout.toml --output test_image.img
+        run: ./target/release/rimgen build --layout rimgen/layout/layout.toml --output test_image.img
 
       - name: Verify Partitions (fsck)
         run: |
@@ -122,17 +102,21 @@ jobs:
           echo "Attached to $LOOPDEV"
           ls -l /dev/loop*
 
-          # Verify FAT32
-          echo ">>> Checking FAT32..."
+          # Verify EFI (FAT32) - p1
+          echo ">>> Checking p1 (EFI/FAT32)..."
           sudo fsck.vfat -v -n ${LOOPDEV}p1
 
-          # Verify ExFAT
-          echo ">>> Checking ExFAT..."
-          sudo fsck.exfat -n ${LOOPDEV}p2
+          # Verify FAT32 - p2
+          echo ">>> Checking p2 (FAT32)..."
+          sudo fsck.vfat -v -n ${LOOPDEV}p2
 
-          # Verify EXT4
-          echo ">>> Checking Ext4..."
-          sudo e2fsck -n -f ${LOOPDEV}p3
+          # Verify ExFAT - p3
+          echo ">>> Checking p3 (ExFAT)..."
+          sudo fsck.exfat -n ${LOOPDEV}p3
+
+          # Verify EXT4 - p4
+          echo ">>> Checking p4 (EXT4)..."
+          sudo e2fsck -n -f ${LOOPDEV}p4
 
           echo ">>> Integrity Checks Passed"
 
