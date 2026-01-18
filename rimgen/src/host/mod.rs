@@ -4,7 +4,7 @@ use crate::host::cmd_builder::FormatCommandBuilder;
 use crate::layout::Layout;
 #[cfg(feature = "host-scripts")]
 use crate::out::target::DryRunMode;
-#[cfg(feature = "host-scripts")]
+#[cfg(all(feature = "host-scripts", target_os = "windows"))]
 use crate::out::*;
 use std::path::Path;
 
