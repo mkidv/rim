@@ -172,7 +172,7 @@ impl RimIO for UefiRimIO {
         let mut remaining = data;
 
         // Fast path: aligned full blocks
-        if abs_off % bs as u64 == 0 && remaining.len() % bs == 0 {
+        if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
             let mut lba = (abs_off / bs as u64) as Lba;
             for chunk in remaining.chunks(bs) {
                 self.write_block_exact(lba, chunk)?;
@@ -221,7 +221,7 @@ impl RimIO for UefiRimIO {
         let mut remaining = buf;
 
         // Fast path: aligned full blocks
-        if abs_off % bs as u64 == 0 && remaining.len() % bs == 0 {
+        if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
             let mut lba = (abs_off / bs as u64) as Lba;
             for chunk in remaining.chunks_mut(bs) {
                 self.read_block_exact(lba, chunk)?;

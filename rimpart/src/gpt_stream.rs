@@ -286,7 +286,7 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
 
     pub fn from_header(io: &'io mut IO, sector_size: u64, header: GptHeader) -> PartResult<Self> {
         let es = header.entry_size as usize;
-        if (es % 8) != 0 {
+        if !es.is_multiple_of(8) {
             return Err(GptError::EntrySizeInvalid {
                 base: core::mem::size_of::<GptEntry>() as u32,
                 got: header.entry_size,

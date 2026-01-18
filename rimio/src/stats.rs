@@ -230,7 +230,8 @@ impl<'a, IO: RimIO + ?Sized> IOCounter<'a, IO> {
 impl<'a, IO: RimIO + ?Sized> RimIO for IOCounter<'a, IO> {
     #[inline]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let aligned = (offset % self.align == 0) && (data.len() as u64 % self.align == 0);
+        let aligned =
+            offset.is_multiple_of(self.align) && (data.len() as u64).is_multiple_of(self.align);
         if aligned {
             self.stats.aligned_writes += 1;
         } else {
@@ -248,7 +249,8 @@ impl<'a, IO: RimIO + ?Sized> RimIO for IOCounter<'a, IO> {
 
     #[inline]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let aligned = (offset % self.align == 0) && (buf.len() as u64 % self.align == 0);
+        let aligned =
+            offset.is_multiple_of(self.align) && (buf.len() as u64).is_multiple_of(self.align);
         if aligned {
             self.stats.aligned_reads += 1;
         } else {

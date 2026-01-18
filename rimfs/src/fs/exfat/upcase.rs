@@ -64,7 +64,7 @@ impl UpcaseHandle {
         if len == 0 {
             return Err("upcase_size_zero".into());
         }
-        if len % 2 != 0 {
+        if !len.is_multiple_of(2) {
             return Err("upcase_size_not_even".into());
         }
 

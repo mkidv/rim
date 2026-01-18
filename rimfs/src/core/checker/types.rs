@@ -229,6 +229,7 @@ pub trait VerifierOptionsLike {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct CoreVerifyOptions {
     pub phases: VerifyPhases,
