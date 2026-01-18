@@ -77,7 +77,7 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
 
         // Deserialize
         use zerocopy::FromBytes;
-        Ext4Inode::read_from(&buf[..]).ok_or(FsInjectorError::Other("Failed to parse inode"))
+        Ext4Inode::read_from_bytes(&buf[..]).ok_or(FsInjectorError::Other("Failed to parse inode"))
     }
 
     fn flush_superblock(&mut self) -> FsInjectorResult {
