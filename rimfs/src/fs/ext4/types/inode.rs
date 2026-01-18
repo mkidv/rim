@@ -216,7 +216,7 @@ impl Ext4Inode {
             i_size_lo: (size & 0xFFFF_FFFF) as u32,
             i_size_high: size_high,
             i_links_count: links,
-            i_blocks_lo: blocks * 8, // Convert to 512-byte units
+            i_blocks_lo: blocks, // Already in 512-byte units
             i_atime: atime,
             i_ctime: ctime,
             i_mtime: mtime,
