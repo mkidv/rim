@@ -23,7 +23,11 @@ pub const GPT_REVISION: u32 = 0x00010000;
 
 #[inline]
 pub fn align_up(v: u64, a: u64) -> u64 {
-    if v % a == 0 { v } else { v + (a - (v % a)) }
+    if v.is_multiple_of(a) {
+        v
+    } else {
+        v + (a - (v % a))
+    }
 }
 #[inline]
 pub fn align_down(v: u64, a: u64) -> u64 {
@@ -204,7 +208,7 @@ impl GptHeader {
     ) -> PartResult<Self> {
         // entry_size validation
         let base_es = core::mem::size_of::<crate::gpt::GptEntry>() as u32;
-        if entry_size < base_es || (entry_size % 8) != 0 {
+        if entry_size < base_es || !entry_size.is_multiple_of(8) {
             return Err(GptError::EntrySizeInvalid {
                 base: base_es,
                 got: entry_size,
@@ -334,7 +338,7 @@ impl GptHeader {
             .into());
         }
         let base_es = core::mem::size_of::<GptEntry>() as u32;
-        if self.entry_size < base_es || (self.entry_size % 8) != 0 {
+        if self.entry_size < base_es || !self.entry_size.is_multiple_of(8) {
             return Err(GptError::EntrySizeInvalid {
                 base: base_es,
                 got: self.entry_size,
@@ -369,7 +373,7 @@ impl GptHeader {
             .into());
         }
 
-        if entry.start_lba % align != 0 {
+        if !entry.start_lba.is_multiple_of(align) {
             return Err(GptError::EntryUnaligned {
                 lba: entry.start_lba,
                 align,
@@ -477,7 +481,7 @@ where
 {
     let base = core::mem::size_of::<GptEntry>();
     let entry_size = header.entry_size as usize;
-    debug_assert!(entry_size >= base && entry_size % 8 == 0);
+    debug_assert!(entry_size >= base && entry_size.is_multiple_of(8));
 
     let mut hasher = crc32fast::Hasher::new();
 
@@ -559,7 +563,7 @@ pub fn write_gpt_with_header<IO: RimIO + ?Sized>(
     // Base invariants
     let entry_size = header.entry_size as usize;
     let base = core::mem::size_of::<GptEntry>();
-    if entry_size < base || (entry_size % 8) != 0 {
+    if entry_size < base || !entry_size.is_multiple_of(8) {
         return Err(GptError::EntrySizeInvalid {
             base: base as u32,
             got: header.entry_size,
@@ -627,7 +631,7 @@ pub fn write_gpt_from_entries<IO: RimIO + ?Sized>(
 fn parse_entries_from_region(region: &[u8], entry_size: usize) -> PartResult<Vec<GptEntry>> {
     // --- common: parse from a raw entries buffer ---
     let base = core::mem::size_of::<GptEntry>();
-    if entry_size < base || (entry_size % 8) != 0 {
+    if entry_size < base || !entry_size.is_multiple_of(8) {
         return Err(GptError::EntrySizeInvalid {
             base: base as u32,
             got: entry_size as u32,
@@ -767,7 +771,7 @@ where
             return Err(PartError::Other("GPT: zero-sized allocation"));
         }
         // align the beginning
-        if cur % align != 0 {
+        if !cur.is_multiple_of(align) {
             cur += align - (cur % align);
         }
         // bound after alignment

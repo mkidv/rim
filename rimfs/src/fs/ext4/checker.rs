@@ -650,7 +650,7 @@ fn is_sparse_super_group(group: u32) -> bool {
 
     // Check if power of 3
     let mut n = group;
-    while n > 1 && n % 3 == 0 {
+    while n > 1 && n.is_multiple_of(3) {
         n /= 3;
     }
     if n == 1 {
@@ -659,7 +659,7 @@ fn is_sparse_super_group(group: u32) -> bool {
 
     // Check if power of 5
     let mut n = group;
-    while n > 1 && n % 5 == 0 {
+    while n > 1 && n.is_multiple_of(5) {
         n /= 5;
     }
     if n == 1 {
@@ -668,7 +668,7 @@ fn is_sparse_super_group(group: u32) -> bool {
 
     // Check if power of 7
     let mut n = group;
-    while n > 1 && n % 7 == 0 {
+    while n > 1 && n.is_multiple_of(7) {
         n /= 7;
     }
     n == 1
