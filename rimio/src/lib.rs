@@ -184,7 +184,7 @@ pub trait RimIOExt: RimIO {
         buf: &mut [u8],
         block_size: usize,
     ) -> RimIOResult {
-        if offset % block_size as u64 == 0 && buf.len() % block_size == 0 {
+        if offset.is_multiple_of(block_size as u64) && buf.len().is_multiple_of(block_size) {
             self.read_at(offset, buf)
         } else {
             self.read_in_chunks(offset, buf, BLOCK_BUF_SIZE)
@@ -204,7 +204,7 @@ pub trait RimIOExt: RimIO {
         buf: &[u8],
         block_size: usize,
     ) -> RimIOResult {
-        if offset % block_size as u64 == 0 && buf.len() % block_size == 0 {
+        if offset.is_multiple_of(block_size as u64) && buf.len().is_multiple_of(block_size) {
             self.write_at(offset, buf)
         } else {
             self.write_in_chunks(offset, buf, BLOCK_BUF_SIZE)
