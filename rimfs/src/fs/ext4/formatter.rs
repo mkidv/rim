@@ -222,13 +222,11 @@ impl<'a, IO: RimIO + ?Sized> Ext4Formatter<'a, IO> {
 
         // "." entry
         dir_buf.extend_from_slice(&Ext4DirEntry::dot(EXT4_ROOT_INODE).to_bytes());
-        // ".." entry
-        dir_buf.extend_from_slice(&Ext4DirEntry::dotdot(EXT4_ROOT_INODE).to_bytes());
-
-        // Pad rest of block
-        while dir_buf.len() < meta.block_size as usize {
-            dir_buf.push(0);
-        }
+        // ".." entry (must span the rest of the block)
+        let mut dotdot = Ext4DirEntry::dotdot(EXT4_ROOT_INODE);
+        let used_so_far = dir_buf.len(); // Length of "." entry
+        dotdot.set_rec_len((meta.block_size as usize - used_so_far) as u16);
+        dir_buf.extend_from_slice(&dotdot.to_bytes());
 
         // Write root dir block
         let block_offset = root_dir_block as u64 * meta.block_size as u64;

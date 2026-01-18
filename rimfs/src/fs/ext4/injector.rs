@@ -206,8 +206,24 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
             entries_end = pos;
         }
 
-        // Keep only the existing entries (. and ..)
+        // Keep only the existing entries (. and ..) and compact them
         existing.truncate(entries_end);
+
+        // Compact existing entries to allow appending
+        // We need to re-parse and shrink the last entry (typically "..") which might span the block
+        let mut compacted = Vec::new();
+        let mut pos = 0;
+        while pos < existing.len() {
+            if let Some(mut entry) = Ext4DirEntry::from_bytes(&existing[pos..]) {
+                let real_len = entry.rec_len as usize;
+                entry.set_rec_len(entry.min_rec_len());
+                compacted.extend_from_slice(&entry.to_bytes());
+                pos += real_len;
+            } else {
+                break;
+            }
+        }
+        existing = compacted;
 
         // Create handle for root (using existing block, inode 2)
         let handle = Ext4Handle::new(root_inode, vec![root_block]);
@@ -348,7 +364,44 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
         if let Some(ctx) = self.stack.pop() {
             // Write to first block. Logic limitation: directory size <= 1 block
             if let Some(&block_id) = ctx.handle.blocks.first() {
-                self.write_block(block_id, &ctx.buf)?;
+                // We must pad the last entry to cover the full block
+                let mut block_data = ctx.buf.clone();
+                let block_size = self.meta.block_size as usize;
+
+                if block_data.len() < block_size && !block_data.is_empty() {
+                    // Find last entry
+                    let mut pos = 0;
+                    let mut last_pos = 0;
+                    while pos < block_data.len() {
+                        let rec_len =
+                            u16::from_le_bytes(block_data[pos + 4..pos + 6].try_into().unwrap())
+                                as usize;
+                        if pos + rec_len >= block_data.len() {
+                            last_pos = pos;
+                            break;
+                        }
+                        pos += rec_len;
+                    }
+
+                    // Update last entry rec_len
+                    if let Some(mut last_entry) = Ext4DirEntry::from_bytes(&block_data[last_pos..])
+                    {
+                        let new_rec_len = (block_size - last_pos) as u16;
+                        last_entry.set_rec_len(new_rec_len);
+
+                        // Replace in buffer (taking care to overwrite and extend)
+                        block_data.truncate(last_pos);
+                        block_data.extend_from_slice(&last_entry.to_bytes());
+                    }
+                }
+
+                // Ensure we fill exactly the block size (trailing zeros are technically invalid if not covered by rec_len,
+                // but our last_entry extension handles it)
+                if block_data.len() < block_size {
+                    block_data.resize(block_size, 0);
+                }
+
+                self.write_block(block_id, &block_data)?;
             }
         }
         Ok(())
@@ -357,7 +410,42 @@ impl<'a, IO: RimIO + ?Sized> FsNodeInjector<Ext4Handle> for Ext4Injector<'a, IO>
     fn flush(&mut self) -> FsInjectorResult {
         while let Some(ctx) = self.stack.pop() {
             if let Some(&block_id) = ctx.handle.blocks.first() {
-                self.write_block(block_id, &ctx.buf)?;
+                // We must pad the last entry to cover the full block
+                let mut block_data = ctx.buf.clone();
+                let block_size = self.meta.block_size as usize;
+
+                if block_data.len() < block_size && !block_data.is_empty() {
+                    // Find last entry
+                    let mut pos = 0;
+                    let mut last_pos = 0;
+                    while pos < block_data.len() {
+                        let rec_len =
+                            u16::from_le_bytes(block_data[pos + 4..pos + 6].try_into().unwrap())
+                                as usize;
+                        if pos + rec_len >= block_data.len() {
+                            last_pos = pos;
+                            break;
+                        }
+                        pos += rec_len;
+                    }
+
+                    // Update last entry rec_len
+                    if let Some(mut last_entry) = Ext4DirEntry::from_bytes(&block_data[last_pos..])
+                    {
+                        let new_rec_len = (block_size - last_pos) as u16;
+                        last_entry.set_rec_len(new_rec_len);
+
+                        // Replace in buffer
+                        block_data.truncate(last_pos);
+                        block_data.extend_from_slice(&last_entry.to_bytes());
+                    }
+                }
+
+                if block_data.len() < block_size {
+                    block_data.resize(block_size, 0);
+                }
+
+                self.write_block(block_id, &block_data)?;
             }
         }
 
