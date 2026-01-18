@@ -63,11 +63,7 @@ impl<'p> Ext4BlockAllocator<'p> {
         let layout = GroupLayout::compute(self.params, group as u32);
         let group_end = layout.group_start + self.params.blocks_per_group;
 
-        if layout.first_data_block >= group_end {
-            0
-        } else {
-            group_end - layout.first_data_block
-        }
+        group_end.saturating_sub(layout.first_data_block)
     }
 
     pub fn allocate_blocks_list(&mut self, count: usize) -> Vec<u32> {

@@ -736,9 +736,9 @@ pub fn read_gpt<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<(GptHeader, Vec<G
     read_gpt_with_sector(io, crate::DEFAULT_SECTOR_SIZE)
 }
 
-/// Place des entrées à la suite, alignées 1 MiB, dans les bornes du header.
-/// Retourne une `Vec<GptEntry>` ou une erreur si ça ne rentre pas.
-/// Conçu pour tests et cas simples (pas d’intervalles imposés).
+/// Places entries sequentially, aligned to 1 MiB, within the header bounds.
+/// Returns a `Vec<GptEntry>` or an error if it doesn't fit.
+/// Designed for tests and simple cases (no imposed intervals).
 #[cfg(feature = "alloc")]
 pub fn make_aligned_entries<'a, I>(
     header: &GptHeader,
@@ -785,7 +785,7 @@ where
             .into());
         }
 
-        // fin avec overflow-check
+        // end with overflow-check
         let end = cur
             .checked_add(len_sectors - 1)
             .ok_or(GptError::LbaOverflow)?;

@@ -108,7 +108,7 @@ impl Ext4DirEntry {
         let current_len = 8 + self.name.len();
         if self.rec_len as usize > current_len {
             let padding = self.rec_len as usize - current_len;
-            buf.extend(core::iter::repeat(0).take(padding));
+            buf.extend(core::iter::repeat_n(0, padding));
         }
     }
 

@@ -49,7 +49,7 @@ fn is_known_legacy_type(t: u8) -> bool {
         | 0x82 | 0x83 | 0x8E          // Linux swap / Linux / LVM
         | 0xA5 | 0xA6 | 0xA8 | 0xAB   // BSD / NetBSD / Darwin UFS / Apple boot
         | 0xAF | 0xFB | 0xFD          // Apple HFS / VMware / Linux RAID
-        | 0xEE                        // protective GPT (non-legacy, mais “connu”)
+        | 0xEE                        // protective GPT (non-legacy, but "known")
         | 0x05 | 0x0F | 0x85 // extended
     )
 }
@@ -58,7 +58,7 @@ fn is_known_legacy_type(t: u8) -> bool {
 fn check_overlaps_legacy(entries: &[MbrEntry]) -> PartResult<()> {
     let mut segs: Vec<(u64, u64)> = Vec::with_capacity(entries.len());
     for e in entries.iter().filter(|e| !e.is_empty()) {
-        let end = lba_end_inclusive(e.start_lba, e.sectors)?; // ← propage l’erreur
+        let end = lba_end_inclusive(e.start_lba, e.sectors)?;
         segs.push((e.start_lba as u64, end));
     }
     if segs.len() <= 1 {

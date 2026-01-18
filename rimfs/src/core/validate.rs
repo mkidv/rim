@@ -1,4 +1,4 @@
-// rimfs/core/validate.rs (ou similaire)
+// rimfs/core/validate.rs
 pub trait Validate<M> {
     type Err;
     fn neutralized(&self) -> Self;

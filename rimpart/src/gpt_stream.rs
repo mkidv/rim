@@ -135,7 +135,7 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
         Ok(None)
     }
 
-    /// Validation bornes/alignment en streaming.
+    /// Streaming bounds/alignment validation.
     pub fn validate_bounds(&mut self) -> PartResult<()> {
         for i in 0..self.slots() {
             let entry = self.read_at(i)?;
@@ -228,7 +228,7 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
     }
 }
 
-// ── Iterator pour GptCursor ───────────────────────────────────────────────────
+// ── Iterator for GptCursor ───────────────────────────────────────────────────
 
 // Iterator with two distinct lifetimes
 pub struct GptIter<'c, 'io, IO: RimIO + ?Sized, const N: usize> {
@@ -243,7 +243,7 @@ impl<'c, 'io, IO: RimIO + ?Sized, const N: usize> GptIter<'c, 'io, IO, N> {
     }
 }
 
-// Impl de Iterator : utilise bien les deux lifetimes
+// Iterator implementation: correctly uses both lifetimes
 impl<'c, 'io, IO: RimIO + ?Sized, const N: usize> Iterator for GptIter<'c, 'io, IO, N> {
     type Item = PartResult<GptEntry>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -266,10 +266,10 @@ pub struct GptStreamWriter<'io, IO: RimIO + ?Sized, const N: usize> {
     sector_size: u64,
     header: GptHeader,
     sector: [u8; N],   // reused
-    slot: [u8; N],     // pour padded entry (<= entry_size)
+    slot: [u8; N],     // for padded entry (<= entry_size)
     es: usize,         // entry_size
     per_sector: usize, // entries par secteur
-    idx: usize,        // index courant (0..num_entries)
+    idx: usize,        // current index (0..num_entries)
     crc: crc32fast::Hasher,
 }
 
@@ -338,7 +338,7 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
             }
 
             for s in 0..take {
-                // construire le slot (head = GptEntry, tail = 0)
+                // build the slot (head = GptEntry, tail = 0)
                 for b in &mut self.slot[..self.es] {
                     *b = 0;
                 }
@@ -395,14 +395,14 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
         };
         backup.header_crc32 = bcrc;
 
-        // recopier la zone entries vers la zone backup (streaming, secteur par secteur, sans heap)
+        // copy the entries zone to the backup zone (streaming, sector by sector, no heap)
         let ss = self.sector_size as usize;
         let mut remaining = (self.header.num_entries as usize) * self.es;
         let mut src_lba = self.header.entries_lba;
         let mut dst_lba = backup.entries_lba;
 
         while remaining > 0 {
-            // lire un secteur source
+            // read a source sector
             for b in &mut self.sector[..ss] {
                 *b = 0;
             }
@@ -485,7 +485,7 @@ mod tests {
 
         mbr::write_mbr_protective(&mut io, total_sectors).unwrap();
 
-        // 2 partitions qui se chevauchent
+        // 2 overlapping partitions
         let p1 = gpt::GptEntry::new(guids::GPT_PARTITION_TYPE_DATA, [3; 16], 2048, 6000, 0, "A");
         let p2 = gpt::GptEntry::new(guids::GPT_PARTITION_TYPE_DATA, [4; 16], 4096, 7000, 0, "B");
         gpt::write_gpt_from_entries(&mut io, &[p1, p2], total_sectors, [0xCD; 16]).unwrap();
@@ -628,11 +628,11 @@ mod tests {
         let mut buf = vec![0u8; (sector * total) as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // Construire un header valide puis forcer une entry_size aberrante
+        // Build a valid header then force an aberrant entry_size
         let mut hdr = gpt::GptHeader::new(sector, total, [0xEE; 16]).unwrap();
         hdr.entry_size = 1024; // > sector
 
-        // from_header doit refuser (per_sector == 0)
+        // from_header must refuse (per_sector == 0)
         let err = GptStreamWriter::<_, 2048>::from_header(&mut io, sector, hdr).unwrap_err();
         match err {
             PartError::Gpt(GptError::EntrySizeExceedsSector {

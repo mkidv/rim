@@ -2,10 +2,10 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// Volume Flags pour exFAT Boot Sector
+/// Volume Flags for exFAT Boot Sector
 ///
-/// Ces flags indiquent l'état du volume et des paramètres de fonctionnement.
-/// Ils sont stockés dans le champ volume_flags du Boot Sector (offset 106-107).
+/// These flags indicate the volume state and operating parameters.
+/// They are stored in the volume_flags field of the Boot Sector (offset 106-107).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(transparent)]
 pub struct VolumeFlags(u16);
@@ -13,110 +13,110 @@ pub struct VolumeFlags(u16);
 #[allow(dead_code)]
 impl VolumeFlags {
     /// Active FAT flag (bit 0)
-    /// Indique quelle FAT est active (0 = première FAT, 1 = deuxième FAT)
-    /// En pratique, exFAT n'utilise qu'une seule FAT, donc ce bit est généralement 0
+    /// Indicates which FAT is active (0 = first FAT, 1 = second FAT)
+    /// In practice, exFAT only uses one FAT, so this bit is usually 0
     pub const ACTIVE_FAT: u16 = 0x0001;
 
     /// Volume Dirty flag (bit 1)
-    /// Indique que le volume n'a pas été correctement démonté
-    /// Set par le pilote lors du montage, cleared lors du démontage propre
+    /// Indicates that the volume was not properly unmounted
+    /// Set by the driver upon mounting, cleared upon clean unmounting
     pub const VOLUME_DIRTY: u16 = 0x0002;
 
     /// Media Failure flag (bit 2)
-    /// Indique qu'une erreur de média a été détectée
-    /// Une fois set, seul chkdsk peut le clearer
+    /// Indicates that a media failure was detected
+    /// Once set, only chkdsk can clear it
     pub const MEDIA_FAILURE: u16 = 0x0004;
 
     /// Clear to Zero flag (bit 3)
-    /// Indique que tous les clusters non-alloués doivent être traités comme zéro
-    /// Améliore les performances de lecture sur certains médias
+    /// Indicates that all unallocated clusters should be treated as zero
+    /// Improves read performance on some media
     pub const CLEAR_TO_ZERO: u16 = 0x0008;
 
-    /// Crée des flags vides
+    /// Creates empty flags
     pub const fn empty() -> Self {
         Self(0)
     }
 
-    /// Crée des flags à partir d'une valeur brute
+    /// Creates flags from a raw value
     pub const fn from_bits(bits: u16) -> Self {
         Self(bits)
     }
 
-    /// Retourne la valeur brute des flags
+    /// Returns the raw value of the flags
     pub const fn bits(self) -> u16 {
         self.0
     }
 
-    /// Vérifie si un flag est présent
+    /// Checks if a flag is present
     pub const fn contains(self, flag: u16) -> bool {
         (self.0 & flag) == flag
     }
 
-    /// Ajoute un flag
+    /// Adds a flag
     pub const fn with_flag(mut self, flag: u16) -> Self {
         self.0 |= flag;
         self
     }
 
-    /// Retire un flag
+    /// Removes a flag
     pub const fn without_flag(mut self, flag: u16) -> Self {
         self.0 &= !flag;
         self
     }
 
-    /// Bascule un flag
+    /// Toggles a flag
     pub const fn toggle_flag(mut self, flag: u16) -> Self {
         self.0 ^= flag;
         self
     }
 
-    /// Crée des flags par défaut pour un nouveau volume (propre)
+    /// Creates default flags for a new volume (clean)
     pub fn new_volume() -> Self {
         Self::empty()
     }
 
-    /// Crée des flags pour un volume monté (dirty bit set)
+    /// Creates flags for a mounted volume (dirty bit set)
     pub fn mounted_volume() -> Self {
         Self::from_bits(Self::VOLUME_DIRTY)
     }
 
-    /// Marque le volume comme sale (non-démonté proprement)
+    /// Marks the volume as dirty (not cleanly unmounted)
     pub fn mark_dirty(self) -> Self {
         self.with_flag(Self::VOLUME_DIRTY)
     }
 
-    /// Marque le volume comme proprement démonté
+    /// Marks the volume as cleanly unmounted
     pub fn mark_clean(self) -> Self {
         self.without_flag(Self::VOLUME_DIRTY)
     }
 
-    /// Marque une erreur de média
+    /// Marks a media failure
     pub fn mark_media_failure(self) -> Self {
         self.with_flag(Self::MEDIA_FAILURE)
     }
 
-    /// Active le Clear to Zero pour optimiser les performances
+    /// Enables Clear to Zero to optimize performance
     pub fn enable_clear_to_zero(self) -> Self {
         self.with_flag(Self::CLEAR_TO_ZERO)
     }
 
-    /// Vérifie si le volume est sale
+    /// Checks if the volume is dirty
     pub fn is_dirty(self) -> bool {
         self.contains(Self::VOLUME_DIRTY)
     }
 
-    /// Vérifie si une erreur de média est présente
+    /// Checks if a media failure is present
     pub fn has_media_failure(self) -> bool {
         self.contains(Self::MEDIA_FAILURE)
     }
 
-    /// Vérifie si Clear to Zero est activé
+    /// Checks if Clear to Zero is enabled
     pub fn is_clear_to_zero_enabled(self) -> bool {
         self.contains(Self::CLEAR_TO_ZERO)
     }
 }
 
-// Les traits zerocopy sont implémentés via derive
+// zerocopy traits are implemented via derive
 
 impl From<u16> for VolumeFlags {
     fn from(value: u16) -> Self {

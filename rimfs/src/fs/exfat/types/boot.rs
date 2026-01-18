@@ -213,7 +213,7 @@ impl Validate<ExFatMeta> for ExFatBootSector {
             ));
         }
 
-        // percent_in_use: 0xFF (unknown) ou <=100
+        // percent_in_use: 0xFF (unknown) or <=100
         if self.percent_in_use != 0xFF && self.percent_in_use > 100 {
             return Err(FsParsingError::Invalid("exFAT: percent_in_use > 100"));
         }

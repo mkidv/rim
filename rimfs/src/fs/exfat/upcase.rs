@@ -68,17 +68,17 @@ impl UpcaseHandle {
             return Err("upcase_size_not_even".into());
         }
 
-        // buffer destination complet
+        // complete destination buffer
         let mut cur =
             LinearCursor::from_len_bytes(meta, meta.upcase_cluster, meta.upcase_size_bytes);
 
         let mut blob = vec![0u8; len].into_boxed_slice();
         cur.read_into(io, blob.len(), &mut blob)?;
-        // Checksum en une passe
+        // Checksum in one pass
         let mut checksum: u32 = 0;
         accumulate_checksum(&mut checksum, &blob);
 
-        // Build table u16 LE en une passe
+        // Build u16 LE table in one pass
         let mut table: Box<[u16]> = vec![0u16; len / 2].into_boxed_slice();
         for (i, ch) in blob.chunks_exact(2).enumerate() {
             table[i] = u16::from_le_bytes([ch[0], ch[1]]);

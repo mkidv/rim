@@ -112,9 +112,9 @@ impl<'a, IO: RimIO + ?Sized> Ext4Injector<'a, IO> {
         let free_inodes = self.meta.inode_count.saturating_sub(total_used_inodes);
 
         self.io
-            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x0C, free_blocks as u32)?; // s_free_blocks_count_lo
+            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x0C, free_blocks)?; // s_free_blocks_count_lo
         self.io
-            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x10, free_inodes as u32)?; // s_free_inodes_count
+            .write_u32_at(EXT4_SUPERBLOCK_OFFSET + 0x10, free_inodes)?; // s_free_inodes_count
 
         Ok(())
     }
@@ -691,7 +691,7 @@ mod tests {
             if name == "lost+found" {
                 continue;
             }
-            let path = format!("/{}", name);
+            let path = format!("/{name}");
             let child = parser_back
                 .build_node(&path, true)
                 .expect("build_node failed");

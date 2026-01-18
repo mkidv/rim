@@ -102,7 +102,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
         _opt: &Self::Options,
         rep: &mut VerifyReport,
     ) -> FsCheckerResult<()> {
-        // Bitmap couvre Bitmap/UpCase/Root - Scan First to satisfy borrow checker
+        // Bitmap covers Bitmap/UpCase/Root - Scan First to satisfy borrow checker
         let crit = scan_root_for_critical_with_meta(self.io, self.meta, rep)?;
 
         let mut walker = walker::ExFatWalker::new(self.io, self.meta);
@@ -427,7 +427,7 @@ fn check_bpb_geometry(
     if vbr.number_of_fats != 1 {
         rep.push(Finding::err(
             "BPB.FATS",
-            format!("NumberOfFats={} (TexFAT non géré)", vbr.number_of_fats),
+            format!("NumberOfFats={} (TexFAT not supported)", vbr.number_of_fats),
         ));
     }
     if vbr.cluster_count == 0 {
@@ -708,14 +708,14 @@ fn bitmap_covers_critical<IO: RimIO + ?Sized>(
             ok = false;
             rep.push(Finding::err(
                 "BITMAP.COVER",
-                format!("Bitmap ne couvre pas {name} fc={fc}"),
+                format!("Bitmap does not cover {name} fc={fc}"),
             ));
         }
     }
     if ok {
         rep.push(Finding::info(
             "BITMAP.COVER",
-            "Bitmap couvre les ressources critiques",
+            "Bitmap covers critical resources",
         ));
     }
     Ok(())

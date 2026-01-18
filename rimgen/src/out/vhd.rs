@@ -71,7 +71,7 @@ impl VhdFooter {
             saved_state: 0,
             reserved: [0u8; 427],
         };
-        // injecte le checksum
+        // inject the checksum
         let sum = f.compute_checksum();
         f.checksum = U32::new(sum);
         f

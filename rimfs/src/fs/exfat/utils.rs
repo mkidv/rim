@@ -10,7 +10,7 @@ use rimio::prelude::*;
 use time::OffsetDateTime;
 
 /// Encode ExFAT datetime (as `u32 + u8 + u8`):
-/// - `u32` = date+time (same layout que FAT32)
+/// - `u32` = date+time (same layout as FAT32)
 /// - `u8` = 10ms increment (0–199)
 /// - `u8` = UTC offset in minutes from -16h to +15:45h (in steps of 15 min)
 pub fn datetime_from(ts: OffsetDateTime) -> (u32, u8, u8) {

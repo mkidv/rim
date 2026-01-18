@@ -45,7 +45,7 @@ pub fn datetime_now() -> (u16, u16, u8) {
 }
 
 /// Allowed characters in SFN (after uppercase):
-/// A–Z, 0–9 et !$%'-_@~`^#&(){}.
+/// A–Z, 0–9 and !$%'-_@~`^#&(){}.
 #[inline(always)]
 fn is_valid_sfn_char(b: u8) -> bool {
     matches!(b,
