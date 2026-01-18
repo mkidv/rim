@@ -23,7 +23,7 @@ ext4 = ["alloc"]
 [dependencies]
 bitflags = "2.9.1"
 crc32fast = { version ="1.4.2", default-features = false }
-rimio = { path = "../rimio" }
+rimio = { path = "../rimio", version = "0.5.1" }
 time = { version = "0.3.41", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
