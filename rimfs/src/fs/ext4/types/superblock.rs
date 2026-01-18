@@ -176,8 +176,10 @@ impl Ext4Superblock {
             s_inodes_per_group: meta.inodes_per_group,
             // Features
             s_feature_compat: EXT4_FEATURE_COMPAT_EXT_ATTR | EXT4_FEATURE_COMPAT_DIR_INDEX,
-            // Enable 64BIT to support 64-byte block group descriptors
-            s_feature_incompat: EXT4_FEATURE_INCOMPAT_EXTENTS | EXT4_FEATURE_INCOMPAT_64BIT,
+            // Enable 64BIT to support 64-byte block group descriptors, and FILETYPE for directory entries
+            s_feature_incompat: EXT4_FEATURE_INCOMPAT_EXTENTS
+                | EXT4_FEATURE_INCOMPAT_64BIT
+                | EXT4_FEATURE_INCOMPAT_FILETYPE,
             s_feature_ro_compat: EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
                 | EXT4_FEATURE_RO_COMPAT_LARGE_FILE
                 | EXT4_FEATURE_RO_COMPAT_DIR_NLINK
