@@ -21,7 +21,7 @@ uefi = ["rimio/uefi"]
 [dependencies]
 crc32fast = { version = "1.4.2", default-features = false }
 paste = "1.0.15"
-rimio = { path = "../rimio", default-features = false, version = "0.5.1" }
+rimio = { path = "../rimio", default-features = false, version = "0.6.0" }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }
@@ -33,3 +33,7 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 [[bench]]
 name = "gpt_crc_stream_bench"
 harness = false
+
+[lints]
+workspace = true
+

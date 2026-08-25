@@ -1,0 +1,11 @@
+# EFI System Partition (ESP) layout for UEFI bootloaders
+[disk]
+alignment = "1M"
+
+[[partitions]]
+name = "ESP"
+fs = "fat32"
+size = "64M"
+bootable = true
+type = "esp"
+label = "BOOT"

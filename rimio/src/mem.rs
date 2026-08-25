@@ -40,10 +40,7 @@ impl<'a> MemRimIO<'a> {
         let end = abs_off
             .checked_add(len as u64)
             .ok_or(RimIOError::OutOfBounds)?;
-        let max = self
-            .partition_offset
-            .checked_add(self.logical_len as u64)
-            .ok_or(RimIOError::OutOfBounds)?;
+        let max = self.logical_len as u64;
         if end > max {
             return Err(RimIOError::OutOfBounds);
         }
@@ -86,6 +83,11 @@ impl<'a> RimIO for MemRimIO<'a> {
         self.partition_offset
     }
 
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Ok((self.logical_len as u64).saturating_sub(self.partition_offset))
+    }
+
     /// Optimized single-copy implementation.
     /// Reads directly from `src` into the internal buffer segment.
     fn copy_from(
@@ -114,7 +116,7 @@ impl<'a> RimIOSetLen for MemRimIO<'a> {
         if end > self.buffer.len() {
             return Err(RimIOError::OutOfBounds);
         }
-        self.logical_len = new_len as usize;
+        self.logical_len = end;
         Ok(())
     }
 }
@@ -123,28 +125,55 @@ impl<'a> RimIOSetLen for MemRimIO<'a> {
 mod test {
     use super::*;
     use crate::prelude::*;
+    use crate::test_suite::*;
 
     #[test]
-    fn test_rw() {
-        let mut buf = [0u8; 256];
+    fn test_mem_rimio_partition_view_invariants() {
+        let mut buf = [0u8; 1000];
         let mut io = MemRimIO::new(&mut buf);
-        io.write_at(10, &[1, 2, 3, 4]).unwrap();
+        io.set_offset(100);
 
-        let mut output = [0u8; 4];
-        io.read_at(10, &mut output).unwrap();
-        assert_eq!(output, [1, 2, 3, 4]);
+        // Invariant 1: total_size() of the initial view (1000 - 100 = 900)
+        assert_eq!(io.total_size().unwrap(), 900);
+
+        // Invariant 2: bounds checking within the view (0..900)
+        assert!(io.write_at(899, &[0xAA]).is_ok());
+        assert!(io.write_at(900, &[0xAA]).is_err());
+
+        // Invariant 3: set_len(500) resizes the view to 500 bytes
+        io.set_len(500).unwrap();
+        assert_eq!(io.total_size().unwrap(), 500);
+
+        // Invariant 4: bounds checking within the resized view (0..500)
+        assert!(io.write_at(499, &[0xBB]).is_ok());
+        assert!(io.write_at(500, &[0xBB]).is_err());
     }
 
     #[test]
-    fn test_set_len_safe() {
-        let mut buf = [0u8; 512];
+    fn test_mem_rimio_suite() {
+        let mut buf = [0u8; 4096];
         let mut io = MemRimIO::new(&mut buf);
-        io.set_len(512).unwrap();
-        assert!(io.set_len(1024).is_err());
+
+        check_basic_rw(&mut io);
+        check_rw_at_offset(&mut io);
+        check_zero_fill(&mut io);
+
+        // MemRimIO capacity is 4096.
+        // Initial logical len is 4096.
+        check_bounds(&mut io, 4096, false);
     }
 
     #[test]
-    fn test_best_effort_rw_unaligned() {
+    fn test_mem_rimio_set_len() {
+        let mut buf = [0u8; 4096];
+        let mut io = MemRimIO::new(&mut buf);
+        // MemRimIO starts with len=4096.
+        // check_set_len expects to resizing.
+        check_set_len(&mut io);
+    }
+
+    #[test]
+    fn test_mem_rimio_best_effort() {
         let mut buf = [0u8; 64];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -158,7 +187,7 @@ mod test {
     }
 
     #[test]
-    fn test_multi_rw() {
+    fn test_mem_rimio_multi_rw() {
         let mut buf = [0u8; 64];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -177,7 +206,7 @@ mod test {
     }
 
     #[test]
-    fn test_chunks_streamed_rw() {
+    fn test_mem_rimio_streamed() {
         let mut buf = [0u8; 1024];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -193,17 +222,5 @@ mod test {
         for (i, v) in values.iter().enumerate() {
             assert_eq!(*v, i as u32);
         }
-    }
-
-    #[test]
-    fn test_zero_fill() {
-        let mut buf = [0xFF; 64];
-        let mut io = MemRimIO::new(&mut buf);
-
-        io.zero_fill(10, 8).unwrap();
-
-        let mut output = [0xAA; 8];
-        io.read_at(10, &mut output).unwrap();
-        assert_eq!(output, [0u8; 8]);
     }
 }

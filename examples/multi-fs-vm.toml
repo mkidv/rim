@@ -1,0 +1,27 @@
+# Multi-filesystem virtual machine disk layout
+[disk]
+alignment = "1M"
+
+[[partitions]]
+name = "EFI"
+fs = "fat32"
+size = "64M"
+bootable = true
+
+[[partitions]]
+name = "LINUX_ROOT"
+fs = "ext4"
+size = "512M"
+label = "ROOTFS"
+
+[[partitions]]
+name = "SHARED_DATA"
+fs = "exfat"
+size = "256M"
+label = "DATA"
+
+[[partitions]]
+name = "WINDOWS_DATA"
+fs = "ntfs"
+size = "256M"
+label = "WIN_DATA"

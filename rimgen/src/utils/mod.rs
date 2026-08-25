@@ -1,8 +1,4 @@
-#[macro_use]
-pub mod log;
+// SPDX-License-Identifier: MIT
+
 pub mod string;
-
-pub use log::*;
-pub mod progress;
-
 pub use string::*;

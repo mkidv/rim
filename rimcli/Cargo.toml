@@ -1,0 +1,32 @@
+[package]
+name = "rimcli"
+description = "Unified CLI for the Rust Image Maker (RIM) ecosystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "rim"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.39", features = ["derive"] }
+colored = "3.1.1"
+indicatif = "0.18.3"
+rimfs = { path = "../rimfs", version = "0.6.0" }
+rimgen = { path = "../rimgen", version = "0.6.0" }
+rimhost = { path = "../rimhost", version = "0.6.0" }
+rimimg = { path = "../rimimg", version = "0.6.0" }
+rimio = { path = "../rimio", version = "0.6.0" }
+rimpart = { path = "../rimpart", version = "0.6.0" }
+tempfile = "3.20.0"
+
+[lints]
+workspace = true
+

@@ -58,11 +58,10 @@ Desktop.ini
 /build/
 /dist/
 /out/
-/docs/
 /coverage/
 
 # ────────────────
-# Binaries
+# Binaries & Disk Images
 # ────────────────
 *.exe
 *.dll
@@ -72,6 +71,12 @@ Desktop.ini
 *.img
 *.iso
 *.vhd
+*.vmdk
+*.qcow2
+*.qcow
+*.vdi
+*.raw
+*.dmg
 
 # ────────────────
 # Archives
@@ -91,3 +96,5 @@ Desktop.ini
 # ────────────────
 # rim-specific exclusions (optionnel)
 # ────────────────
+scratch/
+

@@ -10,6 +10,7 @@ use alloc::vec;
 // Core modules
 pub mod errors;
 mod macros;
+pub mod run;
 pub mod stats;
 pub mod utils;
 
@@ -23,6 +24,12 @@ mod std;
 #[cfg(feature = "uefi")]
 mod uefi;
 
+#[cfg(feature = "mmap")]
+mod mmap;
+
+#[cfg(test)]
+pub mod test_suite;
+
 // Prelude re-exports (central entrypoint)
 pub mod prelude {
     pub use super::RimIO;
@@ -31,26 +38,34 @@ pub mod prelude {
     pub use super::RimIOStreamExt;
     pub use super::RimIOStructExt;
     pub use super::errors::*;
+    pub use super::run::*;
     pub use super::stats::*;
+    pub use super::utils::*;
 
     #[cfg(feature = "mem")]
     pub use super::mem::MemRimIO;
 
     #[cfg(feature = "std")]
-    pub use super::std::StdRimIO;
+    pub use super::std::{FileRimIO, StdRimIO};
 
     #[cfg(feature = "uefi")]
     pub use super::uefi::UefiRimIO;
+
+    #[cfg(feature = "mmap")]
+    pub use super::mmap::MmapRimIO;
 }
 
-// Internal use
-use errors::*;
+// Re-export errors
+pub use errors::*;
 
 // Constants
 
-/// Maximum size of internal scratch buffer (used for streaming/chunked ops).
-/// 4 KiB = typical page size and common disk sector/cluster size.
-/// Safe for no_std/UEFI stack usage, overridable in high-level code.
+/// Maximum size of internal scratch buffer (used for limited stack/chunking).
+/// - `std`: 512 Kib (larger stack available, better throughput)
+/// - `no_std`: 4 KiB (conservative for limited stack)
+#[cfg(feature = "std")]
+pub const BLOCK_BUF_SIZE: usize = 1024 * 1024;
+#[cfg(not(feature = "std"))]
 pub const BLOCK_BUF_SIZE: usize = 4096;
 
 // Traits
@@ -70,6 +85,11 @@ pub trait RimIO {
     fn set_offset(&mut self, partition_offset: u64) -> u64;
     fn partition_offset(&self) -> u64;
 
+    /// Returns the total size of the storage in bytes accessible from the current partition offset.
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Err(RimIOError::Unsupported)
+    }
+
     /// Copies data from a source `RimIO` into this one.
     ///
     /// The default implementation uses an intermediate buffer (double-copy).
@@ -84,7 +104,11 @@ pub trait RimIO {
         mut len: u64,
     ) -> RimIOResult {
         // Default: Large Heap Buffer (Double Copy)
-        const CHUNK_SIZE: usize = 64 * 1024; // 64 KiB
+        // Default: Large Heap Buffer (Double Copy)
+        #[cfg(feature = "std")]
+        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB for std
+        #[cfg(not(feature = "std"))]
+        const CHUNK_SIZE: usize = 64 * 1024; // 64 KiB for alloc-only
         let mut buf = alloc::vec![0u8; CHUNK_SIZE];
         let mut s_off = src_offset;
         let mut d_off = dest_offset;
@@ -135,7 +159,20 @@ pub trait RimIO {
 /// - low-level write helpers (write_u16/32/64)
 /// - streamed reads/writes
 /// - zero fill, primitive writes
+/// - std convenience (read_to_vec, read_to_string)
 pub trait RimIOExt: RimIO {
+    #[cfg(feature = "std")]
+    fn read_to_vec(&mut self, offset: u64, len: usize) -> RimIOResult<::std::vec::Vec<u8>> {
+        let mut buf = ::std::vec![0u8; len];
+        self.read_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+
+    #[cfg(feature = "std")]
+    fn read_to_string(&mut self, offset: u64, len: usize) -> RimIOResult<String> {
+        let vec = self.read_to_vec(offset, len)?;
+        String::from_utf8(vec).map_err(|_| RimIOError::Other("Invalid UTF-8 sequence"))
+    }
     /// Reads `buf.len()` bytes from `offset` in chunks of `chunk_size` or less.
     #[inline(always)]
     fn read_in_chunks(&mut self, offset: u64, buf: &mut [u8], chunk_size: usize) -> RimIOResult {
@@ -194,6 +231,47 @@ pub trait RimIOExt: RimIO {
             len -= to_process as u64;
             s_off += to_process as u64;
             d_off += to_process as u64;
+        }
+        Ok(())
+    }
+
+    /// Copies data from a source `RimIO` into this one, notifying byte progress via a closure.
+    fn copy_from_with_progress<F: FnMut(u64, u64)>(
+        &mut self,
+        src: &mut dyn RimIO,
+        src_offset: u64,
+        dest_offset: u64,
+        mut len: u64,
+        mut on_progress: F,
+    ) -> RimIOResult {
+        #[cfg(feature = "std")]
+        const CHUNK_SIZE: usize = 1024 * 1024;
+        #[cfg(all(feature = "alloc", not(feature = "std")))]
+        const CHUNK_SIZE: usize = 64 * 1024;
+        #[cfg(not(feature = "alloc"))]
+        const CHUNK_SIZE: usize = BLOCK_BUF_SIZE;
+
+        #[cfg(feature = "alloc")]
+        let mut buf = alloc::vec![0u8; CHUNK_SIZE];
+        #[cfg(not(feature = "alloc"))]
+        let mut buf = [0u8; BLOCK_BUF_SIZE];
+
+        let total = len;
+        let mut copied = 0u64;
+        let mut s_off = src_offset;
+        let mut d_off = dest_offset;
+
+        while len > 0 {
+            let to_process = len.min(CHUNK_SIZE as u64) as usize;
+            src.read_at(s_off, &mut buf[..to_process])?;
+            self.write_at(d_off, &buf[..to_process])?;
+
+            len -= to_process as u64;
+            copied += to_process as u64;
+            s_off += to_process as u64;
+            d_off += to_process as u64;
+
+            on_progress(copied, total);
         }
         Ok(())
     }
@@ -348,12 +426,25 @@ pub trait RimIOExt: RimIO {
     /// Used for quick cluster clearing, FS formatting, VBR/FSInfo clears, etc.
     #[inline(always)]
     fn zero_fill(&mut self, offset: u64, len: usize) -> RimIOResult {
-        const ZERO_BUF: [u8; BLOCK_BUF_SIZE] = [0u8; BLOCK_BUF_SIZE];
+        #[cfg(feature = "std")]
+        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+        #[cfg(not(feature = "std"))]
+        const CHUNK_SIZE: usize = BLOCK_BUF_SIZE; // 4 KiB
+
+        #[cfg(feature = "std")]
+        let buf = ::std::vec![0u8; CHUNK_SIZE]; // Heap alloc for large buffer
+        #[cfg(not(feature = "std"))]
+        const buf: [u8; CHUNK_SIZE] = [0u8; CHUNK_SIZE]; // Stack alloc for small buffer
+
         let mut remaining = len;
         let mut off = offset;
         while remaining > 0 {
-            let chunk = remaining.min(ZERO_BUF.len());
-            self.write_at(off, &ZERO_BUF[..chunk])?;
+            let chunk = remaining.min(CHUNK_SIZE);
+            #[cfg(feature = "std")]
+            self.write_at(off, &buf[..chunk])?;
+            #[cfg(not(feature = "std"))]
+            self.write_at(off, &buf[..chunk])?;
+
             off += chunk as u64;
             remaining -= chunk;
         }
@@ -365,6 +456,43 @@ pub trait RimIOExt: RimIO {
 }
 
 impl<T: RimIO + ?Sized> RimIOExt for T {}
+
+#[inline]
+fn validate_stream_chunk<const N: usize>(chunk: usize) -> RimIOResult {
+    if N == 0 {
+        return Err(RimIOError::Invalid(
+            "element size must be greater than zero",
+        ));
+    }
+    if chunk == 0 {
+        return Err(RimIOError::Invalid("chunk size must be greater than zero"));
+    }
+
+    chunk
+        .checked_mul(N)
+        .map(|_| ())
+        .ok_or(RimIOError::Invalid("chunk size overflow"))
+}
+
+#[inline(always)]
+fn array_ref_from_slice<const N: usize>(slice: &[u8]) -> &[u8; N] {
+    debug_assert_eq!(slice.len(), N);
+    // SAFETY: all callers slice exactly `N` bytes (e.g. `start..start + N`).
+    unsafe { &*slice.as_ptr().cast::<[u8; N]>() }
+}
+
+#[cfg(not(feature = "alloc"))]
+#[inline]
+fn validate_no_alloc_chunk<const N: usize>(chunk: usize) -> RimIOResult {
+    validate_stream_chunk::<N>(chunk)?;
+
+    let entries_per_chunk = BLOCK_BUF_SIZE / N;
+    if chunk > entries_per_chunk {
+        return Err(RimIOError::Invalid("chunk too large for internal buffer"));
+    }
+
+    Ok(())
+}
 
 pub trait RimIOStreamExt: RimIO {
     /// Stream-read N-byte fixed-size elements using a callback function (e.g. for u16, u32, custom entries).
@@ -423,6 +551,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize, &[u8; N]),
     {
+        validate_stream_chunk::<N>(chunk)?;
         let mut buf = vec![0u8; chunk * N];
 
         let mut remaining = count;
@@ -437,7 +566,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
             for i in 0..to_read {
                 let start = i * N;
                 let slice = &buf[start..start + N];
-                f(index, slice.try_into().unwrap());
+                f(index, array_ref_from_slice::<N>(slice));
                 index += 1;
             }
 
@@ -459,6 +588,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize) -> [u8; N],
     {
+        validate_stream_chunk::<N>(chunk)?;
         let mut buf = vec![0u8; chunk * N];
 
         let mut remaining = count;
@@ -494,6 +624,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize, &[u8; N]),
     {
+        validate_stream_chunk::<N>(chunk)?;
         let mut buf = vec![0u8; chunk * N];
 
         for (chunk_idx, offset_chunk) in offsets.chunks(chunk).enumerate() {
@@ -506,8 +637,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
 
             for i in 0..to_read {
                 let slice = &buf[i * N..(i + 1) * N];
-                let array_ref: &[u8; N] = slice.try_into().expect("slice len mismatch");
-                f(chunk_idx * chunk + i, array_ref);
+                f(chunk_idx * chunk + i, array_ref_from_slice::<N>(slice));
             }
         }
 
@@ -525,6 +655,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize) -> [u8; N],
     {
+        validate_stream_chunk::<N>(chunk)?;
         let mut buf = vec![0u8; chunk * N];
 
         for (chunk_idx, offset_chunk) in offsets.chunks(chunk).enumerate() {
@@ -558,13 +689,8 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize, &[u8; N]),
     {
-        const BUF_SIZE: usize = BLOCK_BUF_SIZE;
-        let mut buf = [0u8; BUF_SIZE];
-        let entries_per_chunk = BUF_SIZE / N;
-        assert!(
-            chunk <= entries_per_chunk,
-            "Chunk too large for the internal buffer."
-        );
+        validate_no_alloc_chunk::<N>(chunk)?;
+        let mut buf = [0u8; BLOCK_BUF_SIZE];
 
         let mut remaining = count;
         let mut current_offset = offset;
@@ -578,7 +704,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
             for i in 0..to_read {
                 let start = i * N;
                 let slice = &buf[start..start + N];
-                f(index, slice.try_into().unwrap());
+                f(index, array_ref_from_slice::<N>(slice));
                 index += 1;
             }
 
@@ -600,13 +726,8 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize) -> [u8; N],
     {
-        const BUF_SIZE: usize = BLOCK_BUF_SIZE;
-        let mut buf = [0u8; BUF_SIZE];
-        let entries_per_chunk = BUF_SIZE / N;
-        assert!(
-            chunk <= entries_per_chunk,
-            "Chunk too large for the internal buffer."
-        );
+        validate_no_alloc_chunk::<N>(chunk)?;
+        let mut buf = [0u8; BLOCK_BUF_SIZE];
 
         let mut remaining = count;
         let mut current_offset = offset;
@@ -641,8 +762,8 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize, &[u8; N]),
     {
+        validate_no_alloc_chunk::<N>(1)?;
         let mut elem = [0u8; N];
-        assert!(N <= BLOCK_BUF_SIZE, "N too large for internal buffer.",);
 
         for (i, &off) in offsets.iter().enumerate() {
             self.read_at(off, &mut elem)?;
@@ -662,7 +783,7 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
     where
         F: FnMut(usize) -> [u8; N],
     {
-        assert!(N <= BLOCK_BUF_SIZE, "N too large for internal buffer.",);
+        validate_no_alloc_chunk::<N>(1)?;
 
         for (i, &off) in offsets.iter().enumerate() {
             let bytes = f(i);
@@ -691,10 +812,21 @@ pub trait RimIOStructExt: RimIO {
         offset: u64,
     ) -> RimIOResult<T> {
         let size = core::mem::size_of::<T>();
-        assert!(size <= BLOCK_BUF_SIZE, "read_struct: type too large");
-        let mut buf = [0u8; BLOCK_BUF_SIZE];
-        self.read_at(offset, &mut buf[..size])?;
-        T::read_from_bytes(&buf[..size]).map_err(|_| RimIOError::Other("read_struct failed"))
+
+        #[cfg(feature = "alloc")]
+        {
+            let mut buf = alloc::vec![0u8; size];
+            self.read_at(offset, &mut buf)?;
+            T::read_from_bytes(&buf).map_err(|_| RimIOError::Other("read_struct failed"))
+        }
+
+        #[cfg(not(feature = "alloc"))]
+        {
+            assert!(size <= BLOCK_BUF_SIZE, "read_struct: type too large");
+            let mut buf = [0u8; BLOCK_BUF_SIZE];
+            self.read_at(offset, &mut buf[..size])?;
+            T::read_from_bytes(&buf[..size]).map_err(|_| RimIOError::Other("read_struct failed"))
+        }
     }
 
     /// Writes a struct of type `T` at the given offset.

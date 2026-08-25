@@ -64,7 +64,7 @@ fn check_overlaps_legacy(entries: &[MbrEntry]) -> PartResult<()> {
     if segs.len() <= 1 {
         return Ok(());
     }
-    segs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    segs.sort_unstable_by_key(|a| a.0);
     let mut prev = segs[0];
     for &curr in &segs[1..] {
         if curr.0 <= prev.1 {

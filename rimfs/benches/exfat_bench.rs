@@ -26,6 +26,16 @@ fn bench_exfat_format(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("format_64mb_mmap", |b| {
+        b.iter(|| {
+            let file = tempfile::tempfile().unwrap();
+            file.set_len(SIZE_BYTES).unwrap();
+            let mut io = MmapRimIO::new(file).unwrap();
+            let meta = ExFatMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+            ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
+        });
+    });
+
     group.finish();
 }
 
@@ -52,8 +62,7 @@ fn bench_exfat_large_write(c: &mut Criterion) {
             || (disk_buf.clone(), content.clone()),
             |(mut local_buf, mut content_copy)| {
                 let mut io = MemRimIO::new(&mut local_buf);
-                let mut alloc = ExFatAllocator::new(&meta);
-                let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -86,8 +95,40 @@ fn bench_exfat_large_write(c: &mut Criterion) {
             },
             |(mut file, mut content_copy)| {
                 let mut io = StdRimIO::new(&mut file);
-                let mut alloc = ExFatAllocator::new(&meta);
-                let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
+
+                let len = content_copy.len() as u64;
+                let mut content_io = MemRimIO::new(&mut content_copy);
+
+                injector
+                    .set_root_context(&FsNode::new_container(vec![]))
+                    .unwrap();
+                injector
+                    .write_file(
+                        "bigfile.bin",
+                        &mut content_io,
+                        len,
+                        &FileAttributes::default(),
+                    )
+                    .unwrap();
+                injector.flush().unwrap();
+            },
+        );
+    });
+
+    group.bench_function("write_10mb_contiguous_mmap", |b| {
+        b.iter_with_setup(
+            || {
+                let file = tempfile::tempfile().unwrap();
+                file.set_len(SIZE_BYTES).unwrap();
+                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                let meta = ExFatMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+                ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
+                (file, content.clone())
+            },
+            |(file, mut content_copy)| {
+                let mut io = MmapRimIO::new(file).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -123,8 +164,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
     {
         let mut io = MemRimIO::new(&mut disk_buf);
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut alloc = ExFatAllocator::new(&meta);
-        let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+        let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
             .set_root_context(&FsNode::new_container(vec![]))
             .unwrap();
@@ -159,8 +199,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
     {
         let mut io = StdRimIO::new(&mut file);
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut alloc = ExFatAllocator::new(&meta);
-        let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+        let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
             .set_root_context(&FsNode::new_container(vec![]))
             .unwrap();
@@ -191,6 +230,40 @@ fn bench_exfat_large_read(c: &mut Criterion) {
         });
     });
 
+    // MMAP SETUP
+    let file_mmap = tempfile::tempfile().unwrap();
+    file_mmap.set_len(SIZE_BYTES).unwrap();
+    {
+        let mut io = MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap();
+        ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
+        let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
+        injector
+            .set_root_context(&FsNode::new_container(vec![]))
+            .unwrap();
+        let mut content = vec![0xAAu8; WRITE_SIZE];
+        let mut content_io = MemRimIO::new(&mut content);
+        injector
+            .write_file(
+                "bigfile.bin",
+                &mut content_io,
+                WRITE_SIZE as u64,
+                &FileAttributes::default(),
+            )
+            .unwrap();
+        injector.flush().unwrap();
+    }
+
+    group.bench_function("read_10mb_contiguous_mmap", |b| {
+        b.iter_with_setup(
+            || MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap(),
+            |mut io| {
+                let mut resolver = ExFatResolver::new(&mut io, &meta);
+                let data = resolver.read_file("/bigfile.bin").unwrap();
+                assert_eq!(data.len(), WRITE_SIZE);
+            },
+        );
+    });
+
     group.finish();
 }
 
@@ -215,8 +288,7 @@ fn bench_exfat_small_files(c: &mut Criterion) {
             || (disk_buf.clone(), content.clone()),
             |(mut local_buf, mut content_copy)| {
                 let mut io = MemRimIO::new(&mut local_buf);
-                let mut alloc = ExFatAllocator::new(&meta);
-                let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -250,8 +322,7 @@ fn bench_exfat_small_files(c: &mut Criterion) {
             },
             |(mut file, mut content_copy)| {
                 let mut io = StdRimIO::new(&mut file);
-                let mut alloc = ExFatAllocator::new(&meta);
-                let mut injector = ExFatInjector::new(&mut io, &mut alloc, &meta).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -266,6 +337,37 @@ fn bench_exfat_small_files(c: &mut Criterion) {
                         .write_file(&name, &mut content_io, len, &FileAttributes::default())
                         .unwrap();
                     // No seek needed
+                }
+                injector.flush().unwrap();
+            },
+        );
+    });
+
+    group.bench_function("create_100_small_files_mmap", |b| {
+        b.iter_with_setup(
+            || {
+                let file = tempfile::tempfile().unwrap();
+                file.set_len(SIZE_BYTES).unwrap();
+                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
+                (file, content.clone())
+            },
+            |(file, mut content_copy)| {
+                let mut io = MmapRimIO::new(file).unwrap();
+                let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
+
+                let len = content_copy.len() as u64;
+                let mut content_io = MemRimIO::new(&mut content_copy);
+
+                injector
+                    .set_root_context(&FsNode::new_container(vec![]))
+                    .unwrap();
+
+                for i in 0..NUM_FILES {
+                    let name = format!("file{i}.txt");
+                    injector
+                        .write_file(&name, &mut content_io, len, &FileAttributes::default())
+                        .unwrap();
                 }
                 injector.flush().unwrap();
             },

@@ -1,0 +1,22 @@
+[package]
+name = "rimhost"
+description = "OS-native host storage and script integrations for RIM ecosystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow = "1.0.98"
+rimgen = { path = "../rimgen", version = "0.6.0" }
+rimimg = { path = "../rimimg", version = "0.6.0" }
+tempfile = "3.20.0"
+which = "8.0.0"
+
+[lints]
+workspace = true
+

@@ -2,7 +2,7 @@
 
 use rimfs::{
     core::{checker::ReportDisplayOpts, resolver::FsTreeDisplayOpts},
-    fat32::*,
+    fat::*,
 };
 use std::{path::PathBuf, time::Instant};
 
@@ -16,7 +16,7 @@ fn main() {
 
     let mut buf = vec![0u8; SIZE_BYTES as usize];
     let mut mem = MemRimIO::new(&mut buf);
-    let meta = Fat32Meta::new(SIZE_BYTES, Some("BENCHFS")).unwrap();
+    let meta = FatMeta::new_fat32(SIZE_BYTES, Some("BENCHFS")).unwrap();
 
     // Alignement pertinent : cluster FAT32, sinon 4096.
     let align = meta.bytes_per_cluster as u64; // ou 4096
@@ -24,7 +24,7 @@ fn main() {
 
     // FORMAT
     let t0 = Instant::now();
-    let mut formatter = Fat32Formatter::new(&mut io_for_format, &meta);
+    let mut formatter = FatFormatter::new(&mut io_for_format, &meta);
     formatter.format(false).expect("format failed");
     let dt_format = t0.elapsed();
     let stats_format = io_for_format.snapshot();
@@ -37,9 +37,8 @@ fn main() {
 
     // INJECT
     let mut io_for_inject = IOCounter::with_align(io_for_format.into_inner(), align);
-    let mut allocator = Fat32Allocator::new(&meta);
     let t2 = Instant::now();
-    let mut injector = Fat32Injector::new(&mut io_for_inject, &mut allocator, &meta);
+    let mut injector = FatInjector::new(&mut io_for_inject, &meta).expect("injector failed");
     injector.inject_tree(&tree).expect("inject failed");
     let dt_inject = t2.elapsed();
     let stats_inject = io_for_inject.snapshot();
@@ -47,7 +46,7 @@ fn main() {
     // CHECK
     let mut io_for_check = IOCounter::with_align(io_for_inject.into_inner(), align);
     let t3 = Instant::now();
-    let mut checker = Fat32Checker::new(&mut io_for_check, &meta);
+    let mut checker = FatChecker::new(&mut io_for_check, &meta);
     let report = checker.check_all().expect("check failed");
     let dt_check = t3.elapsed();
     let stats_check = io_for_check.snapshot();
@@ -55,7 +54,7 @@ fn main() {
     // PARSE BACK
     let mut io_for_parse_back = IOCounter::with_align(io_for_check.into_inner(), align);
     let t4 = Instant::now();
-    let mut resolver = Fat32Resolver::new(&mut io_for_parse_back, &meta);
+    let mut resolver = FatResolver::new(&mut io_for_parse_back, &meta);
     let node = resolver.parse_tree("/*").expect("parse_tree failed");
     let dt_parse_fat = t4.elapsed();
     let stats_parse_fat = io_for_parse_back.snapshot();

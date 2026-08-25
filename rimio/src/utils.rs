@@ -37,11 +37,17 @@ impl DiffRange {
 impl Default for DiffRange {
     fn default() -> Self {
         // Safe defaults for most uses; 4 KiB chunk is a good baseline.
+        // For std, we can afford larger buffers for better performance.
+        #[cfg(feature = "std")]
+        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+        #[cfg(not(feature = "std"))]
+        const CHUNK_SIZE: usize = crate::BLOCK_BUF_SIZE;
+
         Self {
             offset1: 0,
             offset2: 0,
             total_bytes: 0,
-            chunk_size: crate::BLOCK_BUF_SIZE,
+            chunk_size: CHUNK_SIZE,
         }
     }
 }

@@ -64,6 +64,127 @@ impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
     fn partition_offset(&self) -> u64 {
         self.partition_offset
     }
+
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        let current = self.io.stream_position()?;
+        let end = self.io.seek(SeekFrom::End(0))?;
+        self.io.seek(SeekFrom::Start(current))?;
+        Ok(end.saturating_sub(self.partition_offset))
+    }
+}
+
+/// A specialized `RimIO` implementation for `std::fs::File`.
+///
+/// Uses OS-specific offset I/O (pread/pwrite) to avoid seek overhead and mutable state issues.
+/// Significantly faster for random access than `StdRimIO` wrapping a File.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct FileRimIO {
+    file: std::fs::File,
+    partition_offset: u64,
+}
+
+#[cfg(feature = "std")]
+impl FileRimIO {
+    pub fn new(file: std::fs::File) -> Self {
+        Self {
+            file,
+            partition_offset: 0,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl RimIO for FileRimIO {
+    #[cfg(target_family = "unix")]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        use std::os::unix::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        self.file.write_all_at(data, abs_offset)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        use std::os::windows::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        self.file.seek_write(data, abs_offset)?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_family = "unix", target_os = "windows")))]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let abs_offset = self.partition_offset + offset;
+        // fallback to seek if not supported (rare for std)
+        // We need a ref to file, but seek needs mut. File needs mut for seek?
+        // std::fs::File seek takes &mut self.
+        // So we are good.
+        use std::io::{Seek, Serializer};
+        self.file.seek(SeekFrom::Start(abs_offset))?;
+        self.file.write_all(data)?;
+        Ok(())
+    }
+
+    #[cfg(target_family = "unix")]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        use std::os::unix::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        self.file.read_exact_at(buf, abs_offset)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        use std::os::windows::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        let mut read = 0;
+        while read < buf.len() {
+            let n = self
+                .file
+                .seek_read(&mut buf[read..], abs_offset + read as u64)?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_family = "unix", target_os = "windows")))]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        let abs_offset = self.partition_offset + offset;
+        self.file.seek(SeekFrom::Start(abs_offset))?;
+        self.file.read_exact(buf)?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> RimIOResult {
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn set_offset(&mut self, partition_offset: u64) -> u64 {
+        self.partition_offset = partition_offset;
+        partition_offset
+    }
+
+    fn partition_offset(&self) -> u64 {
+        self.partition_offset
+    }
+
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        let len = self.file.metadata()?.len();
+        Ok(len.saturating_sub(self.partition_offset))
+    }
+}
+
+#[cfg(feature = "std")]
+impl RimIOSetLen for FileRimIO {
+    fn set_len(&mut self, len: u64) -> RimIOResult {
+        let abs_len = self.partition_offset + len;
+        self.file.set_len(abs_len)?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "std")]
@@ -91,21 +212,73 @@ impl From<Error> for RimIOError {
 mod test {
     use super::*;
     use crate::prelude::*;
+    use crate::test_suite::*;
     use tempfile::tempfile;
 
     #[test]
-    fn test_rw() {
-        let mut file = tempfile().unwrap();
-        let mut io = StdRimIO::new(&mut file);
-        io.write_at(10, &[1, 2, 3, 4]).unwrap();
-
-        let mut output = [0u8; 4];
-        io.read_at(10, &mut output).unwrap();
-        assert_eq!(output, [1, 2, 3, 4]);
+    fn test_std_rimio_suite() {
+        {
+            let mut file = tempfile().unwrap();
+            let mut io = StdRimIO::new(&mut file);
+            check_basic_rw(&mut io);
+        }
+        {
+            let mut file = tempfile().unwrap();
+            let mut io = StdRimIO::new(&mut file);
+            check_rw_at_offset(&mut io);
+        }
+        {
+            let mut file = tempfile().unwrap();
+            let mut io = StdRimIO::new(&mut file);
+            check_zero_fill(&mut io);
+        }
+        {
+            let mut file = tempfile().unwrap();
+            let mut io = StdRimIO::new(&mut file);
+            check_bounds(&mut io, 0, true);
+        }
     }
 
     #[test]
-    fn test_set_len_safe() {
+    fn test_std_rimio_set_len() {
+        let mut file = tempfile().unwrap();
+        let mut io = StdRimIO::new(&mut file);
+        check_set_len(&mut io);
+    }
+
+    #[test]
+    fn test_file_rimio_suite() {
+        {
+            let file = tempfile().unwrap();
+            let mut io = FileRimIO::new(file);
+            check_basic_rw(&mut io);
+        }
+        {
+            let file = tempfile().unwrap();
+            let mut io = FileRimIO::new(file);
+            check_rw_at_offset(&mut io);
+        }
+        {
+            let file = tempfile().unwrap();
+            let mut io = FileRimIO::new(file);
+            check_zero_fill(&mut io);
+        }
+        {
+            let file = tempfile().unwrap();
+            let mut io = FileRimIO::new(file);
+            check_bounds(&mut io, 0, true);
+        }
+    }
+
+    #[test]
+    fn test_file_rimio_set_len() {
+        let file = tempfile().unwrap();
+        let mut io = FileRimIO::new(file);
+        check_set_len(&mut io);
+    }
+
+    #[test]
+    fn test_set_len_max() {
         let mut file = tempfile().unwrap();
         let mut io = StdRimIO::new(&mut file);
 
@@ -163,19 +336,5 @@ mod test {
         for (i, v) in values.iter().enumerate() {
             assert_eq!(*v, i as u32);
         }
-    }
-
-    #[test]
-    fn test_zero_fill() {
-        let mut file = tempfile().unwrap();
-        let mut io = StdRimIO::new(&mut file);
-
-        io.write_at(42, &[0xFF; 8]).unwrap();
-        io.zero_fill(42, 8).unwrap();
-
-        let mut buf = [0xAA; 8];
-        io.read_at(42, &mut buf).unwrap();
-
-        assert_eq!(buf, [0u8; 8]);
     }
 }

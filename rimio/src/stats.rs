@@ -35,19 +35,11 @@ impl IoStats {
     }
     #[inline]
     pub fn avg_read(&self) -> u64 {
-        if self.reads == 0 {
-            0
-        } else {
-            self.read_bytes / self.reads
-        }
+        self.read_bytes.checked_div(self.reads).unwrap_or(0)
     }
     #[inline]
     pub fn avg_write(&self) -> u64 {
-        if self.writes == 0 {
-            0
-        } else {
-            self.write_bytes / self.writes
-        }
+        self.write_bytes.checked_div(self.writes).unwrap_or(0)
     }
     #[inline]
     pub fn read_aligned_ratio(&self) -> (u64, u64) {

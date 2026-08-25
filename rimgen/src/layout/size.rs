@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use crate::errors::{GenResult, LayoutError, LayoutResult};
 use serde::{Deserialize, Deserializer};
 use std::{fs, path::Path};
 
@@ -8,6 +9,7 @@ pub enum Size {
     Auto,
     Fixed(u64),
 }
+
 impl<'de> Deserialize<'de> for Size {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -51,36 +53,42 @@ impl std::fmt::Display for Size {
     }
 }
 
-fn parse_size_mb(size: &str) -> anyhow::Result<u64> {
+pub fn parse_size_mb(size: &str) -> LayoutResult<u64> {
     let lower = size.trim().to_lowercase();
 
     if let Some(num) = lower.strip_suffix("k") {
-        let kb = num.trim().parse::<u64>()?;
+        let kb = num
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
         Ok(((kb as f64) / 1024.0).ceil() as u64)
     } else if let Some(num) = lower.strip_suffix("m") {
-        Ok(num.trim().parse::<u64>()?)
+        num.trim()
+            .parse::<u64>()
+            .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))
     } else if let Some(num) = lower.strip_suffix("g") {
-        Ok(num.trim().parse::<u64>()? * 1024)
+        let gb = num
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
+        Ok(gb * 1024)
     } else {
-        anyhow::bail!("Unknown size format '{}'", size);
+        Err(LayoutError::InvalidSizeFormat(size.to_string()))
     }
 }
 
-pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> anyhow::Result<u64> {
-    // Heuristic constants for auto-sizing
-    // improved to avoid "No space left on device" errors.
+pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> GenResult<u64> {
     const BLOCK_SIZE: u64 = 4096;
-    const OVERHEAD_FACTOR: f64 = 1.10; // 10% overhead for metadata, tables, journals
-    const FIXED_SLACK: u64 = 16 * 1024 * 1024; // 16MB fixed slack for robustness
+    const OVERHEAD_FACTOR: f64 = 1.10;
+    const FIXED_SLACK: u64 = 16 * 1024 * 1024;
 
-    fn accumulate(path: &Path) -> anyhow::Result<u64> {
+    fn accumulate(path: &Path) -> std::io::Result<u64> {
         if path.is_file() {
             let len = fs::metadata(path)?.len();
-            // Round up to block size to account for slack space
             let blocks = len.div_ceil(BLOCK_SIZE);
             Ok(blocks * BLOCK_SIZE)
         } else if path.is_dir() {
-            let mut total = BLOCK_SIZE; // Assumes a directory takes at least one block
+            let mut total = BLOCK_SIZE;
             for entry in fs::read_dir(path)? {
                 let entry = match entry {
                     Ok(e) => e,
@@ -95,7 +103,6 @@ pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> anyhow::Result<u64> {
     }
 
     let raw_needed = accumulate(dir.as_ref())?;
-    // Apply safety factors
     let with_overhead = (raw_needed as f64 * OVERHEAD_FACTOR) as u64;
     let total = with_overhead + FIXED_SLACK;
 

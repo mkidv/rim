@@ -1,0 +1,31 @@
+[package]
+name = "rimfs-core"
+description = "Shared filesystem core for rimfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["mem", "std", "alloc"]
+mem = ["rimio/mem"]
+std = ["rimio/std", "alloc", "crc32fast/std", "time/std"]
+uefi = ["rimio/uefi", "alloc"]
+alloc = []
+
+[dependencies]
+bitflags = "2.9.1"
+crc32fast = { version = "1.4.2", default-features = false }
+rimio = { path = "../rimio", version = "0.6.0" }
+time = { version = "0.3.41", default-features = false }
+
+[package.metadata.docs.rs]
+features = ["std"]
+
+[lints]
+workspace = true
+

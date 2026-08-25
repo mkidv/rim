@@ -55,13 +55,25 @@ println!("{}", monitored_disk.stats);
 
 ## Backends
 
-*   **`std::StdRimIO`**: Wraps `std::io` compatible types (File, TcpStream, etc.). Supports seeking and resizing if the underlying type does.
-*   **`mem::MemRimIO`**: Wraps a `&mut [u8]` or `Vec<u8>`. Perfect for testing or RAM disks.
-*   **`uefi::UefiRimIO`** (Feature `uefi`): Wraps the UEFI `RimIO` protocol for bootloader development.
+*   **`std::StdRimIO`**: Wraps generic `std::io` types (`Read + Write + Seek`).
+*   **`std::FileRimIO`**: Specialized file backend using OS positioned I/O (`pread`/`pwrite` on Unix, `seek_read`/`seek_write` on Windows) for fast, thread-safe, seek-free operations.
+*   **`mmap::MmapRimIO`** (Feature `mmap`): High-throughput memory-mapped file backend.
+*   **`mem::MemRimIO`**: Wraps a `&mut [u8]` or `Vec<u8>` in-memory buffer.
+*   **`uefi::UefiRimIO`** (Feature `uefi`): Wraps the UEFI `EFI_BLOCK_IO` protocol for bootloader and firmware development.
+
+## Testing Suite
+
+`rimio` includes a reusable test suite (`rimio::test_suite`) that validates `RimIO` contract compliance across custom backends:
+- Read/write bounds checks
+- Partition offset translation
+- Zero-fill validation
+- Length adjustment verification
 
 ## Features
 
-*   **`std`** (default): Enables file-system backends.
-*   **`alloc`**: Enables heap-dependent optimizations (larger buffers for copy operations).
+*   **`std`** (default): Enables standard file-system backends (`StdRimIO`, `FileRimIO`).
+*   **`mmap`**: Enables memory-mapped I/O support (`MmapRimIO`).
+*   **`alloc`**: Enables heap-dependent optimizations and buffers.
 *   **`mem`**: Enables in-memory backends.
-*   **`uefi`**: Enables UEFI specific protocols.
+*   **`uefi`**: Enables UEFI firmware protocol integrations.
+

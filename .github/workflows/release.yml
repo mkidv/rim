@@ -10,20 +10,26 @@ permissions:
 
 jobs:
   build-release:
-    name: Build Binary
+    name: Build Binary (${{ matrix.asset_name }})
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: rimgen
-            asset_name: rimgen-linux-amd64
-            use_cross: false
+            artifact_name: rim
+            asset_name: rim-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: rimgen.exe
-            asset_name: rimgen-windows-amd64.exe
-            use_cross: false
+            artifact_name: rim.exe
+            asset_name: rim-windows-x86_64.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: rim
+            asset_name: rim-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: rim
+            asset_name: rim-macos-aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build Binary
-        run: cargo build --release --locked --target ${{ matrix.target }} -p rimgen
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rimcli
 
       - name: Rename & Upload Artifact
         shell: bash
@@ -60,16 +66,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: Display Downloaded Artifacts
-        run: ls -R artifacts
+        run: ls -la artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/rimgen-linux-amd64/rimgen-linux-amd64
-            artifacts/rimgen-windows-amd64.exe/rimgen-windows-amd64.exe
+          files: artifacts/*
           draft: false
           prerelease: false
           generate_release_notes: true
+

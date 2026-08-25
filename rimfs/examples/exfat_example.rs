@@ -40,9 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // INJECT - new counter to isolate the phase
     let mut io_for_inject = IOCounter::with_align(io_for_format.into_inner(), align);
-    let mut allocator = ExFatAllocator::new(&meta);
     let t2 = Instant::now();
-    let mut injector = ExFatInjector::new(&mut io_for_inject, &mut allocator, &meta)
+    let mut injector = ExFatInjector::new(&mut io_for_inject, &meta)
         .map_err(|e| format!("Injector error: {e}"))?;
     injector.inject_tree(&tree).expect("inject failed");
     let dt_inject = t2.elapsed();

@@ -11,32 +11,35 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["mem", "std", "fat32", "exfat", "ext4"]
-mem = ["rimio/mem"]
-std = ["rimio/std", "alloc", "crc32fast/std", "time/std"]
-uefi = ["rimio/uefi", "alloc"]
-alloc = []
-fat32 = ["alloc"]
-exfat = ["alloc"]
-ext4 = ["alloc"]
+default = ["mem", "std", "fat", "exfat", "ext", "ntfs"]
+mem = ["rimfs-core/mem", "rimfs-fat?/mem", "rimfs-exfat?/mem", "rimfs-ext?/mem", "rimfs-ntfs?/mem"]
+std = ["alloc", "rimfs-core/std", "rimfs-fat?/std", "rimfs-exfat?/std", "rimfs-ext?/std", "rimfs-ntfs?/std"]
+uefi = ["alloc", "rimfs-core/uefi", "rimfs-fat?/uefi", "rimfs-exfat?/uefi", "rimfs-ext?/uefi", "rimfs-ntfs?/uefi"]
+alloc = ["rimfs-core/alloc", "rimfs-fat?/alloc", "rimfs-exfat?/alloc", "rimfs-ext?/alloc", "rimfs-ntfs?/alloc"]
+fat = ["alloc", "dep:rimfs-fat"]
+exfat = ["alloc", "dep:rimfs-exfat"]
+ext = ["alloc", "dep:rimfs-ext"]
+ntfs = ["alloc", "dep:rimfs-ntfs"]
 
 [dependencies]
-bitflags = "2.9.1"
-crc32fast = { version ="1.4.2", default-features = false }
-rimio = { path = "../rimio", version = "0.5.1" }
-time = { version = "0.3.41", default-features = false }
-zerocopy = { version = "0.8.25", default-features = false, features = [
-    "derive",
-] }
+rimfs-core = { path = "../rimfs-core", version = "0.6.0", default-features = false }
+rimfs-fat = { path = "../rimfs-fat", version = "0.6.0", default-features = false, optional = true }
+rimfs-exfat = { path = "../rimfs-exfat", version = "0.6.0", default-features = false, optional = true }
+rimfs-ext = { path = "../rimfs-ext", version = "0.6.0", default-features = false, optional = true }
+rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.6.0", default-features = false, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.7.0", features = ["html_reports"] }
+criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3.20.0"
 fatfs = "0.3"
 fscommon = "0.1"
+rimio = { path = "../rimio", version = "0.6.0", features = ["mmap", "std"] }
 
 [package.metadata.docs.rs]
 features = ["std"]
+
+[lints]
+workspace = true
 
 [[bench]]
 name = "exfat_bench"
@@ -48,4 +51,12 @@ harness = false
 
 [[bench]]
 name = "ext4_bench"
+harness = false
+
+[[bench]]
+name = "fat32_compare_bench"
+harness = false
+
+[[bench]]
+name = "ntfs_bench"
 harness = false

@@ -173,10 +173,9 @@ impl RimIO for UefiRimIO {
 
         // Fast path: aligned full blocks
         if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
-            let mut lba = (abs_off / bs as u64) as Lba;
-            for chunk in remaining.chunks(bs) {
-                self.write_block_exact(lba, chunk)?;
-                lba += 1;
+            let start_lba = (abs_off / bs as u64) as Lba;
+            for (i, chunk) in remaining.chunks(bs).enumerate() {
+                self.write_block_exact(start_lba + i as Lba, chunk)?;
             }
             return Ok(());
         }
@@ -222,10 +221,9 @@ impl RimIO for UefiRimIO {
 
         // Fast path: aligned full blocks
         if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
-            let mut lba = (abs_off / bs as u64) as Lba;
-            for chunk in remaining.chunks_mut(bs) {
-                self.read_block_exact(lba, chunk)?;
-                lba += 1;
+            let start_lba = (abs_off / bs as u64) as Lba;
+            for (i, chunk) in remaining.chunks_mut(bs).enumerate() {
+                self.read_block_exact(start_lba + i as Lba, chunk)?;
             }
             return Ok(());
         }
@@ -275,5 +273,10 @@ impl RimIO for UefiRimIO {
     #[inline]
     fn partition_offset(&self) -> u64 {
         self.partition_offset
+    }
+
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Ok(self.media_len().saturating_sub(self.partition_offset))
     }
 }

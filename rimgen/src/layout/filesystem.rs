@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT
 
+use crate::errors::{LayoutError, LayoutResult};
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum Filesystem {
     Fat32,
+    Fat16,
+    Fat12,
+    Fat8,
+    RimFat,
     ExFat,
     Ntfs,
     Ext4,
@@ -16,37 +21,48 @@ pub enum Filesystem {
 }
 
 impl Filesystem {
-    pub fn check_size_limit(&self, size_mb: u64) -> anyhow::Result<()> {
+    pub fn check_size_limit(&self, size_mb: u64) -> LayoutResult<()> {
         match self {
-            Filesystem::Fat32 if size_mb > 32 * 1024 => {
-                anyhow::bail!(
-                    "FAT32 is not recommended beyond 32 GiB (got {} MiB)",
-                    size_mb
-                );
-            }
-            Filesystem::ExFat if size_mb < 256 => {
-                anyhow::bail!(
-                    "exFAT is not recommended under 256 MiB (got {} MiB)",
-                    size_mb
-                );
-            }
-            Filesystem::Ext4 if size_mb < 16 => {
-                anyhow::bail!("ext4 needs at least 16 MiB (got {} MiB)", size_mb);
-            }
-            Filesystem::Btrfs if size_mb < 64 => {
-                anyhow::bail!("btrfs needs at least 64 MiB (got {} MiB)", size_mb);
-            }
-            Filesystem::Xfs if size_mb < 300 => {
-                anyhow::bail!(
-                    "xfs typically requires at least 300 MiB (got {} MiB)",
-                    size_mb
-                );
-            }
+            Filesystem::Fat32 if size_mb > 32 * 1024 => Err(LayoutError::SizeTooLarge {
+                fs: *self,
+                size_mb,
+                limit_mb: 32 * 1024,
+            }),
+            Filesystem::Fat16 if size_mb > 2 * 1024 => Err(LayoutError::SizeTooLarge {
+                fs: *self,
+                size_mb,
+                limit_mb: 2 * 1024,
+            }),
+            Filesystem::Fat12 if size_mb > 32 => Err(LayoutError::SizeTooLarge {
+                fs: *self,
+                size_mb,
+                limit_mb: 32,
+            }),
+            Filesystem::ExFat if size_mb < 256 => Err(LayoutError::SizeTooSmall {
+                fs: *self,
+                size_mb,
+                min_mb: 256,
+            }),
+            Filesystem::Ext4 if size_mb < 16 => Err(LayoutError::SizeTooSmall {
+                fs: *self,
+                size_mb,
+                min_mb: 16,
+            }),
+            Filesystem::Btrfs if size_mb < 64 => Err(LayoutError::SizeTooSmall {
+                fs: *self,
+                size_mb,
+                min_mb: 64,
+            }),
+            Filesystem::Xfs if size_mb < 300 => Err(LayoutError::SizeTooSmall {
+                fs: *self,
+                size_mb,
+                min_mb: 300,
+            }),
             _ => Ok(()),
         }
     }
 
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> LayoutResult<()> {
         Ok(())
     }
 }
@@ -55,6 +71,10 @@ impl core::fmt::Display for Filesystem {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let s = match self {
             Filesystem::Fat32 => "FAT32",
+            Filesystem::Fat16 => "FAT16",
+            Filesystem::Fat12 => "FAT12",
+            Filesystem::Fat8 => "FAT8",
+            Filesystem::RimFat => "RimFAT",
             Filesystem::ExFat => "exFAT",
             Filesystem::Ntfs => "NTFS",
             Filesystem::Ext4 => "ext4",

@@ -8,6 +8,7 @@ mod macros;
 mod io_ext;
 
 pub mod errors;
+pub use errors::*;
 /// GUID Partition Table (GPT) implementation.
 pub mod gpt;
 /// Streaming GPT reader for memory-constrained environments.

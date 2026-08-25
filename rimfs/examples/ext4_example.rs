@@ -2,7 +2,7 @@
 
 use rimfs::{
     core::{checker::ReportDisplayOpts, resolver::FsTreeDisplayOpts},
-    ext4::*,
+    ext::*,
 };
 use std::{path::PathBuf, time::Instant};
 
@@ -17,7 +17,7 @@ fn main() {
     // backend RAM
     let mut buf = vec![0u8; SIZE_BYTES as usize];
     let mut mem = MemRimIO::new(&mut buf);
-    let meta = Ext4Meta::new(SIZE_BYTES, Some("BENCHFS"));
+    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCHFS"));
 
     // Relevant alignment: EXT4 block
     let align = meta.block_size as u64;
@@ -26,7 +26,7 @@ fn main() {
 
     // FORMAT
     let t0 = Instant::now();
-    let mut formatter = Ext4Formatter::new(&mut io_for_format, &meta);
+    let mut formatter = ExtFormatter::new(&mut io_for_format, &meta);
     formatter.format(true).expect("format failed");
     let dt_format = t0.elapsed();
     let stats_format = io_for_format.snapshot();
@@ -39,9 +39,8 @@ fn main() {
 
     // INJECT - new counter to isolate the phase
     let mut io_for_inject = IOCounter::with_align(io_for_format.into_inner(), align);
-    let mut allocator = Ext4Allocator::new(&meta);
     let t2 = Instant::now();
-    let mut injector = Ext4Injector::new(&mut io_for_inject, &mut allocator, &meta);
+    let mut injector = ExtInjector::new(&mut io_for_inject, &meta);
     injector.inject_tree(&tree).expect("inject failed");
     let dt_inject = t2.elapsed();
     let stats_inject = io_for_inject.snapshot();
@@ -49,7 +48,7 @@ fn main() {
     // CHECK
     let mut io_for_check = IOCounter::with_align(io_for_inject.into_inner(), align);
     let t3 = Instant::now();
-    let mut checker = Ext4Checker::new(&mut io_for_check, &meta);
+    let mut checker = ExtChecker::new(&mut io_for_check, &meta);
     let report = checker.check_all().expect("check failed");
     let dt_check = t3.elapsed();
     let stats_check = io_for_check.snapshot();
@@ -57,7 +56,7 @@ fn main() {
     // PARSE BACK (from image)
     let mut io_for_parse_back = IOCounter::with_align(io_for_check.into_inner(), align);
     let t4 = Instant::now();
-    let mut resolver = Ext4Resolver::new(&mut io_for_parse_back, &meta);
+    let mut resolver = ExtResolver::new(&mut io_for_parse_back, &meta);
     let node = resolver.parse_tree("/*").expect("parse_tree failed");
     let dt_parse_ext4 = t4.elapsed();
     let stats_parse_ext4 = io_for_parse_back.snapshot();

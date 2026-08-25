@@ -1,6 +1,6 @@
 [package]
 name = "rimgen"
-description = "Rim generator"
+description = "Declarative disk image generation engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,32 +10,20 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# [lib]
-# name = "rimgen"
-# path = "src/lib.rs"
-
-[[bin]]
+[lib]
 name = "rimgen"
-path = "src/main.rs"
-
-[features]
-default = ["host-scripts"]
-host-scripts = ["which"]
+path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.98"
-clap = { version = "4.5.39", features = ["derive"] }
-indicatif = "0.17.8"
-rimio = { path = "../rimio", version = "0.5.1" }
-rimpart = { path = "../rimpart", version = "0.5.1" }
-rimfs = { path = "../rimfs", version = "0.5.1" }
-tempfile = { version = "3.20.0" }
+rimfs = { path = "../rimfs", version = "0.6.0" }
+rimimg = { path = "../rimimg", version = "0.6.0" }
+rimio = { path = "../rimio", version = "0.6.0" }
+rimpart = { path = "../rimpart", version = "0.6.0" }
 serde = { version = "1.0.219", features = ["derive"] }
+tempfile = { version = "3.20.0" }
 toml = "0.9.7"
-time = { version = "0.3.41", default-features = false, features = ["std"] }
 uuid = { version = "1.17.0", features = ["v4", "serde"] }
-which = { version = "8.0.0", optional = true }
-zerocopy = { version = "0.8.25", default-features = false, features = [
-    "derive",
-] }
-colored = "3.1.1"
+
+[lints]
+workspace = true
+

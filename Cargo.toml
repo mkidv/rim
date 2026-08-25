@@ -2,20 +2,33 @@
 resolver = "3"
 
 members = [
+    "rimcli",
     "rimgen",
+    "rimimg",
+    "rimhost",
+    "rimfs-core",
+    "rimfs-fat",
+    "rimfs-exfat",
+    "rimfs-ext",
+    "rimfs-ntfs",
     "rimfs",
     "rimpart",
     "rimio",
+    "sector-analyzer",
 ]
 
-default-members = ["rimgen", "rimfs"]
+default-members = ["rimcli", "rimgen", "rimimg", "rimhost", "rimfs-core", "rimfs-fat", "rimfs-exfat", "rimfs-ext", "rimfs-ntfs", "rimfs", "rimpart", "rimio"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 authors = ["Killian Massa (Mki) <contact@mki.dev>"]
 repository = "https://github.com/mkidv/rim"
 homepage = "https://github.com/mkidv/rim"
-keywords = ["fat32", "exfat", "ext4", "gpt", "disk-image"]
+keywords = ["fat", "exfat", "ext", "ntfs", "mbr","gpt", "disk-image"]
 categories = ["filesystem", "embedded", "no-std", "development-tools"]
+
+[workspace.lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+

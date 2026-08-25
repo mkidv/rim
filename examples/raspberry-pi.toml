@@ -1,0 +1,16 @@
+# Dual-partition Raspberry Pi SD card layout (FAT32 Boot + Ext4 Rootfs)
+[disk]
+alignment = "1M"
+
+[[partitions]]
+name = "boot"
+fs = "fat32"
+size = "256M"
+bootable = true
+label = "BOOT"
+
+[[partitions]]
+name = "rootfs"
+fs = "ext4"
+size = "1G"
+label = "ROOTFS"
