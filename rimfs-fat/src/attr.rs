@@ -33,7 +33,7 @@ impl FatFileAttributesExt for FileAttributes {
         if self.system {
             attr |= FatAttributes::SYSTEM;
         }
-        if self.dir {
+        if self.is_dir() {
             attr |= FatAttributes::DIRECTORY;
         }
         if self.archive {
@@ -44,13 +44,16 @@ impl FatFileAttributesExt for FileAttributes {
 
     fn from_fat_attr(attr: u8) -> Self {
         let fat_attr = FatAttributes::from_bits_truncate(attr);
-        FileAttributes {
-            read_only: fat_attr.contains(FatAttributes::READ_ONLY),
-            hidden: fat_attr.contains(FatAttributes::HIDDEN),
-            system: fat_attr.contains(FatAttributes::SYSTEM),
-            dir: fat_attr.contains(FatAttributes::DIRECTORY),
-            archive: fat_attr.contains(FatAttributes::ARCHIVE),
-            ..Default::default()
-        }
+        let is_dir = fat_attr.contains(FatAttributes::DIRECTORY);
+        let mut fa = if is_dir {
+            FileAttributes::new_dir()
+        } else {
+            FileAttributes::new_file()
+        };
+        fa.read_only = fat_attr.contains(FatAttributes::READ_ONLY);
+        fa.hidden = fat_attr.contains(FatAttributes::HIDDEN);
+        fa.system = fat_attr.contains(FatAttributes::SYSTEM);
+        fa.archive = fat_attr.contains(FatAttributes::ARCHIVE);
+        fa
     }
 }

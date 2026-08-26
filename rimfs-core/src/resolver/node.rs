@@ -13,6 +13,7 @@ use alloc::{string::String, vec::Vec};
 pub struct FsNodeCounts {
     pub dirs: usize,
     pub files: usize,
+    pub symlinks: usize,
     // optional: total bytes if you want to display it
     pub bytes: u64,
 }
@@ -23,11 +24,17 @@ impl fmt::Display for FsNodeCounts {
         let fi = self.files;
         let d_lbl = if d == 1 { "Dir" } else { "Dirs" };
         let f_lbl = if fi == 1 { "File" } else { "Files" };
-        write!(f, "{d} {d_lbl} • {fi} {f_lbl}")
+        if self.symlinks > 0 {
+            let s = self.symlinks;
+            let s_lbl = if s == 1 { "Symlink" } else { "Symlinks" };
+            write!(f, "{d} {d_lbl} • {fi} {f_lbl} • {s} {s_lbl}")
+        } else {
+            write!(f, "{d} {d_lbl} • {fi} {f_lbl}")
+        }
     }
 }
 
-/// Generic representation of a filesystem node (file, directory, or container).
+/// Generic representation of a filesystem node (file, directory, symlink, or container).
 ///
 /// This structure is used internally to model parsed filesystem content
 /// and externally to describe tree structures for injection or comparison.
@@ -35,6 +42,7 @@ impl fmt::Display for FsNodeCounts {
 /// Variants:
 /// - `File`  : a regular file with name, content, and attributes
 /// - `Dir`   : a directory with name, children, and attributes
+/// - `Symlink` : a symbolic link with name, target path, and attributes
 /// - `Container` : an anonymous container node used to group multiple nodes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsNode {
@@ -46,6 +54,11 @@ pub enum FsNode {
     Dir {
         name: String,
         children: Vec<FsNode>,
+        attr: FileAttributes,
+    },
+    Symlink {
+        name: String,
+        target: String,
         attr: FileAttributes,
     },
     Container {
@@ -60,6 +73,7 @@ impl FsNode {
         match self {
             FsNode::File { name, .. } => name,
             FsNode::Dir { name, .. } => name,
+            FsNode::Symlink { name, .. } => name,
             FsNode::Container { .. } => unreachable!(),
         }
     }
@@ -69,6 +83,7 @@ impl FsNode {
         match self {
             FsNode::File { attr, .. } => attr,
             FsNode::Dir { attr, .. } => attr,
+            FsNode::Symlink { attr, .. } => attr,
             FsNode::Container { attr, .. } => attr,
         }
     }
@@ -82,6 +97,10 @@ impl FsNode {
         matches!(self, FsNode::Dir { .. })
     }
     #[inline]
+    pub fn is_symlink(&self) -> bool {
+        matches!(self, FsNode::Symlink { .. })
+    }
+    #[inline]
     pub fn is_container(&self) -> bool {
         matches!(self, FsNode::Container { .. })
     }
@@ -91,7 +110,8 @@ impl FsNode {
             match n {
                 FsNode::Container { .. } => 0,
                 FsNode::Dir { .. } => 1,
-                FsNode::File { .. } => 2,
+                FsNode::Symlink { .. } => 2,
+                FsNode::File { .. } => 3,
             }
         }
         match self {
@@ -123,6 +143,9 @@ impl FsNode {
                     for c in children {
                         walk(c, acc);
                     }
+                }
+                FsNode::Symlink { .. } => {
+                    acc.symlinks += 1;
                 }
                 FsNode::Container { children, .. } => {
                     // we don't count the container itself
@@ -175,6 +198,18 @@ impl FsNode {
                     && ch1.iter().zip(ch2).all(|(c1, c2)| c1.structural_eq(c2))
             }
             (
+                FsNode::Symlink {
+                    name: n1,
+                    target: t1,
+                    attr: a1,
+                },
+                FsNode::Symlink {
+                    name: n2,
+                    target: t2,
+                    attr: a2,
+                },
+            ) => n1 == n2 && t1 == t2 && a1.structural_eq(a2),
+            (
                 FsNode::Container {
                     children: ch1,
                     attr: a1,
@@ -207,6 +242,15 @@ impl FsNode {
             name: name.into(),
             content,
             attr: FileAttributes::default(),
+        }
+    }
+
+    /// Creates a new symlink node.
+    pub fn new_symlink(name: impl Into<String>, target: impl Into<String>) -> Self {
+        Self::Symlink {
+            name: name.into(),
+            target: target.into(),
+            attr: FileAttributes::new_symlink(),
         }
     }
 
@@ -295,6 +339,14 @@ impl<'a> fmt::Display for FsTreeDisplay<'a> {
                         } else {
                             write!(f, " ({} bytes)", content.len())?;
                         }
+                    }
+                    writeln!(f)?;
+                    printed += 1;
+                }
+                FsNode::Symlink { name, target, .. } => {
+                    write!(f, "{} -> {}", truncate(name, self.opts.name_width), target)?;
+                    if self.opts.show_attrs {
+                        write!(f, " [{:?}]", node.attr())?;
                     }
                     writeln!(f)?;
                     printed += 1;

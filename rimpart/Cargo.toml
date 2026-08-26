@@ -1,6 +1,6 @@
 [package]
 name = "rimpart"
-description = "Partition manager for RIM ecosystem"
+description = "Partition management for rim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,7 +21,7 @@ uefi = ["rimio/uefi"]
 [dependencies]
 crc32fast = { version = "1.4.2", default-features = false }
 paste = "1.0.15"
-rimio = { path = "../rimio", default-features = false, version = "0.6.0" }
+rimio.workspace = true
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }

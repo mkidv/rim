@@ -169,6 +169,17 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
         Ok(())
     }
 
+    fn write_symlink(
+        &mut self,
+        _name: &str,
+        _target: &str,
+        _attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        Err(FsInjectorError::Unsupported(
+            "exFAT does not support symbolic links",
+        ))
+    }
+
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(mut ctx) = self.stack.pop() {
             // Check if the last entry is an EOD marker

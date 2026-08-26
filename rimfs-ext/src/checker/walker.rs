@@ -90,6 +90,44 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
                             "INO.MODE",
                             format!("Inode {inode_num} has Links={i_links} but Mode=0"),
                         ));
+                    } else if (i_mode & 0xF000) == 0xA000 {
+                        // Symlink validation
+                        let i_size = u32::from_le_bytes(match inode_buf[4..8].try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => continue,
+                        });
+                        let i_blocks = u32::from_le_bytes(match inode_buf[28..32].try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => continue,
+                        });
+                        let i_flags = u32::from_le_bytes(match inode_buf[32..36].try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => continue,
+                        });
+
+                        if i_size < 60 {
+                            // Fast symlink (< 60 bytes)
+                            if i_blocks != 0 {
+                                rep.push(Finding::err(
+                                    "SYMLINK.FAST",
+                                    format!("Fast symlink inode {inode_num} has i_blocks={i_blocks} (expected 0)"),
+                                ));
+                            }
+                            if (i_flags & EXT_INODE_FLAG_EXTENTS) != 0 {
+                                rep.push(Finding::err(
+                                    "SYMLINK.FAST",
+                                    format!("Fast symlink inode {inode_num} has EXTENTS flag set"),
+                                ));
+                            }
+                        } else {
+                            // Slow symlink (>= 60 bytes)
+                            if i_blocks == 0 {
+                                rep.push(Finding::err(
+                                    "SYMLINK.SLOW",
+                                    format!("Slow symlink inode {inode_num} has i_blocks=0 (size={i_size})"),
+                                ));
+                            }
+                        }
                     }
                 }
             }

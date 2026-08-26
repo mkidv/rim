@@ -87,6 +87,20 @@ pub trait FsTreeInjector<Handle: FsHandle> {
         attr: &FileAttributes,
     ) -> FsInjectorResult;
 
+    /// Create a symbolic link under the current directory pointing to `target`.
+    #[must_use = "injection result must be checked for errors"]
+    fn write_symlink(
+        &mut self,
+        name: &str,
+        target: &str,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        let _ = (name, target, attr);
+        Err(FsInjectorError::Unsupported(
+            "Symlinks are not supported on this filesystem",
+        ))
+    }
+
     /// Initialize the root context and push it on the stack.
     /// The root context's buffer should reflect existing entries (if any).
     fn set_root_context(&mut self, node: &FsNode) -> FsInjectorResult;
@@ -136,6 +150,9 @@ pub trait FsTreeInjector<Handle: FsHandle> {
                 }
                 // write the child directory buffer once we are done with its contents
                 self.flush_current()?;
+            }
+            FsNode::Symlink { name, target, attr } => {
+                self.write_symlink(name, target, attr)?;
             }
             FsNode::Container { children, .. } => {
                 for child in children {

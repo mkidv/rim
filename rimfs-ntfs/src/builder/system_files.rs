@@ -81,15 +81,20 @@ impl<'a> NtfsMftRecord<'a> {
 
         record.add_attribute(NtfsAttribute::standard_info(attrs, security_id));
 
-        let data_size = match &content {
-            NtfsAttributeContent::Resident(v) => v.len() as u64,
-            NtfsAttributeContent::NonResident { data_size, .. } => *data_size,
-            _ => 0,
+        let (data_size, allocated_size) = match &content {
+            NtfsAttributeContent::Resident(v) => (v.len() as u64, v.len() as u64),
+            NtfsAttributeContent::NonResident {
+                data_size,
+                allocated_size,
+                ..
+            } => (*data_size, *allocated_size),
+            _ => (0, 0),
         };
 
-        record.add_attribute(NtfsAttribute::file_name(
+        record.add_attribute(NtfsAttribute::file_name_with_sizes(
             parent_ref,
             name,
+            allocated_size,
             data_size,
             attrs,
             NtfsFileNameNamespace::Win32AndDos,
@@ -384,20 +389,8 @@ impl<'a> NtfsMftRecord<'a> {
         data_size: u64,
         security_id: u32,
     ) -> Self {
-        let mut record = Self::new(10, false, true);
-        let attrs = NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM;
-
-        record.add_attribute(NtfsAttribute::standard_info(attrs, security_id));
-        record.add_attribute(NtfsAttribute::file_name(
-            root_ref(),
-            "$UpCase",
-            0,
-            attrs,
-            NtfsFileNameNamespace::Win32AndDos,
-        ));
-
         let clusters = data_size.div_ceil(meta.bytes_per_cluster as u64);
-        let _content = NtfsAttributeContent::NonResident {
+        let content = NtfsAttributeContent::NonResident {
             allocated_size: clusters * meta.bytes_per_cluster as u64,
             data_size,
             initialized_size: data_size,
@@ -406,8 +399,14 @@ impl<'a> NtfsMftRecord<'a> {
             highest_vcn: clusters.saturating_sub(1),
         };
 
-        record.add_attribute(NtfsAttribute::data_empty());
-        record
+        Self::new_file(
+            10,
+            root_ref(),
+            "$UpCase",
+            NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM,
+            content,
+            security_id,
+        )
     }
 
     pub fn new_extend(meta: &NtfsMeta, timestamp: u64, security_id: u32) -> Self {

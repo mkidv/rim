@@ -29,7 +29,9 @@ pub mod traits {
     pub use super::formatter::FsFormatter;
     pub use super::injector::{FsContext, FsInjector, FsTreeInjector};
     pub use super::meta::FsMeta;
-    pub use super::resolver::{FsNode, FsResolver, FsTreeResolver, attr::FileAttributes};
+    pub use super::resolver::{
+        FsNode, FsResolver, FsTreeResolver, attr::FileAttributes, attr::NodeKind,
+    };
     pub use super::validate::Validate;
 }
 

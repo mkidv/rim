@@ -75,6 +75,9 @@ impl<'p> Ext4BlockAllocator<'p> {
         io: &mut IO,
         mut count: usize,
     ) -> FsAllocatorResult<RunList> {
+        if count == 0 {
+            return Ok(RunList::new());
+        }
         let original_count = count;
         let mut list = RunList::new();
         let group_count = self.params.group_count as usize;

@@ -100,11 +100,18 @@ pub fn run(
                             ));
                         }
                         BuildEvent::PartitionFormatted(rep) => {
-                            let content_str = if rep.dirs_count > 0 || rep.files_count > 0 {
-                                format!(
-                                    " • {} dirs • {} files injected",
-                                    rep.dirs_count, rep.files_count
-                                )
+                            let mut parts = Vec::new();
+                            if rep.dirs_count > 0 {
+                                parts.push(format!("{} dirs", rep.dirs_count));
+                            }
+                            if rep.files_count > 0 {
+                                parts.push(format!("{} files", rep.files_count));
+                            }
+                            if rep.symlinks_count > 0 {
+                                parts.push(format!("{} symlinks", rep.symlinks_count));
+                            }
+                            let content_str = if !parts.is_empty() {
+                                format!(" • {} injected", parts.join(" • "))
                             } else {
                                 String::new()
                             };

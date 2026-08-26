@@ -247,11 +247,8 @@ impl ExtLostFound {
     /// Generate the Inode for `lost+found`
     pub fn create_inode(block_size: u32, block_id: u32) -> ExtInode {
         let extent = ExtExtent::new(0, block_id, 1);
-        let attr = FileAttributes {
-            mode: Some(0o700), // drwx------
-            dir: true,
-            ..Default::default()
-        };
+        let mut attr = FileAttributes::new_dir();
+        attr.mode = Some(0o700); // drwx------
 
         ExtInode::from_attr(
             &attr,

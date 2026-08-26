@@ -13,6 +13,7 @@ name = "LINUX_ROOT"
 fs = "ext4"
 size = "512M"
 label = "ROOTFS"
+mountpoint = "rootfs/*"
 
 [[partitions]]
 name = "SHARED_DATA"

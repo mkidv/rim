@@ -225,6 +225,7 @@ pub enum FsInjectorError {
     Resolver(FsResolverError),
     Feature(FsFeatureError),
     StackUnderflow,
+    Unsupported(&'static str),
     Invalid(&'static str),
     Other(&'static str),
 }
@@ -237,6 +238,7 @@ impl FsInjectorError {
             FsInjectorError::Resolver(_) => "Resolver error",
             FsInjectorError::Feature(_) => "Feature error",
             FsInjectorError::StackUnderflow => "Stack underflow",
+            FsInjectorError::Unsupported(msg) => msg,
             FsInjectorError::Invalid(msg) => msg,
             FsInjectorError::Other(msg) => msg,
         }

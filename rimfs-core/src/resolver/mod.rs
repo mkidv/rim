@@ -14,6 +14,7 @@ pub mod attr;
 pub mod node;
 pub mod walker;
 
+pub use attr::NodeKind;
 pub use node::*;
 
 pub use crate::errors::{FsResolverError, FsResolverResult};
@@ -54,9 +55,14 @@ pub trait FsTreeResolver {
     /// The path must refer to a regular file, not a directory.
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>>;
 
+    /// Returns the symbolic link target at the given path.
+    fn read_link(&mut self, _path: &str) -> FsResolverResult<String> {
+        Err(FsResolverError::Unsupported)
+    }
+
     /// Returns the attributes of the entry at the given path.
     ///
-    /// The path may refer to a file or directory. Implementations must fill at least the `dir` flag correctly.
+    /// The path may refer to a file, directory, or symlink.
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes>;
 
     /// Recursively builds an [`FsNode`] tree starting from `path`.
@@ -88,28 +94,39 @@ pub trait FsTreeResolver {
             })
         } else {
             let attr = self.read_attributes(path)?;
-            if attr.dir {
-                let mut children = vec![];
-                if recurse {
-                    for entry in self.read_dir(path)? {
-                        let entry_path = join_paths(path, &entry);
-                        let child = self.build_node(&entry_path, recurse)?;
-                        children.push(child);
+            match attr.kind {
+                attr::NodeKind::Directory => {
+                    let mut children = vec![];
+                    if recurse {
+                        for entry in self.read_dir(path)? {
+                            let entry_path = join_paths(path, &entry);
+                            let child = self.build_node(&entry_path, recurse)?;
+                            children.push(child);
+                        }
+                        children.sort_by_key(|c| c.name().to_ascii_lowercase());
                     }
-                    children.sort_by_key(|c| c.name().to_ascii_lowercase());
+                    Ok(FsNode::Dir {
+                        name: extract_name_from_path(path).to_string(),
+                        children,
+                        attr,
+                    })
                 }
-                Ok(FsNode::Dir {
-                    name: extract_name_from_path(path).to_string(),
-                    children,
-                    attr,
-                })
-            } else {
-                let content = self.read_file(path)?;
-                Ok(FsNode::File {
-                    name: extract_name_from_path(path).to_string(),
-                    content,
-                    attr,
-                })
+                attr::NodeKind::Symlink => {
+                    let target = self.read_link(path)?;
+                    Ok(FsNode::Symlink {
+                        name: extract_name_from_path(path).to_string(),
+                        target,
+                        attr,
+                    })
+                }
+                _ => {
+                    let content = self.read_file(path)?;
+                    Ok(FsNode::File {
+                        name: extract_name_from_path(path).to_string(),
+                        content,
+                        attr,
+                    })
+                }
             }
         }
     }

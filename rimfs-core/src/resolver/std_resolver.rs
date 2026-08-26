@@ -61,45 +61,78 @@ impl FsTreeResolver for StdResolver {
         Ok(fs::read(path)?)
     }
 
+    /// Returns the symbolic link target at the given path.
+    fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
+        let path_str = clean_and_normalize_path(path);
+        let path = Path::new(&path_str);
+        let target = fs::read_link(path)?;
+        target
+            .into_os_string()
+            .into_string()
+            .map_err(|_| FsResolverError::Invalid("Symlink target is not valid UTF-8"))
+    }
+
     /// Returns the attributes of the entry at the given path.
     ///
-    /// The path may refer to a file or directory.
-    /// Implementations must fill at least the `dir` flag correctly.
+    /// The path may refer to a file, directory, or symlink.
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
         let path_str = clean_and_normalize_path(path);
         let path = Path::new(path_str.as_str());
-        let meta = fs::metadata(path)?;
-        if !meta.is_file() && !meta.is_dir() {
-            crate::bail!(FsResolverError::Unsupported);
-        }
+        let meta = fs::symlink_metadata(path)?;
 
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or(FsResolverError::Unsupported)?;
+        let file_type = meta.file_type();
+        let kind = if file_type.is_dir() {
+            NodeKind::Directory
+        } else if file_type.is_symlink() {
+            NodeKind::Symlink
+        } else if file_type.is_file() {
+            NodeKind::Regular
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if file_type.is_fifo() {
+                    NodeKind::Fifo
+                } else if file_type.is_socket() {
+                    NodeKind::Socket
+                } else if file_type.is_char_device() {
+                    NodeKind::CharDevice
+                } else if file_type.is_block_device() {
+                    NodeKind::BlockDevice
+                } else {
+                    NodeKind::Regular
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                NodeKind::Regular
+            }
+        };
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        #[cfg(unix)]
+        let (mode, uid, gid) = {
+            use std::os::unix::fs::MetadataExt;
+            (Some(meta.mode()), Some(meta.uid()), Some(meta.gid()))
+        };
+        #[cfg(not(unix))]
+        let (mode, uid, gid) = (None, None, None);
 
         Ok(FileAttributes {
             read_only: meta.permissions().readonly(),
             hidden: name.starts_with('.'),
             // No portable way to detect SYSTEM attribute cross-platform
             system: false,
-            archive: !meta.is_dir(),
-            dir: meta.is_dir(),
+            archive: kind.is_file(),
+            kind,
             created: meta.created().ok().map(systemtime_to_offsetdatetime),
             modified: meta.modified().ok().map(systemtime_to_offsetdatetime),
             accessed: meta.accessed().ok().map(systemtime_to_offsetdatetime),
             contiguous: false,
-            mode: {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    Some(meta.permissions().mode())
-                }
-                #[cfg(not(unix))]
-                {
-                    None
-                }
-            },
+            mode,
+            uid,
+            gid,
         })
     }
 
@@ -107,7 +140,7 @@ impl FsTreeResolver for StdResolver {
         let path_str = clean_and_normalize_path(path);
         let path = Path::new(&path_str);
 
-        let meta = fs::metadata(path)?;
+        let meta = fs::symlink_metadata(path)?;
 
         let is_dir = meta.is_dir();
         let size = if meta.is_file() {
@@ -142,7 +175,7 @@ mod tests {
         for name in &entries {
             let path = format!("{root}/{name}");
             let attr = parser.read_attributes(&path).unwrap();
-            if attr.dir {
+            if attr.is_dir() {
                 println!("DIR: {name}");
             } else {
                 let content = parser.read_file(&path).unwrap_or_default();

@@ -300,7 +300,7 @@ pub fn ntfs_attr_from_core(
     if attr.system {
         flags |= crate::flags::NtfsFileAttributes::SYSTEM;
     }
-    if attr.dir {
+    if attr.is_dir() {
         flags |= crate::flags::NtfsFileAttributes::DIRECTORY;
     }
     if attr.archive {

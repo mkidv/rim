@@ -4,6 +4,30 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-27
+### Added
+*   **End-to-End POSIX Metadata & Symlink Engine (`rimfs-core`, `rimfs-ext`)**:
+    *   `NodeKind` Enum & Granular Attributes: Replaced boolean directory flags with `NodeKind` (`Regular`, `Directory`, `Symlink`, `Fifo`, `Socket`, `CharDevice`, `BlockDevice`) and explicit 32-bit `uid`/`gid: Option<u32>` on `FileAttributes`.
+    *   `FsNode::Symlink` & Extended Node Counts: First-class symbolic link tree representation and tracking in `FsNodeCounts` (`symlinks: usize`).
+    *   `FsTreeResolver` & `FsTreeInjector` Abstractions: Added `write_symlink` and `read_link` pipeline methods with typed `FsInjectorError::Unsupported` error handling for filesystems without symlink support.
+    *   `StdResolver` Host Discovery: Resolves Unix permissions (`0o7777` mask, `setuid`, `setgid`, `sticky`), ownership (`uid`, `gid`), and symlink targets via `fs::symlink_metadata()` and `read_link()`.
+    *   EXT Fast & Slow Symlinks:
+        *   **Fast Symlinks** (< 60 bytes): Embedded directly into `ExtInode.i_block` with zero block allocation and `EXT_INODE_FLAG_EXTENTS` cleared.
+        *   **Slow Symlinks** (>= 60 bytes): Allocated data block(s) backed by 48-bit extent trees (Ext4) or indirect block maps (Ext2/3).
+    *   EXT 12-Bit Modes & 32-Bit UID/GID: Full support for `SETUID (0o4000)`, `SETGID (0o2000)`, and `STICKY (0o1000)` bits, plus 32-bit UID/GID on-disk encoding (`i_uid`/`i_gid` + `i_osd2[4..8]`).
+    *   `ExtChecker` Symlink Invariants: Validation for fast/slow symlink sizing, extent flags, and block count consistency.
+    *   Linux CI Semantic Integrity: Extended loop device mounting in `.github/workflows/ci.yml` to assert POSIX directory modes, special bits, fast/slow symlinks, and zero-block allocation using native `stat` and `readlink`.
+
+### Fixed
+*   **NTFS `$UpCase` MFT Record 10 Defect (`rimfs-ntfs`)**:
+    *   Allocated and encoded the complete 131,072-byte uppercase table as a valid non-resident `$DATA` stream in MFT Record 10 with proper cluster dataruns and logical/allocation sizes.
+    *   Updated `$FILE_NAME` attribute generation to record accurate `allocated_size` and `data_size` for `$UpCase`.
+    *   Extended `NtfsChecker` and regression test suite to inspect Record 10 non-residency, 131,072-byte sizing (`UPCASE.SIZE`), and table integrity (`UPCASE.DATA`).
+*   **EXT Directory Attribute Preservation (`rimfs-ext`)**:
+    *   Fixed `ExtInjector::flush_current()` to preserve directory modes (e.g. `0o700`), custom ownership, and timestamps when rewriting directory inodes on child completion.
+*   **Zero-Block Allocation Optimization (`rimfs-ext`)**:
+    *   `ExtAllocator::allocate_blocks_list` returns an empty `RunList` immediately for 0-block requests (used by fast symlinks).
+
 ## [0.6.0] - 2026-08-26
 ### Added
 *   **Modular 12-Crate Architecture & Unified CLI (`rimcli`)**:

@@ -23,8 +23,8 @@ The project is structured into modular, decoupled crates:
 | **[`rimfs-core`](rimfs-core)** | Core traits (`FsFormatter`, `FsAllocator`, `FsInjector`, `FsResolver`, `FsChecker`), bitmaps, and resolvers. |
 | **[`rimfs-fat`](rimfs-fat)** | FAT12, FAT16, FAT32 implementation, plus the 64-bit optimized **RimFAT** integrity extension. |
 | **[`rimfs-exfat`](rimfs-exfat)** | ExFAT implementation with allocation bitmap tracking, upcase table compilation, and consistency checker. |
-| **[`rimfs-ext`](rimfs-ext)** | Ext2, Ext3, and Ext4 with 48-bit physical extent trees, indirect block maps, and BGDT. |
-| **[`rimfs-ntfs`](rimfs-ntfs)** | Pure-Rust NTFS 3.1 ($Boot, $MFT, $Secure, B-tree directory indexing, data runs). |
+| **[`rimfs-ext`](rimfs-ext)** | Ext2, Ext3, and Ext4 with 48-bit physical extent trees, indirect block maps, 32-bit UID/GID, and fast/slow symlinks. |
+| **[`rimfs-ntfs`](rimfs-ntfs)** | Pure-Rust NTFS 3.1 ($Boot, $MFT, non-resident $UpCase, $Secure, B-tree directory indexing, data runs). |
 | **[`rimpart`](rimpart)** | Partition table management for GPT, streaming GPT (`gpt_stream` on-the-fly CRC32), and MBR. |
 | **[`rimio`](rimio)** | Low-level I/O abstraction (`StdRimIO`, `FileRimIO` positioned I/O, `MemRimIO`, `MmapRimIO`, `UefiRimIO`). |
 | **[`sector-analyzer`](sector-analyzer)** | Forensic analysis tool (signatures, entropy, MFT/$Secure dumping, sector diffing). |
@@ -41,8 +41,8 @@ The project is structured into modular, decoupled crates:
 - **Supported Filesystems**:
   - **FAT**: FAT12, FAT16, FAT32, and RimFAT.
   - **ExFAT**: Full formatting, directory injection, and consistency verification.
-  - **EXT**: Ext2, Ext3, Ext4 (48-bit extent trees, block group descriptors).
-  - **NTFS**: Pure-Rust NTFS 3.1 ($MFT records, `$Secure` security descriptors, INDX B-tree directories).
+  - **EXT**: Ext2, Ext3, Ext4 (48-bit extent trees, block group descriptors, POSIX permissions & symlinks).
+  - **NTFS**: Pure-Rust NTFS 3.1 ($MFT records, non-resident $UpCase, `$Secure` security descriptors, INDX B-tree directories).
 - **Supported Disk & Container Formats**:
   - Raw images: `.img`, `.raw`
   - Microsoft VHD: `.vhd` (fixed VHD)

@@ -72,6 +72,39 @@ impl<'a> NtfsAttribute<'a> {
         namespace: NtfsFileNameNamespace,
         timestamp: u64,
     ) -> Self {
+        Self::file_name_with_sizes_custom(
+            parent_ref, name, data_size, data_size, attrs, namespace, timestamp,
+        )
+    }
+
+    pub fn file_name_with_sizes(
+        parent_ref: u64,
+        name: &str,
+        allocated_size: u64,
+        data_size: u64,
+        attrs: NtfsFileAttributes,
+        namespace: NtfsFileNameNamespace,
+    ) -> Self {
+        Self::file_name_with_sizes_custom(
+            parent_ref,
+            name,
+            allocated_size,
+            data_size,
+            attrs,
+            namespace,
+            Self::now(),
+        )
+    }
+
+    pub fn file_name_with_sizes_custom(
+        parent_ref: u64,
+        name: &str,
+        allocated_size: u64,
+        data_size: u64,
+        attrs: NtfsFileAttributes,
+        namespace: NtfsFileNameNamespace,
+        timestamp: u64,
+    ) -> Self {
         let name_u16: Vec<u16> = name.encode_utf16().collect();
         let name_len = name_u16.len() as u8;
 
@@ -83,6 +116,7 @@ impl<'a> NtfsAttribute<'a> {
             namespace.bits(),
         );
 
+        fn_attr.allocated_size = allocated_size;
         fn_attr.creation_time = timestamp;
         fn_attr.modification_time = timestamp;
         fn_attr.mft_modification_time = timestamp;

@@ -146,13 +146,14 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             ));
         }
 
-        // Verify primary MFT system records (0: $MFT, 1: $MFTMirr, 3: $Volume, 6: $Bitmap)
+        // Verify primary MFT system records (0: $MFT, 1: $MFTMirr, 3: $Volume, 6: $Bitmap, 7: $Boot, 10: $UpCase)
         for (rec_num, name) in [
             (MFT_RECORD_MFT, "$MFT"),
             (MFT_RECORD_MFTMIRR, "$MFTMirr"),
             (MFT_RECORD_VOLUME, "$Volume"),
             (MFT_RECORD_BITMAP, "$Bitmap"),
             (MFT_RECORD_BOOT, "$Boot"),
+            (MFT_RECORD_UPCASE, "$UpCase"),
         ] {
             match mft::read_record(self.io, self.meta, rec_num) {
                 Ok(_) => {
@@ -167,6 +168,44 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                         format!("Failed to read {name} (record {rec_num}): {e}"),
                     ));
                 }
+            }
+        }
+
+        // Validate $UpCase stream
+        let mut resolver = crate::resolver::NtfsResolver::new(self.io, self.meta);
+        match resolver.read_file_stream(MFT_RECORD_UPCASE, None) {
+            Ok(upcase_bytes) => {
+                if upcase_bytes.len() == 131072 {
+                    rep.push(Finding::info(
+                        "UPCASE.SIZE",
+                        "$UpCase size OK (131072 bytes)",
+                    ));
+                    if crate::system::upcase::UpcaseHandle::from_le_bytes(&upcase_bytes).is_ok() {
+                        rep.push(Finding::info(
+                            "UPCASE.DATA",
+                            "$UpCase data stream structurally valid",
+                        ));
+                    } else {
+                        rep.push(Finding::err(
+                            "UPCASE.DATA",
+                            "Invalid Unicode table in $UpCase data stream",
+                        ));
+                    }
+                } else {
+                    rep.push(Finding::err(
+                        "UPCASE.SIZE",
+                        format!(
+                            "Invalid $UpCase size {} (expected 131072 bytes)",
+                            upcase_bytes.len()
+                        ),
+                    ));
+                }
+            }
+            Err(e) => {
+                rep.push(Finding::err(
+                    "UPCASE.DATA",
+                    format!("Failed to read $UpCase data stream: {e}"),
+                ));
             }
         }
 
@@ -338,8 +377,81 @@ mod tests {
         );
         assert!(report.findings.iter().any(|f| f.code == "BOOT.OEM"));
         assert!(report.findings.iter().any(|f| f.code == "GEOM.MFT"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.code == "MFT.REC" && f.msg.contains("$UpCase"))
+        );
+        assert!(report.findings.iter().any(|f| f.code == "UPCASE.SIZE"));
+        assert!(report.findings.iter().any(|f| f.code == "UPCASE.DATA"));
         assert!(report.findings.iter().any(|f| f.code == "ROOT.REC"));
         assert!(report.findings.iter().any(|f| f.code == "CHAIN.OK"));
         assert!(report.findings.iter().any(|f| f.code == "CROSSREF.OK"));
+    }
+
+    #[test]
+    fn test_ntfs_upcase_record_10_regression() {
+        let meta = NtfsMeta::new(5 * 1024 * 1024, Some("NTFS_UPCASE")).unwrap();
+        let mut buffer = vec![0u8; 5 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut buffer);
+
+        NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
+
+        // 1. Read MFT record 10 ($UpCase)
+        let mut resolver = crate::resolver::NtfsResolver::new(&mut io, &meta);
+        let rec = resolver
+            .read_mft_record(MFT_RECORD_UPCASE)
+            .expect("$UpCase record readable");
+
+        let view = crate::view::mft_view::MftRecordView::new(&rec).expect("Valid MFT view");
+
+        // 2. Find unnamed $DATA attribute
+        let data_attr = view
+            .find_named(crate::constant::ATTR_DATA, None)
+            .expect("Valid attribute parse")
+            .expect("Unnamed $DATA exists");
+
+        // 3. Verify non-resident and size properties
+        assert!(!data_attr.is_resident(), "non-resident == true");
+        let attr_view = data_attr.as_view().expect("Valid attr view");
+        match attr_view {
+            crate::view::attr_view::AttrView::NonResident {
+                allocated_size,
+                data_size,
+                initialized_size,
+                runlist,
+                ..
+            } => {
+                assert_eq!(data_size, 131072, "data_size == 131072");
+                assert_eq!(initialized_size, 131072, "initialized_size == 131072");
+                assert!(allocated_size >= 131072, "allocated_size >= 131072");
+                assert!(runlist.iter().count() > 0, "runlist resolves correctly");
+            }
+            _ => panic!("Expected NonResident attribute"),
+        }
+
+        // 4. Verify payload read via resolver
+        let upcase_payload = resolver
+            .read_file_stream(MFT_RECORD_UPCASE, None)
+            .expect("Payload stream readable");
+        assert_eq!(upcase_payload.len(), 131072, "payload length == 131072");
+
+        // 5. Verify $FILE_NAME data_size
+        let fn_attr = view
+            .find_named(crate::constant::ATTR_FILE_NAME, None)
+            .expect("Valid attr parse")
+            .expect("$FILE_NAME exists");
+        let fn_val = resolver.get_resident_attribute_content(fn_attr).unwrap();
+        let fn_struct = *crate::types::FileNameAttribute::ref_from_prefix(fn_val)
+            .unwrap()
+            .0;
+        let fn_data_size = fn_struct.data_size;
+        let fn_allocated_size = fn_struct.allocated_size;
+        assert_eq!(fn_data_size, 131072, "$FILE_NAME data_size == 131072");
+        assert!(
+            fn_allocated_size >= 131072,
+            "$FILE_NAME allocated_size >= 131072"
+        );
     }
 }

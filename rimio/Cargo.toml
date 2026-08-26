@@ -1,6 +1,6 @@
 [package]
 name = "rimio"
-description = "IO abstraction for RIM ecosystem"
+description = "I/O abstraction for rim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

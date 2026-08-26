@@ -311,6 +311,17 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
         Ok(())
     }
 
+    fn write_symlink(
+        &mut self,
+        _name: &str,
+        _target: &str,
+        _attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        Err(FsInjectorError::Unsupported(
+            "NTFS does not support symbolic links yet",
+        ))
+    }
+
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(ctx) = self.stack.pop() {
             let mft_num = ctx.handle.start_lcn;

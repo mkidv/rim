@@ -1,6 +1,6 @@
 [package]
 name = "rimhost"
-description = "OS-native host storage and script integrations for RIM ecosystem"
+description = "OS-native host storage integrations for rim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,8 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1.0.98"
-rimgen = { path = "../rimgen", version = "0.6.0" }
-rimimg = { path = "../rimimg", version = "0.6.0" }
+rimgen.workspace = true
+rimimg.workspace = true
 tempfile = "3.20.0"
 which = "8.0.0"
 

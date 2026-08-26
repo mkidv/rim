@@ -101,6 +101,30 @@ jobs:
           ./target/release/rim convert test_esp.img test_esp.qcow2
           ./target/release/rim inspect test_esp.qcow2
 
+      - name: Prepare POSIX Rootfs Test Tree
+        run: |
+          mkdir -p examples/rootfs/bin examples/rootfs/etc examples/rootfs/var/shared examples/rootfs/tmp examples/rootfs/private
+          echo "echo hello" > examples/rootfs/bin/hello.sh
+          chmod 755 examples/rootfs/bin/hello.sh
+
+          echo "setuid binary" > examples/rootfs/bin/su_dummy
+          chmod 4755 examples/rootfs/bin/su_dummy
+
+          chmod 2775 examples/rootfs/var/shared
+          chmod 1777 examples/rootfs/tmp
+          chmod 700 examples/rootfs/private
+          echo "secret data" > examples/rootfs/private/secret.txt
+          chmod 600 examples/rootfs/private/secret.txt
+
+          # Fast symlink (< 60 bytes)
+          ln -s hello.sh examples/rootfs/bin/hello_link
+
+          # Slow symlink (>= 60 bytes)
+          ln -s ../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing examples/rootfs/bin/slow_link
+
+          # Dangling symlink
+          ln -s /nonexistent/target examples/rootfs/etc/dangling_link
+
       - name: Test Multi-FS Image Generation
         run: |
           ./target/release/rim generate examples/multi-fs-vm.toml --output test_multifs.img
@@ -133,5 +157,39 @@ jobs:
 
           echo ">>> All Native Linux Kernel & fsck Integrity Checks Passed!"
 
-          # Detach loop device
+      - name: Mount & Verify Semantic Integrity of EXT4 (POSIX Metadata & Symlinks)
+        run: |
+          LOOPDEV=$(losetup -j test_multifs.img | cut -d: -f1)
+          mkdir -p /mnt/ext_test
+          sudo mount ${LOOPDEV}p2 /mnt/ext_test
+
+          echo ">>> Validating mounted EXT4 POSIX semantics..."
+          
+          # Check directory mode preservation
+          [ "$(stat -c '%a' /mnt/ext_test/private)" = "700" ] || (echo "private mode mismatch: $(stat -c '%a' /mnt/ext_test/private)" && exit 1)
+          [ "$(stat -c '%a' /mnt/ext_test/private/secret.txt)" = "600" ] || (echo "secret.txt mode mismatch" && exit 1)
+          
+          # Check special permission bits
+          [ "$(stat -c '%a' /mnt/ext_test/bin/su_dummy)" = "4755" ] || (echo "su_dummy mode mismatch: $(stat -c '%a' /mnt/ext_test/bin/su_dummy)" && exit 1)
+          [ "$(stat -c '%a' /mnt/ext_test/var/shared)" = "2775" ] || (echo "var/shared mode mismatch: $(stat -c '%a' /mnt/ext_test/var/shared)" && exit 1)
+          [ "$(stat -c '%a' /mnt/ext_test/tmp)" = "1777" ] || (echo "tmp mode mismatch: $(stat -c '%a' /mnt/ext_test/tmp)" && exit 1)
+
+          # Check Fast Symlink (< 60 bytes)
+          [ -L /mnt/ext_test/bin/hello_link ] || (echo "hello_link is not a symlink" && exit 1)
+          [ "$(readlink /mnt/ext_test/bin/hello_link)" = "hello.sh" ] || (echo "hello_link target mismatch" && exit 1)
+          # Fast symlink block count must be 0
+          [ "$(stat -c '%b' /mnt/ext_test/bin/hello_link)" = "0" ] || (echo "fast symlink allocated blocks != 0" && exit 1)
+
+          # Check Slow Symlink (>= 60 bytes)
+          [ -L /mnt/ext_test/bin/slow_link ] || (echo "slow_link is not a symlink" && exit 1)
+          [ "$(readlink /mnt/ext_test/bin/slow_link)" = "../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing" ] || (echo "slow_link target mismatch" && exit 1)
+
+          # Check Dangling Symlink
+          [ -L /mnt/ext_test/etc/dangling_link ] || (echo "dangling_link is not a symlink" && exit 1)
+          [ "$(readlink /mnt/ext_test/etc/dangling_link)" = "/nonexistent/target" ] || (echo "dangling_link target mismatch" && exit 1)
+
+          echo ">>> Semantic verification passed! Content reads correctly:"
+          cat /mnt/ext_test/bin/hello_link
+
+          sudo umount /mnt/ext_test
           sudo losetup -d $LOOPDEV

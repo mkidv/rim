@@ -220,6 +220,17 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
         Ok(())
     }
 
+    fn write_symlink(
+        &mut self,
+        _name: &str,
+        _target: &str,
+        _attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        Err(FsInjectorError::Unsupported(
+            "FAT does not support symbolic links",
+        ))
+    }
+
     fn flush_current(&mut self) -> FsInjectorResult {
         // Write ONLY the current directory buffer; no parent linking here.
         if let Some(mut ctx) = self.stack.pop() {

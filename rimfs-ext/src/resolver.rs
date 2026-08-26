@@ -488,8 +488,16 @@ pub struct ExtDirEntry {
 }
 
 impl ExtDirEntry {
-    fn is_dir(&self) -> bool {
+    pub fn is_dir(&self) -> bool {
         self.file_type == EXT_FT_DIR
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.file_type == EXT_FT_REG_FILE
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == EXT_FT_SYMLINK
     }
 }
 
@@ -511,6 +519,68 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
         }
 
         self.read_file_content(inode)
+    }
+
+    fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
+        let components = split_path(path);
+        let mut current_inode = EXT_ROOT_INODE;
+
+        for (i, comp) in components.iter().enumerate() {
+            let entry = self
+                .find_in_dir(current_inode, comp)?
+                .ok_or(FsResolverError::NotFound)?;
+
+            if i == components.len() - 1 {
+                let inode_buf = self.read_inode(entry.inode)?;
+                let i_mode = inode_buf
+                    .get(0..2)
+                    .and_then(|b| b.try_into().ok())
+                    .map(u16::from_le_bytes)
+                    .unwrap_or(0);
+
+                if (i_mode & 0xF000) != 0xA000 {
+                    return Err(FsResolverError::Invalid("Not a symlink"));
+                }
+
+                let size = self.inode_size(&inode_buf) as usize;
+                let i_blocks = inode_buf
+                    .get(28..32)
+                    .and_then(|b| b.try_into().ok())
+                    .map(u32::from_le_bytes)
+                    .unwrap_or(0);
+
+                if i_blocks == 0 && size < 60 {
+                    // Fast symlink
+                    let target_bytes =
+                        inode_buf
+                            .get(40..40 + size)
+                            .ok_or(FsResolverError::Invalid(
+                                "Inode buffer too small for fast symlink",
+                            ))?;
+                    return String::from_utf8(target_bytes.to_vec())
+                        .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"));
+                } else {
+                    // Slow symlink
+                    let content = self.read_file_content(entry.inode)?;
+                    let target_slice = if content.len() >= size {
+                        &content[..size]
+                    } else {
+                        &content[..]
+                    };
+                    return String::from_utf8(target_slice.to_vec())
+                        .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"));
+                }
+            }
+
+            if !entry.is_dir() {
+                return Err(FsResolverError::Invalid(
+                    "Expected directory for intermediate component",
+                ));
+            }
+            current_inode = entry.inode;
+        }
+
+        Err(FsResolverError::NotFound)
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
@@ -565,6 +635,37 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
             .map(u16::from_le_bytes)
             .unwrap_or(0);
 
+        let i_uid_lo = inode_buf
+            .get(2..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes)
+            .unwrap_or(0) as u32;
+
+        let i_gid_lo = inode_buf
+            .get(24..26)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes)
+            .unwrap_or(0) as u32;
+
+        let (uid_hi, gid_hi) = if inode_buf.len() >= 128 {
+            let u_hi = inode_buf
+                .get(120..122)
+                .and_then(|b| b.try_into().ok())
+                .map(u16::from_le_bytes)
+                .unwrap_or(0) as u32;
+            let g_hi = inode_buf
+                .get(122..124)
+                .and_then(|b| b.try_into().ok())
+                .map(u16::from_le_bytes)
+                .unwrap_or(0) as u32;
+            (u_hi, g_hi)
+        } else {
+            (0, 0)
+        };
+
+        let uid = (uid_hi << 16) | i_uid_lo;
+        let gid = (gid_hi << 16) | i_gid_lo;
+
         let i_atime = inode_buf
             .get(8..12)
             .and_then(|b| b.try_into().ok())
@@ -583,16 +684,34 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
             .map(u32::from_le_bytes)
             .unwrap_or(0);
 
-        // Convert i_mode permissions to mode bits
-        let mode = (i_mode & 0x0FFF) as u32;
-
-        let mut attr = if is_dir {
-            FileAttributes::new_dir()
-        } else {
-            FileAttributes::new_file()
+        let kind = match i_mode & 0xF000 {
+            0x4000 => crate::core::traits::NodeKind::Directory,
+            0xA000 => crate::core::traits::NodeKind::Symlink,
+            0x1000 => crate::core::traits::NodeKind::Fifo,
+            0xC000 => crate::core::traits::NodeKind::Socket,
+            0x2000 => crate::core::traits::NodeKind::CharDevice,
+            0x6000 => crate::core::traits::NodeKind::BlockDevice,
+            _ => {
+                if is_dir {
+                    crate::core::traits::NodeKind::Directory
+                } else {
+                    crate::core::traits::NodeKind::Regular
+                }
+            }
         };
 
+        let mode = (i_mode & 0x0FFF) as u32;
+
+        let mut attr = match kind {
+            crate::core::traits::NodeKind::Directory => FileAttributes::new_dir(),
+            crate::core::traits::NodeKind::Symlink => FileAttributes::new_symlink(),
+            _ => FileAttributes::new_file(),
+        };
+
+        attr.kind = kind;
         attr.mode = Some(mode);
+        attr.uid = Some(uid);
+        attr.gid = Some(gid);
 
         // Try to convert timestamps
         if let Ok(atime) = time::OffsetDateTime::from_unix_timestamp(i_atime as i64) {

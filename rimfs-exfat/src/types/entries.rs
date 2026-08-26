@@ -43,7 +43,7 @@ impl ExFatEntries {
     }
 
     pub fn is_dir(&self) -> bool {
-        self.attr().dir
+        self.attr().is_dir()
     }
 
     pub fn first_cluster(&self) -> u32 {

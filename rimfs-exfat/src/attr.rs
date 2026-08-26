@@ -31,7 +31,7 @@ impl ExFatFileAttributesExt for FileAttributes {
         if self.system {
             attr |= ExFatAttributes::SYSTEM;
         }
-        if self.dir {
+        if self.is_dir() {
             attr |= ExFatAttributes::DIRECTORY;
         }
         if self.archive {
@@ -42,13 +42,16 @@ impl ExFatFileAttributesExt for FileAttributes {
 
     fn from_exfat_attr(attr: u16) -> Self {
         let exfat_attr = ExFatAttributes::from_bits_truncate(attr);
-        FileAttributes {
-            read_only: exfat_attr.contains(ExFatAttributes::READ_ONLY),
-            hidden: exfat_attr.contains(ExFatAttributes::HIDDEN),
-            system: exfat_attr.contains(ExFatAttributes::SYSTEM),
-            dir: exfat_attr.contains(ExFatAttributes::DIRECTORY),
-            archive: exfat_attr.contains(ExFatAttributes::ARCHIVE),
-            ..Default::default()
-        }
+        let is_dir = exfat_attr.contains(ExFatAttributes::DIRECTORY);
+        let mut fa = if is_dir {
+            FileAttributes::new_dir()
+        } else {
+            FileAttributes::new_file()
+        };
+        fa.read_only = exfat_attr.contains(ExFatAttributes::READ_ONLY);
+        fa.hidden = exfat_attr.contains(ExFatAttributes::HIDDEN);
+        fa.system = exfat_attr.contains(ExFatAttributes::SYSTEM);
+        fa.archive = exfat_attr.contains(ExFatAttributes::ARCHIVE);
+        fa
     }
 }

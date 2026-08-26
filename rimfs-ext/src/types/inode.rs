@@ -196,8 +196,13 @@ impl ExtInode {
         (self.i_mode & 0xF000) == 0x8000
     }
 
+    /// Check if this is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        (self.i_mode & 0xF000) == 0xA000
+    }
+
     /// Create an inode from FileAttributes
-    /// This is the main constructor for injecting files/directories
+    /// This is the main constructor for injecting files/directories/slow symlinks
     pub fn from_attr(
         attr: &crate::core::traits::FileAttributes,
         size: u64,
@@ -216,6 +221,14 @@ impl ExtInode {
         let ctime = attr.created.unwrap_or(now).to_unix_u32();
         let mtime = attr.modified.unwrap_or(now).to_unix_u32();
 
+        let uid = attr.uid.unwrap_or(0);
+        let gid = attr.gid.unwrap_or(0);
+        let i_uid = (uid & 0xFFFF) as u16;
+        let i_gid = (gid & 0xFFFF) as u16;
+        let mut osd2 = [0u8; 12];
+        osd2[4..6].copy_from_slice(&((uid >> 16) as u16).to_le_bytes());
+        osd2[6..8].copy_from_slice(&((gid >> 16) as u16).to_le_bytes());
+
         let size_high = if (i_mode & 0xF000) != 0x4000 {
             // Not a directory, handle high 32-bit sizing
             (size >> 32) as u32
@@ -225,6 +238,8 @@ impl ExtInode {
 
         let mut inode = Self {
             i_mode,
+            i_uid,
+            i_gid,
             i_size_lo: (size & 0xFFFF_FFFF) as u32,
             i_size_high: size_high,
             i_links_count: links,
@@ -232,11 +247,58 @@ impl ExtInode {
             i_atime: atime,
             i_ctime: ctime,
             i_mtime: mtime,
+            i_osd2: osd2,
             ..Default::default()
         };
         inode.set_extents(extents);
 
         inode
+    }
+
+    /// Create a fast symlink inode (target length < 60 bytes)
+    pub fn new_fast_symlink(attr: &crate::core::traits::FileAttributes, target: &str) -> Self {
+        let mut symlink_attr = attr.clone();
+        symlink_attr.kind = crate::core::traits::NodeKind::Symlink;
+        let i_mode = symlink_attr.as_ext4_mode().bits();
+
+        #[cfg(feature = "std")]
+        let now = time::OffsetDateTime::now_utc();
+        #[cfg(not(feature = "std"))]
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+
+        let atime = symlink_attr.accessed.unwrap_or(now).to_unix_u32();
+        let ctime = symlink_attr.created.unwrap_or(now).to_unix_u32();
+        let mtime = symlink_attr.modified.unwrap_or(now).to_unix_u32();
+
+        let uid = symlink_attr.uid.unwrap_or(0);
+        let gid = symlink_attr.gid.unwrap_or(0);
+        let i_uid = (uid & 0xFFFF) as u16;
+        let i_gid = (gid & 0xFFFF) as u16;
+        let mut osd2 = [0u8; 12];
+        osd2[4..6].copy_from_slice(&((uid >> 16) as u16).to_le_bytes());
+        osd2[6..8].copy_from_slice(&((gid >> 16) as u16).to_le_bytes());
+
+        let target_bytes = target.as_bytes();
+        let len = target_bytes.len();
+        let mut i_block = [0u8; 60];
+        i_block[..len].copy_from_slice(target_bytes);
+
+        Self {
+            i_mode,
+            i_uid,
+            i_gid,
+            i_size_lo: len as u32,
+            i_size_high: 0,
+            i_links_count: 1,
+            i_blocks_lo: 0, // MUST be 0 blocks for fast symlink
+            i_flags: 0,     // MUST NOT set EXT_INODE_FLAG_EXTENTS
+            i_block,
+            i_atime: atime,
+            i_ctime: ctime,
+            i_mtime: mtime,
+            i_osd2: osd2,
+            ..Default::default()
+        }
     }
 
     /// Create an inode from FileAttributes with BlockMap
@@ -258,6 +320,14 @@ impl ExtInode {
         let ctime = attr.created.unwrap_or(now).to_unix_u32();
         let mtime = attr.modified.unwrap_or(now).to_unix_u32();
 
+        let uid = attr.uid.unwrap_or(0);
+        let gid = attr.gid.unwrap_or(0);
+        let i_uid = (uid & 0xFFFF) as u16;
+        let i_gid = (gid & 0xFFFF) as u16;
+        let mut osd2 = [0u8; 12];
+        osd2[4..6].copy_from_slice(&((uid >> 16) as u16).to_le_bytes());
+        osd2[6..8].copy_from_slice(&((gid >> 16) as u16).to_le_bytes());
+
         let size_high = if (i_mode & 0xF000) != 0x4000 {
             (size >> 32) as u32
         } else {
@@ -266,6 +336,8 @@ impl ExtInode {
 
         let mut inode = Self {
             i_mode,
+            i_uid,
+            i_gid,
             i_size_lo: (size & 0xFFFF_FFFF) as u32,
             i_size_high: size_high,
             i_links_count: links,
@@ -273,6 +345,7 @@ impl ExtInode {
             i_atime: atime,
             i_ctime: ctime,
             i_mtime: mtime,
+            i_osd2: osd2,
             ..Default::default()
         };
         inode.set_block_map(map);

@@ -26,6 +26,7 @@ pub struct PartitionReport {
     pub size_bytes: u64,
     pub dirs_count: usize,
     pub files_count: usize,
+    pub symlinks_count: usize,
     pub duration: Duration,
 }
 
@@ -62,7 +63,7 @@ pub fn format_inject_all<F: FnMut(BuildEvent)>(
         let end_lba = entries[i].end_lba;
         let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
 
-        let (dirs, files, duration) = match part.fs {
+        let (counts, duration) = match part.fs {
             Filesystem::Fat32
             | Filesystem::Fat16
             | Filesystem::Fat12
@@ -83,8 +84,9 @@ pub fn format_inject_all<F: FnMut(BuildEvent)>(
             start_lba,
             end_lba,
             size_bytes,
-            dirs_count: dirs,
-            files_count: files,
+            dirs_count: counts.dirs,
+            files_count: counts.files,
+            symlinks_count: counts.symlinks,
             duration,
         };
 
@@ -101,7 +103,7 @@ pub fn format_inject_fat(
     entry: GptEntry,
     part: &Partition,
     node: &FsNode,
-) -> FsResult<(usize, usize, Duration)> {
+) -> FsResult<(FsNodeCounts, Duration)> {
     let t0 = Instant::now();
 
     let start_lba = entry.start_lba;
@@ -112,7 +114,6 @@ pub fn format_inject_fat(
     io.set_offset(offset);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
-
     let mut meta = match part.fs {
         Filesystem::Fat32 => FatMeta::new_fat32(size_bytes, Some(label))?,
         Filesystem::Fat16 => FatMeta::new_fat16(size_bytes, Some(label))?,
@@ -148,7 +149,7 @@ pub fn format_inject_fat(
     let fs_root = parser.parse_tree("/*")?;
     let counts = fs_root.counts();
 
-    Ok((counts.dirs, counts.files, t0.elapsed()))
+    Ok((counts, t0.elapsed()))
 }
 
 /// Format + inject ExFAT partition
@@ -157,7 +158,7 @@ pub fn format_inject_exfat(
     entry: GptEntry,
     part: &Partition,
     node: &FsNode,
-) -> FsResult<(usize, usize, Duration)> {
+) -> FsResult<(FsNodeCounts, Duration)> {
     let t0 = Instant::now();
 
     let start_lba = entry.start_lba;
@@ -196,7 +197,7 @@ pub fn format_inject_exfat(
     let fs_root = parser.parse_tree("/*")?;
     let counts = fs_root.counts();
 
-    Ok((counts.dirs, counts.files, t0.elapsed()))
+    Ok((counts, t0.elapsed()))
 }
 
 /// Format + inject Ext4 partition
@@ -205,7 +206,7 @@ pub fn format_inject_ext4(
     entry: GptEntry,
     part: &Partition,
     node: &FsNode,
-) -> FsResult<(usize, usize, Duration)> {
+) -> FsResult<(FsNodeCounts, Duration)> {
     let t0 = Instant::now();
 
     let start_lba = entry.start_lba;
@@ -237,7 +238,7 @@ pub fn format_inject_ext4(
 
     let counts = node.counts();
 
-    Ok((counts.dirs, counts.files, t0.elapsed()))
+    Ok((counts, t0.elapsed()))
 }
 
 /// Format + inject NTFS partition
@@ -246,7 +247,7 @@ pub fn format_inject_ntfs(
     entry: GptEntry,
     part: &Partition,
     node: &FsNode,
-) -> FsResult<(usize, usize, Duration)> {
+) -> FsResult<(FsNodeCounts, Duration)> {
     let t0 = Instant::now();
 
     let start_lba = entry.start_lba;
@@ -270,7 +271,7 @@ pub fn format_inject_ntfs(
 
     let counts = node.counts();
 
-    Ok((counts.dirs, counts.files, t0.elapsed()))
+    Ok((counts, t0.elapsed()))
 }
 
 /// Format + write raw partition payload
@@ -280,7 +281,7 @@ pub fn format_raw<F: FnMut(BuildEvent)>(
     part: &Partition,
     base_dir: &Path,
     mut on_event: F,
-) -> GenResult<(usize, usize, Duration)> {
+) -> GenResult<(FsNodeCounts, Duration)> {
     let t0 = Instant::now();
 
     let start_lba = entry.start_lba;
@@ -321,5 +322,13 @@ pub fn format_raw<F: FnMut(BuildEvent)>(
         io.zero_fill(0, max_size)?;
     }
 
-    Ok((0, files_written, t0.elapsed()))
+    Ok((
+        FsNodeCounts {
+            dirs: 0,
+            files: files_written,
+            symlinks: 0,
+            bytes: 0,
+        },
+        t0.elapsed(),
+    ))
 }

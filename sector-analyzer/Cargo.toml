@@ -1,12 +1,13 @@
 [package]
 name = "sector-analyzer"
+description = "Sector analysis tool for rim"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rimpart = { path = "../rimpart", features = ["std"] }
-rimio = { path = "../rimio", features = ["std"] }
-rimfs = { path = "../rimfs", features = ["std"] }
+rimpart = { workspace = true, features = ["std"] }
+rimio = { workspace = true, features = ["std"] }
+rimfs = { workspace = true, features = ["std"] }
 zerocopy = { version = "0.8.25", features = ["derive"] }
 memchr = "2.7"
 

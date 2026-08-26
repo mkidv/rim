@@ -7,7 +7,7 @@
 This crate serves as the internal building block for filesystem implementations (`rimfs-fat`, `rimfs-exfat`, `rimfs-ext`, and `rimfs-ntfs`).
 
 Key components:
-- **Core Traits**: `FsFormatter`, `FsAllocator`, `FsInjector`, `FsResolver`, `FsChecker`, `FsNode`, `FsAttr`.
+- **Core Traits**: `FsFormatter`, `FsAllocator`, `FsInjector`, `FsResolver`, `FsChecker`, `FsNode` (Dir, File, Symlink), `FileAttributes` (`NodeKind`, 12-bit mode, 32-bit `uid`/`gid`).
 - **Error Handling**: Standard filesystem error kinds and convenience macros (`bail!`, `ensure!`).
 - **Resolver**: `StdResolver` for walking host directories and resolving file trees in standard environments.
 - **Checker Framework**: `ReachabilityTracker`, block/cluster leak detectors, and diagnostic types.
@@ -19,7 +19,7 @@ For typical applications, prefer using the unified [`rimfs`](../rimfs) facade cr
 
 ```toml
 [dependencies]
-rimfs-core = { version = "0.6.0", default-features = false }
+rimfs-core = { version = "0.6.1", default-features = false }
 ```
 
 ## Cargo Features

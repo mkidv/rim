@@ -20,14 +20,28 @@ members = [
 default-members = ["rimcli", "rimgen", "rimimg", "rimhost", "rimfs-core", "rimfs-fat", "rimfs-exfat", "rimfs-ext", "rimfs-ntfs", "rimfs", "rimpart", "rimio"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "MIT"
 authors = ["Killian Massa (Mki) <contact@mki.dev>"]
 repository = "https://github.com/mkidv/rim"
 homepage = "https://github.com/mkidv/rim"
-keywords = ["fat", "exfat", "ext", "ntfs", "mbr","gpt", "disk-image"]
+keywords = ["fat", "exfat", "ext", "ntfs", "mbr", "gpt", "disk-image"]
 categories = ["filesystem", "embedded", "no-std", "development-tools"]
+
+[workspace.dependencies]
+rimcli = { path = "rimcli", version = "0.6.1" }
+rimfs = { path = "rimfs", version = "0.6.1" }
+rimfs-core = { path = "rimfs-core", version = "0.6.1", default-features = false }
+rimfs-fat = { path = "rimfs-fat", version = "0.6.1", default-features = false }
+rimfs-exfat = { path = "rimfs-exfat", version = "0.6.1", default-features = false }
+rimfs-ext = { path = "rimfs-ext", version = "0.6.1", default-features = false }
+rimfs-ntfs = { path = "rimfs-ntfs", version = "0.6.1", default-features = false }
+rimgen = { path = "rimgen", version = "0.6.1" }
+rimhost = { path = "rimhost", version = "0.6.1" }
+rimimg = { path = "rimimg", version = "0.6.1" }
+rimio = { path = "rimio", version = "0.6.1", default-features = false }
+rimpart = { path = "rimpart", version = "0.6.1", default-features = false }
 
 [workspace.lints.clippy]
 chunks_exact_to_as_chunks = "allow"

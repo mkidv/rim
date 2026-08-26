@@ -8,7 +8,11 @@ use core::convert::TryInto;
 
 use crate::core::allocator::FsAllocator;
 use crate::{
-    core::{FsInjectorError, FsInjectorResult, injector::*, traits::FileAttributes},
+    core::{
+        FsInjectorError, FsInjectorResult,
+        injector::*,
+        traits::{FileAttributes, NodeKind},
+    },
     {
         allocator::{ExtAllocator, ExtHandle},
         constant::*,
@@ -30,15 +34,18 @@ struct ExtContext {
     child_dir_count: u16,
     /// Original extent for re-writing the inode
     extent: ExtExtent,
+    /// Preserved directory attributes (mode, uid, gid, timestamps)
+    attr: FileAttributes,
 }
 
 impl ExtContext {
-    fn new(handle: ExtHandle, buf: Vec<u8>, extent: ExtExtent) -> Self {
+    fn new(handle: ExtHandle, buf: Vec<u8>, extent: ExtExtent, attr: FileAttributes) -> Self {
         Self {
             handle,
             buf,
             child_dir_count: 0,
             extent,
+            attr,
         }
     }
 }
@@ -91,7 +98,7 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
-    fn set_root_context(&mut self, _root: &crate::core::traits::FsNode) -> FsInjectorResult {
+    fn set_root_context(&mut self, root: &crate::core::traits::FsNode) -> FsInjectorResult {
         // Use the pre-formatted root inode (inode 2), not allocating a new one.
         // The root directory was already written by the formatter.
 
@@ -154,7 +161,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         let handle = ExtHandle::new(root_inode, root_blocks);
         let extent = ExtExtent::new(0, root_block, 1);
 
-        let mut ctx = ExtContext::new(handle, existing, extent);
+        let mut ctx = ExtContext::new(handle, existing, extent, root.attr().clone());
         ctx.child_dir_count = child_dir_count;
         self.stack.push(ctx);
 
@@ -221,7 +228,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         let inode_data = ExtInode::from_attr(
             attr,
             self.meta.block_size as u64,
-            if attr.dir { 2 } else { 1 },
+            if attr.is_dir() { 2 } else { 1 },
             self.meta.block_size.div_ceil(512),
             &[extent],
         );
@@ -236,7 +243,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         }
 
         // Push new dir context
-        let ctx = ExtContext::new(handle, entries, extent);
+        let ctx = ExtContext::new(handle, entries, extent, attr.clone());
         self.stack.push(ctx);
 
         // Track used dir count
@@ -269,25 +276,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         let inode = handle.inode;
         let blocks = handle.blocks;
 
-        // Write content using streaming
-        // We iterate over allocated blocks and copy data chunk by chunk.
-
         use crate::core::utils::stream_copy::write_stream_to_run_list;
 
-        // ... (in write_file) ...
         // Stream content to disk
         if !blocks.0.is_empty() {
             write_stream_to_run_list(self.io, self.meta, source, &blocks, size)?;
         }
 
         let inode_data = if self.meta.features.has_extents {
-            // Build extents for Ext
-            use crate::types::ExtExtent;
-
-            // Use MappedRunList to generate runs with logical offsets
             let mapped_runs = MappedRunList::from_run_list(&blocks, 0);
-
-            // Convert to ExtExtents using the From impl
             let extents: Vec<ExtExtent> = mapped_runs
                 .iter()
                 .map(|run| ExtExtent::from(*run))
@@ -296,12 +293,11 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             ExtInode::from_attr(
                 attr,
                 total_size as u64,
-                if attr.dir { 2 } else { 1 },
+                if attr.is_dir() { 2 } else { 1 },
                 (blocks.total_units() as u32) * (block_size.div_ceil(512)),
                 &extents,
             )
         } else {
-            // Build Block Map for Ext2/3
             use crate::utils::block_map::build_block_map;
             let blocks_vec = blocks.to_units();
             let map = build_block_map(self.io, &mut self.allocator, self.meta, &blocks_vec)?;
@@ -309,7 +305,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             ExtInode::from_attr_block_map(
                 attr,
                 total_size as u64,
-                if attr.dir { 2 } else { 1 },
+                if attr.is_dir() { 2 } else { 1 },
                 (blocks.total_units() as u32) * (block_size.div_ceil(512)),
                 &map,
             )
@@ -327,6 +323,87 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
+    fn write_symlink(
+        &mut self,
+        name: &str,
+        target: &str,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        let target_bytes = target.as_bytes();
+        let target_len = target_bytes.len();
+
+        let mut symlink_attr = attr.clone();
+        symlink_attr.kind = NodeKind::Symlink;
+
+        if target_len < 60 {
+            // Fast symlink (< 60 bytes): target stored in i_block, 0 data blocks allocated
+            let handle = self
+                .allocator
+                .allocate(self.io, 0)
+                .map_err(|_| FsInjectorError::Other("Inode allocation failed"))?;
+            let inode = handle.inode;
+
+            let inode_data = ExtInode::new_fast_symlink(&symlink_attr, target);
+            let inode_buf = inode_data.to_bytes();
+            ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+
+            let entry = ExtDirEntry::from_attr(inode, name, &symlink_attr);
+            if let Some(ctx) = self.stack.last_mut() {
+                entry.to_raw_buffer(&mut ctx.buf);
+            }
+        } else {
+            // Slow symlink (>= 60 bytes): allocate data block(s) and stream target payload
+            let block_size = self.meta.block_size;
+            let blocks_needed = (target_len as u32).div_ceil(block_size) as usize;
+
+            let handle = self
+                .allocator
+                .allocate(self.io, blocks_needed)
+                .map_err(|_| FsInjectorError::Other("Block allocation failed"))?;
+            let inode = handle.inode;
+            let blocks = handle.blocks;
+
+            let mut target_data = target_bytes.to_vec();
+            let mut target_io = rimio::prelude::MemRimIO::new(&mut target_data);
+            use crate::core::utils::stream_copy::write_stream_to_run_list;
+            write_stream_to_run_list(
+                self.io,
+                self.meta,
+                &mut target_io,
+                &blocks,
+                target_len as u64,
+            )?;
+
+            let blocks_512 = (blocks.total_units() as u32) * (block_size.div_ceil(512));
+
+            let inode_data = if self.meta.features.has_extents {
+                let mapped_runs = MappedRunList::from_run_list(&blocks, 0);
+                let extents: Vec<ExtExtent> = mapped_runs
+                    .iter()
+                    .map(|run| ExtExtent::from(*run))
+                    .collect();
+
+                ExtInode::from_attr(&symlink_attr, target_len as u64, 1, blocks_512, &extents)
+            } else {
+                use crate::utils::block_map::build_block_map;
+                let blocks_vec = blocks.to_units();
+                let map = build_block_map(self.io, &mut self.allocator, self.meta, &blocks_vec)?;
+
+                ExtInode::from_attr_block_map(&symlink_attr, target_len as u64, 1, blocks_512, &map)
+            };
+
+            let inode_buf = inode_data.to_bytes();
+            ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+
+            let entry = ExtDirEntry::from_attr(inode, name, &symlink_attr);
+            if let Some(ctx) = self.stack.last_mut() {
+                entry.to_raw_buffer(&mut ctx.buf);
+            }
+        }
+
+        Ok(())
+    }
+
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(mut ctx) = self.stack.pop() {
             // Pad directory block so last entry spans to end
@@ -336,11 +413,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                 self.write_block(run.start as u32, &ctx.buf)?;
             }
 
-            // Re-write this directory's inode with correct link count
-            // Link count = 2 (for . and ..) + child_dir_count (subdirs pointing back via ..)
+            // Re-write this directory's inode with correct link count and PRESERVED attributes
             let links = 2 + ctx.child_dir_count;
             let inode_data = ExtInode::from_attr(
-                &FileAttributes::new_dir(),
+                &ctx.attr,
                 self.meta.block_size as u64,
                 links,
                 self.meta.block_size.div_ceil(512),
@@ -371,8 +447,11 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
 #[cfg(test)]
 mod tests {
+    use crate::checker::ExtChecker;
+    use crate::formatter::ExtFormatter;
     use crate::meta::ExtFeatureSet;
     use crate::prelude::*;
+    use crate::resolver::ExtResolver;
 
     const SIZE_MB: u64 = 32;
     const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
@@ -467,5 +546,268 @@ mod tests {
         let exotic_meta =
             ExtMeta::new_custom(features, SIZE_BYTES, Some("EXOTIC"), None, 4096, 8192);
         test_injector_scenario(exotic_meta, "Exotic (No Extents, 64bit)");
+    }
+
+    #[test]
+    fn test_ext_dir_attributes_preserved() {
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_DIR_ATTR"));
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+
+        ExtFormatter::new(&mut io, &meta)
+            .format(false)
+            .expect("Format failed");
+
+        let mut injector = ExtInjector::new(&mut io, &meta);
+
+        let mut custom_dir_attr = FileAttributes::new_dir();
+        custom_dir_attr.mode = Some(0o700);
+        custom_dir_attr.uid = Some(1001);
+        custom_dir_attr.gid = Some(1002);
+
+        let tree = FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: vec![FsNode::Dir {
+                name: "private".to_string(),
+                attr: custom_dir_attr,
+                children: vec![FsNode::File {
+                    name: "secret.txt".to_string(),
+                    content: b"my secret".to_vec(),
+                    attr: FileAttributes::new_file(),
+                }],
+            }],
+        };
+
+        injector.inject_tree(&tree).unwrap();
+
+        let mut resolver = ExtResolver::new(&mut io, &meta);
+        let read_attr = resolver.read_attributes("/private").unwrap();
+
+        assert_eq!(
+            read_attr.mode,
+            Some(0o700),
+            "Directory mode must be preserved across flush"
+        );
+        assert_eq!(
+            read_attr.uid,
+            Some(1001),
+            "Directory UID must be preserved across flush"
+        );
+        assert_eq!(
+            read_attr.gid,
+            Some(1002),
+            "Directory GID must be preserved across flush"
+        );
+    }
+
+    #[test]
+    fn test_ext_symlink_fast_and_slow() {
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_SYMLINK"));
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+
+        ExtFormatter::new(&mut io, &meta)
+            .format(false)
+            .expect("Format failed");
+
+        let mut injector = ExtInjector::new(&mut io, &meta);
+
+        let short_target = "usr/bin/demo"; // 12 bytes < 60
+        let long_target =
+            "this/is/a/very/long/symlink/target/path/that/is/at/least/60/bytes/long/for/testing"; // 82 bytes >= 60
+        let dangling_target = "nonexistent-target";
+
+        let mut setuid_attr = FileAttributes::new_file();
+        setuid_attr.mode = Some(0o4755);
+
+        let mut setgid_dir_attr = FileAttributes::new_dir();
+        setgid_dir_attr.mode = Some(0o2775);
+
+        let mut sticky_attr = FileAttributes::new_dir();
+        sticky_attr.mode = Some(0o1777);
+
+        let mut no_access_attr = FileAttributes::new_file();
+        no_access_attr.mode = Some(0o0000);
+
+        let tree = FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: vec![
+                FsNode::Symlink {
+                    name: "short-link".to_string(),
+                    target: short_target.to_string(),
+                    attr: FileAttributes::new_symlink(),
+                },
+                FsNode::Symlink {
+                    name: "long-link".to_string(),
+                    target: long_target.to_string(),
+                    attr: FileAttributes::new_symlink(),
+                },
+                FsNode::Symlink {
+                    name: "dangling-link".to_string(),
+                    target: dangling_target.to_string(),
+                    attr: FileAttributes::new_symlink(),
+                },
+                FsNode::File {
+                    name: "setuid-demo".to_string(),
+                    content: b"setuid binary".to_vec(),
+                    attr: setuid_attr,
+                },
+                FsNode::Dir {
+                    name: "setgid-dir".to_string(),
+                    children: vec![],
+                    attr: setgid_dir_attr,
+                },
+                FsNode::Dir {
+                    name: "tmp-like".to_string(),
+                    children: vec![],
+                    attr: sticky_attr,
+                },
+                FsNode::File {
+                    name: "no-access".to_string(),
+                    content: b"".to_vec(),
+                    attr: no_access_attr,
+                },
+            ],
+        };
+
+        injector.inject_tree(&tree).unwrap();
+
+        // 1. Check with ExtChecker
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert!(!report.has_error(), "Checker errors: {:?}", report.findings);
+
+        // 2. Read back with ExtResolver
+        let mut resolver = ExtResolver::new(&mut io, &meta);
+
+        assert_eq!(resolver.read_link("/short-link").unwrap(), short_target);
+        assert_eq!(resolver.read_link("/long-link").unwrap(), long_target);
+        assert_eq!(
+            resolver.read_link("/dangling-link").unwrap(),
+            dangling_target
+        );
+
+        let setuid_read = resolver.read_attributes("/setuid-demo").unwrap();
+        assert_eq!(setuid_read.mode, Some(0o4755));
+
+        let setgid_read = resolver.read_attributes("/setgid-dir").unwrap();
+        assert_eq!(setgid_read.mode, Some(0o2775));
+
+        let tmp_read = resolver.read_attributes("/tmp-like").unwrap();
+        assert_eq!(tmp_read.mode, Some(0o1777));
+
+        let no_access_read = resolver.read_attributes("/no-access").unwrap();
+        assert_eq!(no_access_read.mode, Some(0o0000));
+    }
+
+    #[test]
+    fn test_ext_32bit_uid_gid() {
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_32BIT_ID"));
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+
+        ExtFormatter::new(&mut io, &meta)
+            .format(false)
+            .expect("Format failed");
+
+        let mut injector = ExtInjector::new(&mut io, &meta);
+
+        let mut high_id_attr = FileAttributes::new_file();
+        high_id_attr.uid = Some(70000); // 0x11170 -> lo: 0x1170, hi: 0x0001
+        high_id_attr.gid = Some(80000); // 0x13880 -> lo: 0x3880, hi: 0x0001
+        high_id_attr.mode = Some(0o640);
+
+        let mut high_id_symlink = FileAttributes::new_symlink();
+        high_id_symlink.uid = Some(90000);
+        high_id_symlink.gid = Some(95000);
+
+        let tree = FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: vec![
+                FsNode::File {
+                    name: "app.bin".to_string(),
+                    content: b"app binary".to_vec(),
+                    attr: high_id_attr,
+                },
+                FsNode::Symlink {
+                    name: "app.link".to_string(),
+                    target: "app.bin".to_string(),
+                    attr: high_id_symlink,
+                },
+            ],
+        };
+
+        injector.inject_tree(&tree).unwrap();
+
+        let mut resolver = ExtResolver::new(&mut io, &meta);
+
+        let file_attr = resolver.read_attributes("/app.bin").unwrap();
+        assert_eq!(file_attr.uid, Some(70000));
+        assert_eq!(file_attr.gid, Some(80000));
+        assert_eq!(file_attr.mode, Some(0o640));
+
+        let link_attr = resolver.read_attributes("/app.link").unwrap();
+        assert_eq!(link_attr.uid, Some(90000));
+        assert_eq!(link_attr.gid, Some(95000));
+        assert_eq!(resolver.read_link("/app.link").unwrap(), "app.bin");
+    }
+
+    #[test]
+    fn test_ext2_ext3_symlinks() {
+        for (meta, name) in [
+            (ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2_SYM")), "Ext2"),
+            (ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3_SYM")), "Ext3"),
+        ] {
+            let mut buf = vec![0u8; SIZE_BYTES as usize];
+            let mut io = MemRimIO::new(&mut buf);
+
+            ExtFormatter::new(&mut io, &meta)
+                .format(false)
+                .expect("Format failed");
+
+            let mut injector = ExtInjector::new(&mut io, &meta);
+
+            let short_target = "bin/sh";
+            let long_target =
+                "var/lib/docker/overlay2/1234567890abcdef1234567890abcdef1234567890abcdef/merged";
+
+            let tree = FsNode::Container {
+                attr: FileAttributes::new_dir(),
+                children: vec![
+                    FsNode::Symlink {
+                        name: "sh".to_string(),
+                        target: short_target.to_string(),
+                        attr: FileAttributes::new_symlink(),
+                    },
+                    FsNode::Symlink {
+                        name: "docker".to_string(),
+                        target: long_target.to_string(),
+                        attr: FileAttributes::new_symlink(),
+                    },
+                ],
+            };
+
+            injector.inject_tree(&tree).unwrap();
+
+            let mut checker = ExtChecker::new(&mut io, &meta);
+            let report = checker.check_all().unwrap();
+            assert!(
+                !report.has_error(),
+                "{name} Checker errors: {:?}",
+                report.findings
+            );
+
+            let mut resolver = ExtResolver::new(&mut io, &meta);
+            assert_eq!(
+                resolver.read_link("/sh").unwrap(),
+                short_target,
+                "{name} fast symlink"
+            );
+            assert_eq!(
+                resolver.read_link("/docker").unwrap(),
+                long_target,
+                "{name} slow symlink"
+            );
+        }
     }
 }
