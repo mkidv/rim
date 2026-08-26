@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: MIT
-
-use crate::{DEFAULT_SECTOR_SIZE, errors::*, gpt, mbr};
+#[cfg(feature = "alloc")]
+use crate::mbr;
+use crate::{DEFAULT_SECTOR_SIZE, errors::*, gpt};
 use rimio::prelude::*;
 
 /// Report struct for truncate_image (optional, allows nice reporting)

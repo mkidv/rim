@@ -6,6 +6,7 @@ use alloc::vec;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use crate::DEFAULT_SECTOR_SIZE;
 use crate::guids::GptPartitionKind;
 use crate::{errors::*, io_ext::RimIOLbaExt};

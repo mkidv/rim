@@ -22,18 +22,18 @@ ext = ["alloc", "dep:rimfs-ext"]
 ntfs = ["alloc", "dep:rimfs-ntfs"]
 
 [dependencies]
-rimfs-core.workspace = true
-rimfs-fat = { workspace = true, optional = true }
-rimfs-exfat = { workspace = true, optional = true }
-rimfs-ext = { workspace = true, optional = true }
-rimfs-ntfs = { workspace = true, optional = true }
+rimfs-core = { path = "../rimfs-core", version = "0.6.1", default-features = false }
+rimfs-fat = { path = "../rimfs-fat", version = "0.6.1", default-features = false, optional = true }
+rimfs-exfat = { path = "../rimfs-exfat", version = "0.6.1", default-features = false, optional = true }
+rimfs-ext = { path = "../rimfs-ext", version = "0.6.1", default-features = false, optional = true }
+rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.6.1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3.20.0"
 fatfs = "0.3"
 fscommon = "0.1"
-rimio = { workspace = true, features = ["mmap", "std"] }
+rimio = { path = "../rimio", version = "0.6.1", features = ["mmap", "std"] }
 
 [package.metadata.docs.rs]
 features = ["std"]

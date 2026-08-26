@@ -49,6 +49,7 @@ macro_rules! define_partition_types {
                 #[doc = $desc]
                 pub const [<GPT_PARTITION_TYPE_ $name:upper>]: [u8; 16] = $guid;
 
+                #[cfg(feature = "alloc")]
                 #[doc = concat!("Returns the offset of the first GPT partition of type: ", $desc)]
                 pub fn [<detect_ $name:lower _partition_offset>](
                     io: &mut dyn rimio::prelude::RimIO,
