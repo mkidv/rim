@@ -273,6 +273,46 @@ impl NtfsMeta {
         let mft_bytes = self.reserved_mft_records * self.mft_record_size as u64;
         mft_bytes.div_ceil(self.bytes_per_cluster as u64)
     }
+
+    /// Encoded clusters per index record field as used in the BPB and $INDEX_ROOT header.
+    /// Positive value indicates number of clusters; negative value indicates 2^(-val) bytes.
+    pub fn clusters_per_index_record_raw(&self) -> i8 {
+        if self.index_record_size >= self.bytes_per_cluster {
+            (self.index_record_size / self.bytes_per_cluster) as i8
+        } else {
+            -(self.index_record_size.trailing_zeros() as i8)
+        }
+    }
+
+    /// Calculate the Virtual Cluster Number (VCN) for a given index block index (0-indexed).
+    /// If index_record_size >= bytes_per_cluster, VCN is in filesystem cluster units.
+    /// If index_record_size < bytes_per_cluster, VCN is in 512-byte sectors per NTFS specification.
+    pub fn index_block_to_vcn(&self, block_index: u64) -> u64 {
+        if self.index_record_size >= self.bytes_per_cluster {
+            block_index * (self.index_record_size / self.bytes_per_cluster) as u64
+        } else {
+            (block_index * self.index_record_size as u64) / self.bytes_per_sector as u64
+        }
+    }
+
+    /// Convert a VCN back to an index block index (0-indexed).
+    pub fn vcn_to_index_block(&self, vcn: u64) -> Option<u64> {
+        let vcn_per_block = self.index_block_to_vcn(1);
+        if vcn_per_block == 0 {
+            return None;
+        }
+        if vcn.is_multiple_of(vcn_per_block) {
+            Some(vcn / vcn_per_block)
+        } else {
+            None
+        }
+    }
+
+    /// Total clusters needed to allocate N index blocks in $INDEX_ALLOCATION.
+    pub fn total_clusters_for_index_blocks(&self, block_count: usize) -> u64 {
+        let total_bytes = block_count as u64 * self.index_record_size as u64;
+        total_bytes.div_ceil(self.bytes_per_cluster as u64)
+    }
 }
 
 impl FsMeta<u64> for NtfsMeta {

@@ -4,6 +4,23 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-08-27
+### Fixed
+*   **NTFS Root Directory Index Stream Corruption & Duplicate Terminator (`rimfs-ntfs`)**:
+    *   Fixed `NtfsMftRecord::new_dir` to avoid appending duplicate `LAST_ENTRY` terminators to already-terminated `$INDEX_ROOT` entry streams, resolving `Corrupt index entry stream in inode 5` and secondary `$Secure` path lookup failures in `ntfsfix`.
+    *   Fixed `IndexTreeBuilder::build` child pointer VCN calculations: replaced raw block ordinals (`0, 1, 2...`) with cluster-scaled VCNs (`0, 8, 16...` for 512B clusters with 4KB INDX blocks).
+    *   Added generic VCN conversion and index cluster sizing helpers to `NtfsMeta` (`clusters_per_index_record_raw`, `index_block_to_vcn`, `vcn_to_index_block`, `total_clusters_for_index_blocks`).
+    *   Fixed `NtfsResolver` INDX block parsing: corrected `IndexNodeHeader` offset to 24 (`core::mem::size_of::<IndexRecordHeader>()`), switched from `apply_usa_fixup` to `decode_usa_fixup`, and added entry length bounds safety.
+
+### Added
+*   **Deep NTFS B-Tree & Allocation Structural Verification (`NtfsChecker`)**:
+    *   Added `check_directory_index` for Inode 5 (`$Root`) and recursive directory traversal in `check_cross_reference`.
+    *   `IDX.ROOT`: Structural verification of `$INDEX_ROOT:$I30` (8-byte entry alignment, bounds, child VCNs, strict termination, and rejection of trailing entries).
+    *   `IDX.ALLOC`: Validates `$INDEX_ALLOCATION:$I30` INDX records, USA fixup integrity, and header VCN agreement with calculated cluster VCNs.
+    *   `IDX.BITMAP`: Validates `$BITMAP:$I30` bit allocation against physical INDX records.
+    *   `IDX.VCN` & `IDX.CROSSREF`: Cross-references child VCN pointers to ensure every referenced subnode resolves to a valid, unique INDX block.
+    *   Added comprehensive regression tests for multi-block index trees (512B/4KB, 4KB/4KB geometries) and a deliberate index corruption tripwire test.
+
 ## [0.6.1] - 2026-08-27
 ### Added
 *   **End-to-End POSIX Metadata & Symlink Engine (`rimfs-core`, `rimfs-ext`)**:

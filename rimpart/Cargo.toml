@@ -21,7 +21,7 @@ uefi = ["rimio/uefi"]
 [dependencies]
 crc32fast = { version = "1.4.2", default-features = false }
 paste = "1.0.15"
-rimio = { path = "../rimio", version = "0.6.1", default-features = false }
+rimio = { path = "../rimio", version = "0.6.2", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }

@@ -25,7 +25,7 @@
 
 ```toml
 [dependencies]
-rimfs-ntfs = { version = "0.6.1", default-features = false, features = ["std"] }
+rimfs-ntfs = { version = "0.6.2", default-features = false, features = ["std"] }
 ```
 
 ```rust

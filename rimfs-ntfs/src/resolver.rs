@@ -211,20 +211,15 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
                     continue; // Unallocated or invalid block
                 }
 
-                // Apply USA
+                // Decode USA fixup
                 let mut block = chunk.to_vec();
-                crate::utils::apply_usa_fixup(&mut block, self.meta.bytes_per_sector as usize);
+                if !crate::utils::decode_usa_fixup(&mut block, self.meta.bytes_per_sector as usize)
+                {
+                    continue; // Invalid USA fixup
+                }
 
-                // Parse Node Header
-                // Calculate offset based on USA in Index Record Header
-                let index_header = IndexRecordHeader::read_from_prefix(&block)
-                    .map_err(|_| FsResolverError::Invalid("Failed to read Index Record Header"))?
-                    .0;
-
-                let usa_end =
-                    index_header.usa_offset as usize + index_header.usa_count as usize * 2;
-                let node_header_offset = (usa_end + 7) & !7; // Align to 8 bytes
-
+                // In standard NTFS INDX records, IndexNodeHeader is at offset 24 (immediately after IndexRecordHeader)
+                let node_header_offset = core::mem::size_of::<IndexRecordHeader>();
                 if node_header_offset < block.len() {
                     self.parse_entries_from_node_header(
                         &block[node_header_offset..],
@@ -257,12 +252,17 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
         let mut offset = start_offset;
 
         while offset < end_offset {
+            if offset + 16 > buf.len() {
+                break;
+            }
+
             let entry_header = IndexEntryHeader::read_from_prefix(&buf[offset..])
                 .map_err(|_| FsResolverError::Invalid("Failed to read Index Entry Header"))?
                 .0;
 
-            let _elen = entry_header.entry_length;
-            let _eflags = entry_header.flags;
+            if entry_header.entry_length < 16 {
+                break;
+            }
 
             // Last entry marker
             if (entry_header.flags & IndexEntryFlags::LAST_ENTRY.bits()) != 0 {

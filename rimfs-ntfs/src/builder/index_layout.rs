@@ -41,10 +41,11 @@ impl IndexTreeBuilder {
 
             // Check if adding this entry + End Entry (16) overflows the block
             if current_len + entry_len + 16 > max_payload {
-                let vcn = blocks.len() as u64;
+                let block_index = blocks.len() as u64;
+                let vcn = meta.index_block_to_vcn(block_index);
                 blocks.push(current_block_entries);
 
-                // Promote current entry as pivot to the Root
+                // Promote current entry as pivot to the Root with child VCN
                 root_entries_indices.push((i, vcn));
 
                 // Reset for next block
@@ -57,18 +58,18 @@ impl IndexTreeBuilder {
         }
 
         // Remaining entries go to last block
-        let last_block_vcn = blocks.len() as u64;
+        let last_block_index = blocks.len() as u64;
+        let last_block_vcn = meta.index_block_to_vcn(last_block_index);
         blocks.push(current_block_entries);
 
         // --- 1. Build Allocation Blocks (Raw Bytes) ---
-        let clusters_per_block = meta.index_record_size / meta.bytes_per_cluster;
-        let total_clusters = blocks.len() as u64 * clusters_per_block as u64;
+        let total_clusters = meta.total_clusters_for_index_blocks(blocks.len());
 
         let mut allocation_blocks = Vec::with_capacity(blocks.len());
 
         for (i, block_entries) in blocks.iter().enumerate() {
-            let vcn = i as u64;
-            let mut record = NtfsIndexRecord::new(vcn * clusters_per_block as u64, false);
+            let vcn = meta.index_block_to_vcn(i as u64);
+            let mut record = NtfsIndexRecord::new(vcn, false);
             for entry in block_entries {
                 record.add_entry(entry.clone());
             }

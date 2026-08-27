@@ -46,15 +46,11 @@ impl<'a> NtfsMftRecord<'a> {
             NtfsFileNameNamespace::Win32AndDos,
         ));
 
-        let clusters_per_index = if meta.index_record_size >= meta.bytes_per_cluster {
-            (meta.index_record_size / meta.bytes_per_cluster) as i8
-        } else {
-            -(meta.index_record_size.trailing_zeros() as i8)
-        };
+        let clusters_per_index = meta.clusters_per_index_record_raw();
 
-        // Ensure the caller provided a terminator; if not, add it.
+        // Ensure the caller provided a terminator; if buffer is empty, provide a default terminator.
         let mut entries = index_entries;
-        if entries.len() < 16 || entries[12] != 0x02 {
+        if entries.is_empty() {
             entries.extend_from_slice(&NtfsAttribute::index_end_marker());
         }
 

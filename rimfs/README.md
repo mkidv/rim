@@ -13,7 +13,7 @@ It provides an ergonomic, feature-gated API while implementations are cleanly se
 
 ```toml
 [dependencies]
-rimfs = { version = "0.6.1", default-features = false, features = ["std", "fat"] }
+rimfs = { version = "0.6.2", default-features = false, features = ["std", "fat"] }
 ```
 
 ## Cargo Features

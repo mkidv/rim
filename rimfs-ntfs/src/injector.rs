@@ -390,12 +390,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 let last_entry = crate::types::IndexEntryHeader::new(0, 0, true);
                 buf.extend_from_slice(zerocopy::IntoBytes::as_bytes(&last_entry));
 
-                let clusters_per_index =
-                    if self.meta.index_record_size >= self.meta.bytes_per_cluster {
-                        (self.meta.index_record_size / self.meta.bytes_per_cluster) as i8
-                    } else {
-                        -(self.meta.index_record_size.trailing_zeros() as i8)
-                    };
+                let clusters_per_index = self.meta.clusters_per_index_record_raw();
 
                 record.add_attribute(NtfsAttribute::index_root_i30(
                     buf,
@@ -407,12 +402,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 let layout =
                     IndexTreeBuilder::build(self.meta, entries).map_err(FsInjectorError::IO)?;
 
-                let clusters_per_index =
-                    if self.meta.index_record_size >= self.meta.bytes_per_cluster {
-                        (self.meta.index_record_size / self.meta.bytes_per_cluster) as i8
-                    } else {
-                        -(self.meta.index_record_size.trailing_zeros() as i8)
-                    };
+                let clusters_per_index = self.meta.clusters_per_index_record_raw();
 
                 record.add_attribute(NtfsAttribute::index_root_i30(
                     layout.root_entries,
