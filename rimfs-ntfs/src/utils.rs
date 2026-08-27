@@ -127,12 +127,12 @@ fn encode_variable_int_to_buf(value: i64, signed: bool, buf: &mut [u8; 8]) -> us
         }
     } else {
         for (i, byte) in buf.iter_mut().enumerate().take(8) {
-            if v == 0 {
-                break;
-            }
             *byte = (v & 0xFF) as u8;
             v >>= 8;
             len = i + 1;
+            if v == 0 && (*byte & 0x80) == 0 {
+                break;
+            }
         }
     }
 
@@ -347,6 +347,16 @@ mod tests {
         assert!(len > 0);
         // First byte is header
         assert_eq!(run[0] & 0x0F, 1); // Length needs 1 byte
+
+        // Length 128 (0x80) has high bit set, must encode as 2 bytes to stay positive
+        let (run128, len128) = encode_data_run(4101, 128);
+        assert_eq!(run128[0] & 0x0F, 2, "Length 128 must use 2 bytes (0x80, 0x00)");
+        assert_eq!(run128[1], 0x80);
+        assert_eq!(run128[2], 0x00);
+        let decoded = decode_data_runs(&run128[..len128]);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].length, 128);
+        assert_eq!(decoded[0].lcn, 4101);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 
 ```toml
 [dependencies]
-rimfs-fat = { version = "0.6.2", default-features = false, features = ["std"] }
+rimfs-fat = { version = "0.6.3", default-features = false, features = ["std"] }
 ```
 
 ```rust

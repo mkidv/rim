@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-rimfs-exfat = { version = "0.6.2", default-features = false, features = ["std"] }
+rimfs-exfat = { version = "0.6.3", default-features = false, features = ["std"] }
 ```
 
 ```rust

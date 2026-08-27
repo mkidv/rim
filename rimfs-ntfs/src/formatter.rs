@@ -102,8 +102,8 @@ impl<'a, IO: RimIO + ?Sized> NtfsFormatter<'a, IO> {
     }
 
     fn write_backup_boot_sector(&mut self) -> FsFormatterResult<()> {
-        // NTFS backup boot sector lives in the last sector of the volume.
-        let last_sector_offset = (self.meta.total_sectors - 1) * self.meta.bytes_per_sector as u64;
+        // NTFS backup boot sector lives in the last sector of the volume (sector total_sectors).
+        let last_sector_offset = self.meta.backup_boot_sector_offset();
         let mut boot_copy = vec![0u8; self.meta.bytes_per_sector as usize];
         self.io.read_at(0, &mut boot_copy)?;
         self.io.write_at(last_sector_offset, &boot_copy)?;
@@ -282,11 +282,11 @@ impl<'a, IO: RimIO + ?Sized> NtfsFormatter<'a, IO> {
         let log_size = (2 * 1024 * 1024).min(self.meta.volume_size_bytes / 10);
         let clusters = log_size.div_ceil(self.meta.bytes_per_cluster as u64);
 
-        // Your layout reserves $LogFile at LCN=3 (keep if consistent with boot/system area).
-        let handle = crate::allocator::NtfsHandle::from_range(3, clusters);
+        // $LogFile starts immediately after MFTMirr clusters (self.meta.logfile_lcn)
+        let handle = crate::allocator::NtfsHandle::from_range(self.meta.logfile_lcn, clusters);
 
-        // Zero-init content
-        let pattern = vec![0u8; self.meta.bytes_per_cluster as usize];
+        // 0xFF-init content (standard empty NTFS journal)
+        let pattern = vec![0xFFu8; self.meta.bytes_per_cluster as usize];
         let offset = self.meta.lcn_to_offset(handle.start_lcn);
         for i in 0..clusters {
             self.io
@@ -295,16 +295,8 @@ impl<'a, IO: RimIO + ?Sized> NtfsFormatter<'a, IO> {
 
         // IMPORTANT: $LogFile must have non-resident $DATA, not data_empty().
         let dataruns = Self::encode_runs_to_dataruns(&handle.runs);
-        let mut record =
+        let record =
             NtfsMftRecord::new_logfile(self.meta, dataruns, log_size, SECURITY_ID_EVERYONE);
-
-        record.add_attribute(NtfsAttribute::non_resident(
-            AttributeType::Data,
-            "",
-            self.meta,
-            &handle.runs,
-            log_size,
-        ));
 
         let raw = record.to_raw_buffer(self.meta)?;
         mft::write_record(self.io, self.meta, MFT_RECORD_LOGFILE, &raw)

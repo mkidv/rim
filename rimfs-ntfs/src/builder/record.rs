@@ -61,11 +61,9 @@ impl<'a> NtfsMftRecord<'a> {
             1024, // Optimized default, will be updated during serialization
         );
         // Spec: "the sequence number for each of the system files is always equal to their mft record number"
-        // This applies to the first 12 records (0-11).
+        // This applies to the first 12 records (0-11), with record 0 using sequence number 1.
         if record_number < 12 {
-            // We use max(1) for record 0 to ensure a non-zero sequence number,
-            // as seq=0 usually indicates a deleted/free record.
-            header.sequence_number = record_number as u16;
+            header.sequence_number = (record_number as u16).max(1);
         } else {
             // Records 12+ (including Extend children at 24+) start with sequence 1.
             header.sequence_number = 1;

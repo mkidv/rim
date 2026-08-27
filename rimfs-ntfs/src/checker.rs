@@ -527,15 +527,25 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             .read_at(0, &mut boot_buf)
             .map_err(FsCheckerError::IO)?;
 
-        let boot = NtfsBootSector::read_from_bytes(&boot_buf)
-            .map_err(|_| FsCheckerError::Invalid("Failed to read NTFS boot sector"))?;
+        let boot = match NtfsBootSector::read_from_bytes(&boot_buf) {
+            Ok(b) => b,
+            Err(_) => {
+                rep.push(Finding::err(
+                    "BOOT.PRIMARY",
+                    "Failed to parse primary NTFS boot sector",
+                ));
+                return Ok(());
+            }
+        };
 
+        let mut primary_valid = true;
         let oem_id = boot.oem_id;
         if &oem_id != b"NTFS    " {
             rep.push(Finding::err(
                 "BOOT.OEM",
                 format!("Invalid OEM ID: {:?}", oem_id),
             ));
+            primary_valid = false;
         } else {
             rep.push(Finding::info("BOOT.OEM", "NTFS OEM ID OK"));
         }
@@ -546,6 +556,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                 "BOOT.SIG",
                 format!("Invalid boot signature: 0x{:04X}", end_marker),
             ));
+            primary_valid = false;
         } else {
             rep.push(Finding::info("BOOT.SIG", "Boot signature 0xAA55 OK"));
         }
@@ -569,11 +580,88 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                 "BOOT.SPC",
                 format!("Sectors per cluster {spc} is not a power of 2"),
             ));
+            primary_valid = false;
         } else {
             rep.push(Finding::info(
                 "BOOT.SPC",
                 format!("Sectors per cluster: {spc}"),
             ));
+        }
+
+        if primary_valid {
+            rep.push(Finding::info(
+                "BOOT.PRIMARY",
+                "Primary NTFS boot sector valid",
+            ));
+        }
+
+        // Check alternate (backup) boot sector
+        let backup_offset = self.meta.backup_boot_sector_offset();
+        let mut backup_buf = [0u8; 512];
+        match self.io.read_at(backup_offset, &mut backup_buf) {
+            Ok(_) => {
+                let backup_boot = match NtfsBootSector::read_from_bytes(&backup_buf) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        rep.push(Finding::err(
+                            "BOOT.BACKUP",
+                            format!(
+                                "Failed to parse alternate NTFS boot sector at offset {backup_offset}"
+                            ),
+                        ));
+                        return Ok(());
+                    }
+                };
+
+                let mut backup_valid = true;
+                if &backup_boot.oem_id != b"NTFS    " {
+                    rep.push(Finding::err(
+                        "BOOT.BACKUP",
+                        format!(
+                            "Alternate boot sector invalid OEM ID: {:?}",
+                            backup_boot.oem_id
+                        ),
+                    ));
+                    backup_valid = false;
+                }
+                let backup_end_marker = backup_boot.end_marker;
+                if backup_end_marker != 0xAA55 {
+                    rep.push(Finding::err(
+                        "BOOT.BACKUP",
+                        format!(
+                            "Alternate invalid boot signature: 0x{:04X}",
+                            backup_end_marker
+                        ),
+                    ));
+                    backup_valid = false;
+                }
+
+                if backup_valid {
+                    rep.push(Finding::info(
+                        "BOOT.BACKUP",
+                        "Alternate NTFS boot sector valid",
+                    ));
+                }
+
+                // Verify primary and alternate match
+                if boot_buf == backup_buf {
+                    rep.push(Finding::info(
+                        "BOOT.MIRROR",
+                        "Primary and alternate boot sectors match",
+                    ));
+                } else {
+                    rep.push(Finding::err(
+                        "BOOT.MIRROR",
+                        "Primary and alternate boot sectors do not match",
+                    ));
+                }
+            }
+            Err(e) => {
+                rep.push(Finding::err(
+                    "BOOT.BACKUP",
+                    format!("Failed to read alternate boot sector at offset {backup_offset}: {e}"),
+                ));
+            }
         }
 
         Ok(())
@@ -622,20 +710,81 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             (MFT_RECORD_BOOT, "$Boot"),
             (MFT_RECORD_UPCASE, "$UpCase"),
         ] {
-            match mft::read_record(self.io, self.meta, rec_num) {
-                Ok(_) => {
-                    rep.push(Finding::info(
-                        "MFT.REC",
-                        format!("System record {rec_num} ({name}) readable"),
-                    ));
-                }
-                Err(e) => {
+            let offset = self.meta.mft_record_offset(rec_num);
+            let record_size = self.meta.mft_record_size as usize;
+            let sector_size = self.meta.bytes_per_sector as usize;
+
+            let mut raw = vec![0u8; record_size];
+            if let Err(e) = self.io.read_at(offset, &mut raw) {
+                rep.push(Finding::err(
+                    "MFT.REC",
+                    format!("Failed to read raw {name} (record {rec_num}): {e}"),
+                ));
+                continue;
+            }
+
+            if &raw[0..4] != b"FILE" {
+                rep.push(Finding::err(
+                    "MFT.SIG",
+                    format!("Record {rec_num} ({name}) invalid signature: {:?}", &raw[0..4]),
+                ));
+                continue;
+            }
+
+            let usa_ofs = u16::from_le_bytes([raw[4], raw[5]]) as usize;
+            let usa_cnt = u16::from_le_bytes([raw[6], raw[7]]) as usize;
+            let expected_usa_cnt = (record_size / sector_size) + 1;
+
+            if usa_cnt != expected_usa_cnt {
+                rep.push(Finding::err(
+                    "MFT.USA",
+                    format!(
+                        "Record {rec_num} ({name}) invalid usa_count {usa_cnt} (expected {expected_usa_cnt})"
+                    ),
+                ));
+                continue;
+            }
+
+            if usa_ofs < 48 || usa_ofs + usa_cnt * 2 > record_size {
+                rep.push(Finding::err(
+                    "MFT.USA",
+                    format!("Record {rec_num} ({name}) invalid usa_offset {usa_ofs}"),
+                ));
+                continue;
+            }
+
+            let usn = u16::from_le_bytes([raw[usa_ofs], raw[usa_ofs + 1]]);
+            let mut trailer_ok = true;
+            for i in 1..usa_cnt {
+                let sector_end = i * sector_size - 2;
+                let trailer = u16::from_le_bytes([raw[sector_end], raw[sector_end + 1]]);
+                if trailer != usn {
                     rep.push(Finding::err(
-                        "MFT.REC",
-                        format!("Failed to read {name} (record {rec_num}): {e}"),
+                        "MFT.TRAILER",
+                        format!(
+                            "Record {rec_num} ({name}) sector {i} trailer 0x{trailer:04X} != USN 0x{usn:04X}"
+                        ),
                     ));
+                    trailer_ok = false;
+                    break;
                 }
             }
+            if !trailer_ok {
+                continue;
+            }
+
+            if !crate::utils::decode_usa_fixup(&mut raw, sector_size) {
+                rep.push(Finding::err(
+                    "MFT.USA",
+                    format!("Record {rec_num} ({name}) decode_usa_fixup failed"),
+                ));
+                continue;
+            }
+
+            rep.push(Finding::info(
+                "MFT.REC",
+                format!("System record {rec_num} ({name}) readable"),
+            ));
         }
 
         // Validate $UpCase stream
@@ -1237,6 +1386,165 @@ mod tests {
                 .any(|f| f.code == "IDX.ROOT" && f.sev == Severity::Error),
             "Findings must contain an ERROR with code IDX.ROOT: {:?}",
             bad_rep2.findings
+        );
+    }
+
+    #[test]
+    fn test_ntfs_boot_mirror_and_corruption_tripwire() {
+        let meta = NtfsMeta::new(20 * 1024 * 1024, Some("BOOT_TEST")).unwrap();
+        let mut buffer = vec![0u8; 20 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut buffer);
+
+        NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
+
+        // 1. Uncorrupted check must pass
+        let mut checker = NtfsChecker::new(&mut io, &meta);
+        let rep = checker.check_all().unwrap();
+        assert!(!rep.has_error(), "Findings had error: {:?}", rep.findings);
+        assert!(rep.findings.iter().any(|f| f.code == "BOOT.PRIMARY"));
+        assert!(rep.findings.iter().any(|f| f.code == "BOOT.BACKUP"));
+        assert!(rep.findings.iter().any(|f| f.code == "BOOT.MIRROR"));
+
+        // 2. Corrupt backup boot sector signature
+        let backup_offset = meta.backup_boot_sector_offset();
+        let mut corrupted_backup = [0u8; 512];
+        io.read_at(backup_offset, &mut corrupted_backup).unwrap();
+        corrupted_backup[510..512].copy_from_slice(&0x1234u16.to_le_bytes());
+        io.write_at(backup_offset, &corrupted_backup).unwrap();
+
+        let mut checker2 = NtfsChecker::new(&mut io, &meta);
+        let bad_rep = checker2.check_all().unwrap();
+        assert!(
+            bad_rep.has_error(),
+            "NtfsChecker MUST detect corrupted backup boot signature"
+        );
+        assert!(
+            bad_rep
+                .findings
+                .iter()
+                .any(|f| (f.code == "BOOT.BACKUP" || f.code == "BOOT.MIRROR")
+                    && f.sev == Severity::Error),
+            "Findings must contain an ERROR for backup boot: {:?}",
+            bad_rep.findings
+        );
+    }
+
+    #[test]
+    fn test_ntfs_mft_mst_usa_tripwires() {
+        let meta = NtfsMeta::new(20 * 1024 * 1024, Some("MST_TEST")).unwrap();
+        let mut buffer = vec![0u8; 20 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut buffer);
+
+        NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
+
+        let mft_rec0_offset = meta.mft_record_offset(0);
+        let mut rec0_orig = vec![0u8; meta.mft_record_size as usize];
+        io.read_at(mft_rec0_offset, &mut rec0_orig).unwrap();
+
+        // 1. Tripwire: corrupt usa_count to 1
+        let mut rec0_bad_cnt = rec0_orig.clone();
+        rec0_bad_cnt[6..8].copy_from_slice(&1u16.to_le_bytes());
+        io.write_at(mft_rec0_offset, &rec0_bad_cnt).unwrap();
+
+        let mut checker = NtfsChecker::new(&mut io, &meta);
+        let rep1 = checker.check_all().unwrap();
+        assert!(rep1.has_error(), "Must detect wrong usa_count");
+        assert!(
+            rep1.findings
+                .iter()
+                .any(|f| f.code == "MFT.USA" && f.sev == Severity::Error),
+            "Findings: {:?}",
+            rep1.findings
+        );
+
+        // 2. Tripwire: corrupt sector trailer
+        let mut rec0_bad_trailer = rec0_orig.clone();
+        let sector_end = meta.bytes_per_sector as usize - 2;
+        rec0_bad_trailer[sector_end] ^= 0xFF;
+        io.write_at(mft_rec0_offset, &rec0_bad_trailer).unwrap();
+
+        let mut checker2 = NtfsChecker::new(&mut io, &meta);
+        let rep2 = checker2.check_all().unwrap();
+        assert!(rep2.has_error(), "Must detect corrupted sector trailer");
+        assert!(
+            rep2.findings
+                .iter()
+                .any(|f| f.code == "MFT.TRAILER" && f.sev == Severity::Error),
+            "Findings: {:?}",
+            rep2.findings
+        );
+
+        // 3. Tripwire: out of bounds usa_offset
+        let mut rec0_bad_ofs = rec0_orig.clone();
+        rec0_bad_ofs[4..6].copy_from_slice(&2000u16.to_le_bytes());
+        io.write_at(mft_rec0_offset, &rec0_bad_ofs).unwrap();
+
+        let mut checker3 = NtfsChecker::new(&mut io, &meta);
+        let rep3 = checker3.check_all().unwrap();
+        assert!(rep3.has_error(), "Must detect out-of-bounds usa_offset");
+        assert!(
+            rep3.findings
+                .iter()
+                .any(|f| f.code == "MFT.USA" && f.sev == Severity::Error),
+            "Findings: {:?}",
+            rep3.findings
+        );
+    }
+
+    #[test]
+    fn test_ntfs_logfile_and_system_records_structure() {
+        let meta = NtfsMeta::new(256 * 1024 * 1024, Some("WIN_DATA")).unwrap();
+        let mut buffer = vec![0u8; 256 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut buffer);
+
+        NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
+
+        let mut resolver = crate::resolver::NtfsResolver::new(&mut io, &meta);
+
+        // Check Record 0 sequence number == 1
+        let rec0 = resolver.read_mft_record(0).unwrap();
+        let view0 = crate::view::mft_view::MftRecordView::new(&rec0).unwrap();
+        let seq0 = view0.header().sequence_number;
+        assert_eq!(seq0, 1);
+
+        // Check Record 2 ($LogFile) has exactly 1 $DATA attribute
+        let log_rec = resolver.read_mft_record(MFT_RECORD_LOGFILE).unwrap();
+        let log_view = crate::view::mft_view::MftRecordView::new(&log_rec).unwrap();
+        let log_data_attrs: Vec<_> = log_view
+            .attrs()
+            .map(|a| a.unwrap())
+            .filter(|a| a.ty() == ATTR_DATA)
+            .collect();
+        assert_eq!(
+            log_data_attrs.len(),
+            1,
+            "$LogFile MUST have exactly one $DATA attribute"
+        );
+        assert!(
+            !log_data_attrs[0].is_resident(),
+            "$LogFile $DATA must be non-resident"
+        );
+
+        // Check Record 6 ($Bitmap)
+        let bm_rec = resolver.read_mft_record(MFT_RECORD_BITMAP).unwrap();
+        let bm_view = crate::view::mft_view::MftRecordView::new(&bm_rec).unwrap();
+        let bm_data = bm_view.find(ATTR_DATA).unwrap().unwrap();
+        println!("Record 6 raw length: {}", bm_rec.len());
+        println!("Record 6 DATA attr raw: {:02X?}", bm_data.raw);
+
+        // Check Record 5 ($Root) sequence number == 5
+        let root_rec = resolver.read_mft_record(MFT_RECORD_ROOT).unwrap();
+        let root_view = crate::view::mft_view::MftRecordView::new(&root_rec).unwrap();
+        let seq5 = root_view.header().sequence_number;
+        assert_eq!(seq5, 5);
+
+        // Run checker
+        let mut checker = NtfsChecker::new(&mut io, &meta);
+        let rep = checker.check_all().unwrap();
+        assert!(
+            !rep.has_error(),
+            "Checker report on clean volume must have no errors: {:?}",
+            rep.findings
         );
     }
 }

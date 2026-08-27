@@ -19,7 +19,7 @@ For typical applications, prefer using the unified [`rimfs`](../rimfs) facade cr
 
 ```toml
 [dependencies]
-rimfs-core = { version = "0.6.2", default-features = false }
+rimfs-core = { version = "0.6.3", default-features = false }
 ```
 
 ## Cargo Features

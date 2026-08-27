@@ -64,6 +64,8 @@ pub struct NtfsMeta {
     pub hidden_sectors: u32,
 
     pub upcase_flavor: UpcaseFlavor,
+    /// LCN of $LogFile
+    pub logfile_lcn: u64,
     /// LCN of $Bitmap
     pub bitmap_lcn: u64,
 }
@@ -115,8 +117,11 @@ impl NtfsMeta {
         let mft_lcn = boot.mft_lcn;
         let mft_mirr_lcn = boot.mft_mirr_lcn;
 
-        let bitmap_size_bytes = total_clusters.div_ceil(8);
         let reserved_mft_records = 16;
+        let bitmap_size_bytes = total_clusters.div_ceil(8);
+        let mirr_clusters =
+            (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
+        let logfile_lcn = mft_mirr_lcn + mirr_clusters;
         let bitmap_lcn = mft_lcn
             + (reserved_mft_records * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
 
@@ -138,6 +143,7 @@ impl NtfsMeta {
             bitmap_size_bytes,
             hidden_sectors: 0,
             upcase_flavor: UpcaseFlavor::Legacy,
+            logfile_lcn,
             bitmap_lcn,
         })
     }
@@ -210,6 +216,12 @@ impl NtfsMeta {
         // Bitmap size: 1 bit per cluster
         let bitmap_size_bytes = total_clusters.div_ceil(8);
 
+        let mirr_clusters = (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
+        // MFTMirr is at cluster 2 in standard Windows formatting
+        let mft_mirr_lcn = 2;
+        // LogFile starts immediately after MFTMirr clusters
+        let logfile_lcn = mft_mirr_lcn + mirr_clusters;
+
         // Calculate system file range to avoid MFT overlap
         let log_clusters = (2 * 1024 * 1024)
             .min(volume_size_bytes / 10)
@@ -219,15 +231,12 @@ impl NtfsMeta {
         let bitmap_clusters = bitmap_size_bytes.div_ceil(bytes_per_cluster as u64);
         let upcase_clusters = (128 * 1024u64).div_ceil(bytes_per_cluster as u64);
 
-        let bitmap_lcn = 3 + log_clusters + attrdef_clusters + root_index_clusters;
-        // Skip bootstrap (0-1), MFTMirr (2), and system files
+        let bitmap_lcn = logfile_lcn + log_clusters + attrdef_clusters + root_index_clusters;
+        // Skip system files
         let first_system_data = bitmap_lcn + bitmap_clusters + upcase_clusters;
 
         // Calculate MFT position
         let mft_lcn = calculate_mft_lcn(total_clusters, first_system_data);
-
-        // MFTMirr is at cluster 2 in standard Windows formatting for better compatibility
-        let mft_mirr_lcn = 2;
 
         Ok(Self {
             volume_label: label_buf,
@@ -247,6 +256,7 @@ impl NtfsMeta {
             bitmap_size_bytes,
             hidden_sectors,
             upcase_flavor,
+            logfile_lcn,
             bitmap_lcn,
         })
     }
@@ -282,6 +292,12 @@ impl NtfsMeta {
         } else {
             -(self.index_record_size.trailing_zeros() as i8)
         }
+    }
+
+    /// Offset in bytes of the backup (alternate) boot sector.
+    /// The NTFS backup boot sector is located in the final sector of the volume (sector total_sectors).
+    pub fn backup_boot_sector_offset(&self) -> u64 {
+        self.total_sectors * self.bytes_per_sector as u64
     }
 
     /// Calculate the Virtual Cluster Number (VCN) for a given index block index (0-indexed).
@@ -343,23 +359,11 @@ impl FsMeta<u64> for NtfsMeta {
     }
 
     fn first_data_unit(&self) -> u64 {
-        // System files are allocated sequentially during format:
-        // skip clusters 0-1 (boot area) and cluster 2 ($MFTMirr)
-        let log_clusters = (2 * 1024 * 1024)
-            .min(self.volume_size_bytes / 10)
-            .div_ceil(self.bytes_per_cluster as u64);
-        let attrdef_clusters = 1;
-        let root_index_clusters = 1;
         let bitmap_clusters = self
             .bitmap_size_bytes
             .div_ceil(self.bytes_per_cluster as u64);
         let upcase_clusters = (128 * 1024u64).div_ceil(self.bytes_per_cluster as u64);
-
-        3 + log_clusters
-            + attrdef_clusters
-            + root_index_clusters
-            + bitmap_clusters
-            + upcase_clusters
+        self.bitmap_lcn + bitmap_clusters + upcase_clusters
     }
 
     fn last_data_unit(&self) -> u64 {

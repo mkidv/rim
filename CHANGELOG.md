@@ -4,6 +4,21 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-08-27
+### Fixed
+*   **NTFS Native Tool Compatibility & Mount Support (`rimfs-ntfs`)**:
+    *   **Alternate Boot Sector Location**: Derived canonical `backup_boot_sector_offset` in `NtfsMeta` (`total_sectors * bytes_per_sector`), placing the backup VBR at the exact partition boundary sector as expected by Windows and `ntfsfix`.
+    *   **Data Run Positive Integer Encoding**: Fixed variable-length integer serialization in `encode_variable_int_to_buf` for unsigned lengths (e.g. 128 clusters = `0x80`), appending an MSB-cleared byte (`[0x80, 0x00]`) to ensure the signed NTFS runlist decompressor does not misinterpret lengths as negative values (`EIO` in `ntfs_attr_pread`).
+    *   **`$LogFile` Journal Initialization & Non-Overlapping Layout**: Initialized `$LogFile` clusters with standard `0xFF` bytes (empty journal state) and corrected LCN layout (`logfile_lcn = mft_mirr_lcn + mirr_clusters`) to prevent `$MFTMirr` from overlapping and corrupting the beginning of `$LogFile`.
+    *   **`$LogFile` Duplicate `$DATA` Attribute**: Eliminated redundant `$DATA` attribute creation in `write_mft_record_logfile`.
+    *   **MFT Sequence Number Alignment**: Synchronized sequence numbers (`(record_number as u16).max(1)`) across records 0..11 and `sys_ref` references.
+
+### Added
+*   **NTFS Boot Mirror & MST/USA Integrity Verification (`NtfsChecker`)**:
+    *   `BOOT.PRIMARY`, `BOOT.BACKUP`, `BOOT.MIRROR`: Validates primary VBR, backup VBR mirroring, and geometry agreement.
+    *   `MFT.USA` & `MFT.USN`: Validates Multi-Sector Transfer (MST) / Update Sequence Array (USA) invariants and USN sector trailer integrity on MFT records.
+    *   Added comprehensive regression and tripwire unit tests across all new check rules.
+
 ## [0.6.2] - 2026-08-27
 ### Fixed
 *   **NTFS Root Directory Index Stream Corruption & Duplicate Terminator (`rimfs-ntfs`)**:

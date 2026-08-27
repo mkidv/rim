@@ -41,7 +41,9 @@ pub fn read_record<IO: RimIO + ?Sized>(
     }
 
     // Apply USA fixups (MFT records always have them)
-    decode_usa_fixup(&mut buf, meta.bytes_per_sector as usize);
+    if !decode_usa_fixup(&mut buf, meta.bytes_per_sector as usize) {
+        return Err(RimIOError::Invalid("Failed to decode MFT USA fixup"));
+    }
 
     Ok(buf)
 }

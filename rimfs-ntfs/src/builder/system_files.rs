@@ -13,8 +13,12 @@ use zerocopy::IntoBytes;
 
 #[inline]
 pub fn sys_ref(record: u64) -> u64 {
-    // Fresh format invariant: sequence_number = 1 for all system records.
-    build_mft_reference(record, 1)
+    let seq = match record {
+        0 | 1 => 1,
+        2..=11 => record as u16,
+        _ => 1,
+    };
+    build_mft_reference(record, seq)
 }
 
 #[inline]
