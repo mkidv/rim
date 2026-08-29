@@ -38,10 +38,10 @@ impl Filesystem {
                 size_mb,
                 limit_mb: 32,
             }),
-            Filesystem::ExFat if size_mb < 256 => Err(LayoutError::SizeTooSmall {
+            Filesystem::ExFat if size_mb < 32 => Err(LayoutError::SizeTooSmall {
                 fs: *self,
                 size_mb,
-                min_mb: 256,
+                min_mb: 32,
             }),
             Filesystem::Ext4 if size_mb < 16 => Err(LayoutError::SizeTooSmall {
                 fs: *self,
