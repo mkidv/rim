@@ -24,7 +24,7 @@ impl<'a> FsFilesystem<'a> for Ext {
         io: &'a mut (dyn RimIO + 'a),
         meta: &'a Self::Meta,
     ) -> crate::core::FsInjectorResult<Self::Injector> {
-        Ok(ExtInjector::new(io, meta))
+        ExtInjector::new(io, meta)
     }
 
     fn checker(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Checker {

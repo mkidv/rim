@@ -10,7 +10,9 @@ pub use core::traits::*;
 // Utilities
 #[cfg(feature = "std")]
 pub use core::StdResolver;
-pub use core::utils::{path_utils::*, volume::*};
+#[cfg(feature = "alloc")]
+pub use core::utils::path_utils::*;
+pub use core::utils::volume::*;
 
 // Filesystem APIs
 #[cfg(feature = "fat")]
@@ -24,3 +26,6 @@ pub use rimfs_ext as ext;
 
 #[cfg(feature = "ntfs")]
 pub use rimfs_ntfs as ntfs;
+
+#[cfg(feature = "tar")]
+pub use rimfs_tar as tar;

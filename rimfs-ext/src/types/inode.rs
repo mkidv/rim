@@ -212,14 +212,11 @@ impl ExtInode {
     ) -> Self {
         let i_mode = attr.as_ext4_mode().bits();
 
-        #[cfg(feature = "std")]
-        let now = time::OffsetDateTime::now_utc();
-        #[cfg(not(feature = "std"))]
-        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let default_time = time::OffsetDateTime::UNIX_EPOCH;
 
-        let atime = attr.accessed.unwrap_or(now).to_unix_u32();
-        let ctime = attr.created.unwrap_or(now).to_unix_u32();
-        let mtime = attr.modified.unwrap_or(now).to_unix_u32();
+        let atime = attr.accessed.unwrap_or(default_time).to_unix_u32();
+        let ctime = attr.created.unwrap_or(default_time).to_unix_u32();
+        let mtime = attr.modified.unwrap_or(default_time).to_unix_u32();
 
         let uid = attr.uid.unwrap_or(0);
         let gid = attr.gid.unwrap_or(0);
@@ -261,14 +258,11 @@ impl ExtInode {
         symlink_attr.kind = crate::core::traits::NodeKind::Symlink;
         let i_mode = symlink_attr.as_ext4_mode().bits();
 
-        #[cfg(feature = "std")]
-        let now = time::OffsetDateTime::now_utc();
-        #[cfg(not(feature = "std"))]
-        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let default_time = time::OffsetDateTime::UNIX_EPOCH;
 
-        let atime = symlink_attr.accessed.unwrap_or(now).to_unix_u32();
-        let ctime = symlink_attr.created.unwrap_or(now).to_unix_u32();
-        let mtime = symlink_attr.modified.unwrap_or(now).to_unix_u32();
+        let atime = symlink_attr.accessed.unwrap_or(default_time).to_unix_u32();
+        let ctime = symlink_attr.created.unwrap_or(default_time).to_unix_u32();
+        let mtime = symlink_attr.modified.unwrap_or(default_time).to_unix_u32();
 
         let uid = symlink_attr.uid.unwrap_or(0);
         let gid = symlink_attr.gid.unwrap_or(0);

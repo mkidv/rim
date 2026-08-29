@@ -19,7 +19,7 @@ impl<Handle: FsHandle, B> FsContext<Handle, B> {
     }
 }
 
-use rimio::prelude::RimIO;
+use rimio::prelude::RimRead;
 
 /*
   Injector contract (simple, no pending state):
@@ -82,7 +82,7 @@ pub trait FsTreeInjector<Handle: FsHandle> {
     fn write_file(
         &mut self,
         name: &str,
-        source: &mut dyn RimIO,
+        source: &mut dyn RimRead,
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult;
@@ -103,37 +103,16 @@ pub trait FsTreeInjector<Handle: FsHandle> {
 
     /// Initialize the root context and push it on the stack.
     /// The root context's buffer should reflect existing entries (if any).
-    fn set_root_context(&mut self, node: &FsNode) -> FsInjectorResult;
+    fn set_root_context(&mut self, node: &FsNode<'_>) -> FsInjectorResult;
 
     /// Recursive helper: inject a node and (optionally) its children.
     /// Uses the contract above: directories link to parent immediately,
     /// buffers are written only at flush_current/flush.
-    fn inject_node(&mut self, node: &FsNode, recurse: bool) -> FsInjectorResult {
+    fn inject_node(&mut self, node: &mut FsNode<'_>, recurse: bool) -> FsInjectorResult {
         match node {
-            FsNode::File {
-                name,
-                content,
-                attr,
-            } => {
-                // Wrapper for compatibility with in-memory trees (tests, small injections)
-                #[cfg(all(feature = "alloc", feature = "mem"))]
-                {
-                    let mut data = content.clone();
-                    let mut io = rimio::prelude::MemRimIO::new(&mut data);
-                    self.write_file(name, &mut io, content.len() as u64, attr)?;
-                }
-                #[cfg(all(feature = "alloc", not(feature = "mem")))]
-                {
-                    let _ = (name, content, attr);
-                    return Err(FsInjectorError::Other(
-                        "In-memory injection requires mem feature",
-                    ));
-                }
-                #[cfg(not(feature = "alloc"))]
-                {
-                    let _ = (name, content, attr);
-                    return Err(FsInjectorError::Other("In-memory injection requires alloc"));
-                }
+            FsNode::File { name, source, attr } => {
+                let size = source.total_size().map_err(FsInjectorError::IO)?;
+                self.write_file(name, source.as_mut(), size, attr)?;
             }
             FsNode::Dir {
                 name,
@@ -167,16 +146,16 @@ pub trait FsTreeInjector<Handle: FsHandle> {
 
     /// Full-tree injection helper.
     #[must_use = "injection result must be checked for errors"]
-    fn inject_tree(&mut self, node: &FsNode) -> FsInjectorResult {
+    fn inject_tree(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {
         self.set_root_context(node)?;
         self.inject_node(node, true)?;
         self.flush()?;
         Ok(())
     }
 
-    /// Single-path injection helper (no recursion).
+    /// Single-entry injection helper (no recursion).
     #[must_use = "injection result must be checked for errors"]
-    fn inject_path(&mut self, node: &FsNode) -> FsInjectorResult {
+    fn inject_entry(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {
         self.set_root_context(node)?;
         self.inject_node(node, false)?;
         self.flush()?;

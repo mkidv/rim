@@ -17,7 +17,7 @@ fn main() {
     // backend RAM
     let mut buf = vec![0u8; SIZE_BYTES as usize];
     let mut mem = MemRimIO::new(&mut buf);
-    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCHFS"));
+    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCHFS")).expect("meta creation failed");
 
     // Relevant alignment: EXT4 block
     let align = meta.block_size as u64;
@@ -34,14 +34,15 @@ fn main() {
     // PARSE FS SOURCE (host)
     let t1 = Instant::now();
     let mut parser = StdResolver::new();
-    let tree = parser.parse_tree(test_data_path).expect("parse failed");
+    let mut tree = parser.resolve_tree(test_data_path).expect("parse failed");
     let dt_parse_std = t1.elapsed();
 
     // INJECT - new counter to isolate the phase
     let mut io_for_inject = IOCounter::with_align(io_for_format.into_inner(), align);
     let t2 = Instant::now();
-    let mut injector = ExtInjector::new(&mut io_for_inject, &meta);
-    injector.inject_tree(&tree).expect("inject failed");
+    let mut injector =
+        ExtInjector::new(&mut io_for_inject, &meta).expect("injector creation failed");
+    injector.inject_tree(&mut tree).expect("inject failed");
     let dt_inject = t2.elapsed();
     let stats_inject = io_for_inject.snapshot();
 
@@ -57,7 +58,7 @@ fn main() {
     let mut io_for_parse_back = IOCounter::with_align(io_for_check.into_inner(), align);
     let t4 = Instant::now();
     let mut resolver = ExtResolver::new(&mut io_for_parse_back, &meta);
-    let node = resolver.parse_tree("/*").expect("parse_tree failed");
+    let node = resolver.resolve_tree("/*").expect("resolve_tree failed");
     let dt_parse_ext4 = t4.elapsed();
     let stats_parse_ext4 = io_for_parse_back.snapshot();
 

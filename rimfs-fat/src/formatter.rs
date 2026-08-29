@@ -1,13 +1,7 @@
-// SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+pub use crate::core::formatter::*;
 use alloc::vec::Vec;
-
 use rimio::prelude::*;
 use zerocopy::IntoBytes;
-
-pub use crate::core::formatter::*;
 
 use crate::{
     core::fat::*,

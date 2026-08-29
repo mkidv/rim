@@ -60,7 +60,7 @@ pub struct ExtInjector<'a, IO: RimIO + ?Sized> {
 }
 
 impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
-    pub fn new(io: &'a mut IO, params: &'a ExtMeta) -> Self {
+    pub fn new(io: &'a mut IO, params: &'a ExtMeta) -> FsInjectorResult<Self> {
         let allocator = ExtAllocator::new(params);
         let group_count = params.block_count.div_ceil(params.blocks_per_group as u64) as usize;
         let mut used_dirs_per_group = vec![0u16; group_count];
@@ -69,13 +69,13 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
             used_dirs_per_group[0] = 2;
         }
 
-        Self {
+        Ok(Self {
             io,
             allocator,
             meta: params,
             stack: vec![],
             used_dirs_per_group,
-        }
+        })
     }
 
     fn write_block(&mut self, block: u32, data: &[u8]) -> FsInjectorResult {
@@ -98,7 +98,7 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
-    fn set_root_context(&mut self, root: &crate::core::traits::FsNode) -> FsInjectorResult {
+    fn set_root_context(&mut self, root: &FsNode<'_>) -> FsInjectorResult {
         // Use the pre-formatted root inode (inode 2), not allocating a new one.
         // The root directory was already written by the formatter.
 
@@ -259,7 +259,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
     fn write_file(
         &mut self,
         name: &str,
-        source: &mut dyn RimIO,
+        source: &mut dyn RimRead,
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
@@ -466,33 +466,25 @@ mod tests {
             .format(false)
             .expect("Format failed");
 
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
         // Complex Tree with Large File (triggers Indirection/Extents)
         // Block size 4096. 15 blocks = 60KB.
         let large_content = vec![0xEEu8; 15 * 4096];
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![
                 FsNode::Dir {
                     name: "subdir".to_string(),
                     attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::File {
-                        name: "hello.txt".to_string(),
-                        content: b"Hello World!".to_vec(),
-                        attr: FileAttributes::new_file(),
-                    }],
+                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
                 },
-                FsNode::File {
-                    name: "large.bin".to_string(),
-                    content: large_content.clone(),
-                    attr: FileAttributes::new_file(),
-                },
+                FsNode::new_file("large.bin", large_content.clone()),
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
         // Check consistency
@@ -531,26 +523,26 @@ mod tests {
     #[test]
     fn test_ext_variants() {
         // Ext2 (Block Map, no features)
-        test_injector_scenario(ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2")), "Ext2");
+        test_injector_scenario(ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2")).unwrap(), "Ext2");
 
         // Ext3 (Block Map, has compat)
-        test_injector_scenario(ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3")), "Ext3");
+        test_injector_scenario(ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3")).unwrap(), "Ext3");
 
         // Ext (Extents, has all features)
-        test_injector_scenario(ExtMeta::new(SIZE_BYTES, Some("EXT")), "Ext");
+        test_injector_scenario(ExtMeta::new(SIZE_BYTES, Some("EXT")).unwrap(), "Ext");
 
         // Exotic: Extents disabled but 64bit enabled (Manual construction)
         let mut features = ExtFeatureSet::EXT;
         features.has_extents = false;
         features.has_64bit = true;
         let exotic_meta =
-            ExtMeta::new_custom(features, SIZE_BYTES, Some("EXOTIC"), None, 4096, 8192);
+            ExtMeta::new_custom(features, SIZE_BYTES, Some("EXOTIC"), None, 4096, 8192).unwrap();
         test_injector_scenario(exotic_meta, "Exotic (No Extents, 64bit)");
     }
 
     #[test]
     fn test_ext_dir_attributes_preserved() {
-        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_DIR_ATTR"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_DIR_ATTR")).unwrap();
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -558,27 +550,23 @@ mod tests {
             .format(false)
             .expect("Format failed");
 
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
         let mut custom_dir_attr = FileAttributes::new_dir();
         custom_dir_attr.mode = Some(0o700);
         custom_dir_attr.uid = Some(1001);
         custom_dir_attr.gid = Some(1002);
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![FsNode::Dir {
                 name: "private".to_string(),
                 attr: custom_dir_attr,
-                children: vec![FsNode::File {
-                    name: "secret.txt".to_string(),
-                    content: b"my secret".to_vec(),
-                    attr: FileAttributes::new_file(),
-                }],
+                children: vec![FsNode::new_file("secret.txt", b"my secret".to_vec())],
             }],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
 
         let mut resolver = ExtResolver::new(&mut io, &meta);
         let read_attr = resolver.read_attributes("/private").unwrap();
@@ -602,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_ext_symlink_fast_and_slow() {
-        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_SYMLINK"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_SYMLINK")).unwrap();
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -610,7 +598,7 @@ mod tests {
             .format(false)
             .expect("Format failed");
 
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
         let short_target = "usr/bin/demo"; // 12 bytes < 60
         let long_target =
@@ -629,7 +617,7 @@ mod tests {
         let mut no_access_attr = FileAttributes::new_file();
         no_access_attr.mode = Some(0o0000);
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![
                 FsNode::Symlink {
@@ -647,11 +635,13 @@ mod tests {
                     target: dangling_target.to_string(),
                     attr: FileAttributes::new_symlink(),
                 },
-                FsNode::File {
-                    name: "setuid-demo".to_string(),
-                    content: b"setuid binary".to_vec(),
-                    attr: setuid_attr,
-                },
+                FsNode::new_file_from_source(
+                    "setuid-demo",
+                    alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(
+                        b"setuid binary".to_vec(),
+                    )),
+                    setuid_attr,
+                ),
                 FsNode::Dir {
                     name: "setgid-dir".to_string(),
                     children: vec![],
@@ -662,15 +652,15 @@ mod tests {
                     children: vec![],
                     attr: sticky_attr,
                 },
-                FsNode::File {
-                    name: "no-access".to_string(),
-                    content: b"".to_vec(),
-                    attr: no_access_attr,
-                },
+                FsNode::new_file_from_source(
+                    "no-access",
+                    alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(b"".to_vec())),
+                    no_access_attr,
+                ),
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
 
         // 1. Check with ExtChecker
         let mut checker = ExtChecker::new(&mut io, &meta);
@@ -702,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_ext_32bit_uid_gid() {
-        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_32BIT_ID"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("EXT_32BIT_ID")).unwrap();
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
@@ -710,7 +700,7 @@ mod tests {
             .format(false)
             .expect("Format failed");
 
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
         let mut high_id_attr = FileAttributes::new_file();
         high_id_attr.uid = Some(70000); // 0x11170 -> lo: 0x1170, hi: 0x0001
@@ -721,14 +711,14 @@ mod tests {
         high_id_symlink.uid = Some(90000);
         high_id_symlink.gid = Some(95000);
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![
-                FsNode::File {
-                    name: "app.bin".to_string(),
-                    content: b"app binary".to_vec(),
-                    attr: high_id_attr,
-                },
+                FsNode::new_file_from_source(
+                    "app.bin",
+                    alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(b"app binary".to_vec())),
+                    high_id_attr,
+                ),
                 FsNode::Symlink {
                     name: "app.link".to_string(),
                     target: "app.bin".to_string(),
@@ -737,7 +727,7 @@ mod tests {
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
 
         let mut resolver = ExtResolver::new(&mut io, &meta);
 
@@ -755,8 +745,14 @@ mod tests {
     #[test]
     fn test_ext2_ext3_symlinks() {
         for (meta, name) in [
-            (ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2_SYM")), "Ext2"),
-            (ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3_SYM")), "Ext3"),
+            (
+                ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2_SYM")).unwrap(),
+                "Ext2",
+            ),
+            (
+                ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3_SYM")).unwrap(),
+                "Ext3",
+            ),
         ] {
             let mut buf = vec![0u8; SIZE_BYTES as usize];
             let mut io = MemRimIO::new(&mut buf);
@@ -765,13 +761,13 @@ mod tests {
                 .format(false)
                 .expect("Format failed");
 
-            let mut injector = ExtInjector::new(&mut io, &meta);
+            let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
             let short_target = "bin/sh";
             let long_target =
                 "var/lib/docker/overlay2/1234567890abcdef1234567890abcdef1234567890abcdef/merged";
 
-            let tree = FsNode::Container {
+            let mut tree = FsNode::Container {
                 attr: FileAttributes::new_dir(),
                 children: vec![
                     FsNode::Symlink {
@@ -787,7 +783,7 @@ mod tests {
                 ],
             };
 
-            injector.inject_tree(&tree).unwrap();
+            injector.inject_tree(&mut tree).unwrap();
 
             let mut checker = ExtChecker::new(&mut io, &meta);
             let report = checker.check_all().unwrap();

@@ -48,6 +48,11 @@ impl Filesystem {
                 size_mb,
                 min_mb: 16,
             }),
+            Filesystem::Ntfs if size_mb < 4 => Err(LayoutError::SizeTooSmall {
+                fs: *self,
+                size_mb,
+                min_mb: 4,
+            }),
             Filesystem::Btrfs if size_mb < 64 => Err(LayoutError::SizeTooSmall {
                 fs: *self,
                 size_mb,

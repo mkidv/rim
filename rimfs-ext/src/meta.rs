@@ -103,7 +103,7 @@ pub struct ExtMeta {
 }
 
 impl ExtMeta {
-    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> Self {
+    pub fn new(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
         Self::new_custom(
             ExtFeatureSet::EXT,
             size_bytes,
@@ -114,7 +114,7 @@ impl ExtMeta {
         )
     }
 
-    pub fn new_ext2(size_bytes: u64, volume_label: Option<&str>) -> Self {
+    pub fn new_ext2(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
         Self::new_custom(
             ExtFeatureSet::EXT2,
             size_bytes,
@@ -125,7 +125,7 @@ impl ExtMeta {
         )
     }
 
-    pub fn new_ext3(size_bytes: u64, volume_label: Option<&str>) -> Self {
+    pub fn new_ext3(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
         Self::new_custom(
             ExtFeatureSet::EXT3,
             size_bytes,
@@ -143,9 +143,26 @@ impl ExtMeta {
         volume_id: Option<[u8; 16]>,
         block_size: u32,
         inodes_per_group: u32,
-    ) -> Self {
-        let volume_id = volume_id.unwrap_or_else(|| generate_volume_id_128().to_le_bytes());
+    ) -> FsResult<Self> {
+        crate::ensure!(
+            volume_size_bytes > 0,
+            FsError::Invalid("Volume size must be > 0")
+        );
+        crate::ensure!(
+            block_size.is_power_of_two() && (1024..=65536).contains(&block_size),
+            FsError::Invalid("Block size must be power of 2 between 1024 and 65536")
+        );
         let block_count = (volume_size_bytes / block_size as u64) as u32;
+        crate::ensure!(
+            block_count >= 16,
+            FsError::Invalid("Volume too small for EXT filesystem")
+        );
+        crate::ensure!(
+            inodes_per_group > 0,
+            FsError::Invalid("inodes_per_group must be > 0")
+        );
+
+        let volume_id = volume_id.unwrap_or_else(|| generate_volume_id_128().to_le_bytes());
         let blocks_per_group = EXT_DEFAULT_BLOCKS_PER_GROUP;
 
         let group_count = (block_count as u64).div_ceil(blocks_per_group as u64) as u32;
@@ -173,7 +190,7 @@ impl ExtMeta {
             EXT2_BGDT_ENTRY_SIZE
         };
 
-        Self {
+        Ok(Self {
             features,
             volume_id,
             volume_label: volume_label_bytes,
@@ -190,7 +207,7 @@ impl ExtMeta {
             use_integrity: false,
             use_group_integrity: false,
             is_dirty: false,
-        }
+        })
     }
 
     pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
@@ -340,7 +357,7 @@ mod tests {
     #[test]
     fn test_ext4_meta_creation() {
         const SIZE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
-        let meta = ExtMeta::new(SIZE_BYTES, Some("TESTEXT"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("TESTEXT")).unwrap();
 
         assert_eq!(meta.volume_size_bytes, SIZE_BYTES, "Size mismatch");
         assert_eq!(
@@ -365,7 +382,7 @@ mod tests {
     #[test]
     fn test_ext4_group_count() {
         const SIZE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB
-        let meta = ExtMeta::new(SIZE_BYTES, Some("TEST"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("TEST")).unwrap();
 
         let expected_groups = meta.block_count.div_ceil(meta.blocks_per_group as u64) as u32;
         assert_eq!(meta.group_count, expected_groups, "Group count mismatch");
@@ -425,7 +442,7 @@ mod tests {
     #[test]
     fn test_ext4_inode_allocation() {
         const SIZE_BYTES: u64 = 32 * 1024 * 1024;
-        let meta = ExtMeta::new(SIZE_BYTES, Some("INODES"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("INODES")).unwrap();
 
         // Total inodes = group_count * inodes_per_group
         let expected_inodes = (meta.group_count as u64) * (meta.inodes_per_group as u64);
@@ -452,7 +469,7 @@ mod tests {
         use crate::core::traits::FsMeta;
 
         const SIZE_BYTES: u64 = 32 * 1024 * 1024;
-        let meta = ExtMeta::new(SIZE_BYTES, Some("FSMETA"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("FSMETA")).unwrap();
 
         assert_eq!(
             meta.unit_size(),

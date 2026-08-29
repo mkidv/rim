@@ -11,7 +11,7 @@ fn bench_ext4_format(c: &mut Criterion) {
         b.iter(|| {
             let mut buf = vec![0u8; SIZE_BYTES as usize];
             let mut io = MemRimIO::new(&mut buf);
-            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
             ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         });
     });
@@ -21,7 +21,7 @@ fn bench_ext4_format(c: &mut Criterion) {
             let mut file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
             let mut io = StdRimIO::new(&mut file);
-            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
             ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         });
     });
@@ -31,7 +31,7 @@ fn bench_ext4_format(c: &mut Criterion) {
             let file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
             let mut io = MmapRimIO::new(file).unwrap();
-            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+            let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
             ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         });
     });
@@ -46,7 +46,7 @@ fn bench_ext4_large_write(c: &mut Criterion) {
     const WRITE_SIZE: usize = 10 * 1024 * 1024;
 
     // Setup FS
-    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
     let mut disk_buf = vec![0u8; SIZE_BYTES as usize];
     {
         let mut io = MemRimIO::new(&mut disk_buf);
@@ -61,7 +61,7 @@ fn bench_ext4_large_write(c: &mut Criterion) {
             || (disk_buf.clone(), content.clone()),
             |(mut local_buf, mut content_copy)| {
                 let mut io = MemRimIO::new(&mut local_buf);
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -93,7 +93,7 @@ fn bench_ext4_large_write(c: &mut Criterion) {
             },
             |(mut file, mut content_copy)| {
                 let mut io = StdRimIO::new(&mut file);
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -120,13 +120,13 @@ fn bench_ext4_large_write(c: &mut Criterion) {
                 let file = tempfile::tempfile().unwrap();
                 file.set_len(SIZE_BYTES).unwrap();
                 let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
-                let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+                let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
                 ExtFormatter::new(&mut io, &meta).format(false).unwrap();
                 (file, content.clone())
             },
             |(file, mut content_copy)| {
                 let mut io = MmapRimIO::new(file).unwrap();
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -158,11 +158,11 @@ fn bench_ext4_large_read(c: &mut Criterion) {
 
     // MEM SETUP
     let mut disk_buf = vec![0u8; SIZE_BYTES as usize];
-    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
     {
         let mut io = MemRimIO::new(&mut disk_buf);
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
         injector
             .set_root_context(&FsNode::new_container(vec![]))
             .unwrap();
@@ -195,7 +195,7 @@ fn bench_ext4_large_read(c: &mut Criterion) {
     {
         let mut io = StdRimIO::new(&mut file);
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
         injector
             .set_root_context(&FsNode::new_container(vec![]))
             .unwrap();
@@ -227,7 +227,7 @@ fn bench_ext4_large_read(c: &mut Criterion) {
     {
         let mut io = MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap();
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut injector = ExtInjector::new(&mut io, &meta);
+        let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
         injector
             .set_root_context(&FsNode::new_container(vec![]))
             .unwrap();
@@ -265,7 +265,7 @@ fn bench_ext4_small_files(c: &mut Criterion) {
     const NUM_FILES: usize = 100;
     const FILE_SIZE: usize = 100;
 
-    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH"));
+    let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
     let mut disk_buf = vec![0u8; SIZE_BYTES as usize];
     {
         let mut io = MemRimIO::new(&mut disk_buf);
@@ -279,7 +279,7 @@ fn bench_ext4_small_files(c: &mut Criterion) {
             || (disk_buf.clone(), content.clone()),
             |(mut local_buf, mut content_copy)| {
                 let mut io = MemRimIO::new(&mut local_buf);
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -311,7 +311,7 @@ fn bench_ext4_small_files(c: &mut Criterion) {
             },
             |(mut file, mut content_copy)| {
                 let mut io = StdRimIO::new(&mut file);
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
@@ -343,7 +343,7 @@ fn bench_ext4_small_files(c: &mut Criterion) {
             },
             |(file, mut content_copy)| {
                 let mut io = MmapRimIO::new(file).unwrap();
-                let mut injector = ExtInjector::new(&mut io, &meta);
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);

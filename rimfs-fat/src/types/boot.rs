@@ -266,31 +266,38 @@ impl Validate<FatMeta> for FatVbr {
     }
 
     fn validate(&self, meta: &FatMeta) -> Result<(), Self::Err> {
-        if self.signature != FAT_SIGNATURE {
-            return Err(FsParsingError::Invalid("VBR: missing 0x55AA"));
-        }
+        crate::ensure!(
+            self.signature == FAT_SIGNATURE,
+            FsParsingError::Invalid("VBR: missing 0x55AA")
+        );
         // Sanity BPB
         let bps = self.bpb.bytes_per_sector as usize;
         let spc = self.bpb.sectors_per_cluster as usize;
-        if bps == 0 || (bps & (bps - 1)) != 0 {
-            return Err(FsParsingError::Invalid("BPB: BytesPerSector not pow2"));
-        }
-        if spc == 0 || (spc & (spc - 1)) != 0 {
-            return Err(FsParsingError::Invalid("BPB: SectorsPerCluster not pow2"));
-        }
-        if self.bpb.num_fats == 0 {
-            return Err(FsParsingError::Invalid("BPB: NumFATs == 0"));
-        }
+        crate::ensure!(
+            bps > 0 && (bps & (bps - 1)) == 0,
+            FsParsingError::Invalid("BPB: BytesPerSector not pow2")
+        );
+        crate::ensure!(
+            spc > 0 && (spc & (spc - 1)) == 0,
+            FsParsingError::Invalid("BPB: SectorsPerCluster not pow2")
+        );
+        crate::ensure!(
+            self.bpb.num_fats > 0,
+            FsParsingError::Invalid("BPB: NumFATs == 0")
+        );
 
         if meta.bits == 32 {
             // Check FAT32 specific fields
             let ebpb = self.view_as::<Fat32Ebpb>();
-            if ebpb.fat_size_32 == 0 {
-                return Err(FsParsingError::Invalid("BPB: FATLength == 0"));
-            }
-            if ebpb.root_cluster < FAT_FIRST_CLUSTER || ebpb.root_cluster > meta.last_data_unit() {
-                return Err(FsParsingError::Invalid("BPB: root_cluster out of range"));
-            }
+            crate::ensure!(
+                ebpb.fat_size_32 > 0,
+                FsParsingError::Invalid("BPB: FATLength == 0")
+            );
+            crate::ensure!(
+                ebpb.root_cluster >= FAT_FIRST_CLUSTER
+                    && ebpb.root_cluster <= meta.last_data_unit(),
+                FsParsingError::Invalid("BPB: root_cluster out of range")
+            );
         }
         Ok(())
     }
@@ -347,20 +354,24 @@ impl Validate<FatMeta> for FatFsInfo {
     }
 
     fn validate(&self, meta: &FatMeta) -> Result<(), Self::Err> {
-        if self.lead_signature != FAT_FSINFO_LEAD_SIGNATURE {
-            return Err(FsParsingError::Invalid("FSINFO: bad lead sig"));
-        }
-        if self.struct_signature != FAT_FSINFO_STRUCT_SIGNATURE {
-            return Err(FsParsingError::Invalid("FSINFO: bad struct sig"));
-        }
-        if self.trail_signature != FAT_FSINFO_TRAIL_SIGNATURE {
-            return Err(FsParsingError::Invalid("FSINFO: bad trail sig"));
-        }
+        crate::ensure!(
+            self.lead_signature == FAT_FSINFO_LEAD_SIGNATURE,
+            FsParsingError::Invalid("FSINFO: bad lead sig")
+        );
+        crate::ensure!(
+            self.struct_signature == FAT_FSINFO_STRUCT_SIGNATURE,
+            FsParsingError::Invalid("FSINFO: bad struct sig")
+        );
+        crate::ensure!(
+            self.trail_signature == FAT_FSINFO_TRAIL_SIGNATURE,
+            FsParsingError::Invalid("FSINFO: bad trail sig")
+        );
         if self.next_free_cluster != FAT_FSINFO_UNKNOWN {
             let c = self.next_free_cluster;
-            if c < meta.first_data_unit() || c > meta.last_data_unit() {
-                return Err(FsParsingError::Invalid("FSINFO: next_free out of range"));
-            }
+            crate::ensure!(
+                c >= meta.first_data_unit() && c <= meta.last_data_unit(),
+                FsParsingError::Invalid("FSINFO: next_free out of range")
+            );
         }
         Ok(())
     }

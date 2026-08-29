@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-use crate::{RimIO, RimIOError, RimIOResult};
+use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
 
 use uefi::boot::ScopedProtocol;
 use uefi::proto::media::block::{BlockIO as UefiBlockIo, BlockIOMedia, Lba};
@@ -163,7 +162,66 @@ impl TempBlockBuf {
     }
 }
 
-impl RimIO for UefiRimIO {
+impl RimRead for UefiRimIO {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        let abs_off = self.partition_offset + offset;
+        self.check_bounds(abs_off, buf.len())?;
+
+        let bs = self.block_size();
+        let mut remaining = buf;
+
+        // Fast path: aligned full blocks (single multi-block BlockIO call)
+        if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
+            let start_lba = (abs_off / bs as u64) as Lba;
+            let media_id = self.media_id();
+            self.blk
+                .read_blocks(media_id, start_lba, remaining)
+                .map_err(|_| RimIOError::Other("UEFI read_blocks failed"))?;
+            return Ok(());
+        }
+
+        // Head (unaligned)
+        let (mut lba, off_in_blk) = self.lba_and_off(abs_off);
+        if off_in_blk != 0 {
+            let mut blk = self.temp_block_buf()?;
+            let b = blk.as_mut();
+            self.read_block_exact(lba, b)?;
+            let head = (bs - off_in_blk).min(remaining.len());
+            remaining[..head].copy_from_slice(&b[off_in_blk..off_in_blk + head]);
+            remaining = &mut remaining[head..];
+            lba += 1;
+        }
+
+        // Body (bulk full blocks in one call)
+        let aligned_len = (remaining.len() / bs) * bs;
+        if aligned_len > 0 {
+            let media_id = self.media_id();
+            self.blk
+                .read_blocks(media_id, lba, &mut remaining[..aligned_len])
+                .map_err(|_| RimIOError::Other("UEFI read_blocks failed"))?;
+            lba += (aligned_len / bs) as Lba;
+            remaining = &mut remaining[aligned_len..];
+        }
+
+        // Tail (partial)
+        if !remaining.is_empty() {
+            let mut blk = self.temp_block_buf()?;
+            let b = blk.as_mut();
+            self.read_block_exact(lba, b)?;
+            let n = remaining.len();
+            remaining.copy_from_slice(&b[..n]);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Ok(self.media_len().saturating_sub(self.partition_offset))
+    }
+}
+
+impl RimWrite for UefiRimIO {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         let abs_off = self.partition_offset + offset;
         self.check_bounds(abs_off, data.len())?;
@@ -171,12 +229,13 @@ impl RimIO for UefiRimIO {
         let bs = self.block_size();
         let mut remaining = data;
 
-        // Fast path: aligned full blocks
+        // Fast path: aligned full blocks (single multi-block BlockIO call)
         if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
             let start_lba = (abs_off / bs as u64) as Lba;
-            for (i, chunk) in remaining.chunks(bs).enumerate() {
-                self.write_block_exact(start_lba + i as Lba, chunk)?;
-            }
+            let media_id = self.media_id();
+            self.blk
+                .write_blocks(media_id, start_lba, remaining)
+                .map_err(|_| RimIOError::Other("UEFI write_blocks failed"))?;
             return Ok(());
         }
 
@@ -193,11 +252,15 @@ impl RimIO for UefiRimIO {
             lba += 1;
         }
 
-        // Body (full blocks)
-        while remaining.len() >= bs {
-            self.write_block_exact(lba, &remaining[..bs])?;
-            remaining = &remaining[bs..];
-            lba += 1;
+        // Body (bulk full blocks in one call)
+        let aligned_len = (remaining.len() / bs) * bs;
+        if aligned_len > 0 {
+            let media_id = self.media_id();
+            self.blk
+                .write_blocks(media_id, lba, &remaining[..aligned_len])
+                .map_err(|_| RimIOError::Other("UEFI write_blocks failed"))?;
+            lba += (aligned_len / bs) as Lba;
+            remaining = &remaining[aligned_len..];
         }
 
         // Tail (partial)
@@ -212,58 +275,14 @@ impl RimIO for UefiRimIO {
         Ok(())
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
-        self.check_bounds(abs_off, buf.len())?;
-
-        let bs = self.block_size();
-        let mut remaining = buf;
-
-        // Fast path: aligned full blocks
-        if abs_off.is_multiple_of(bs as u64) && remaining.len().is_multiple_of(bs) {
-            let start_lba = (abs_off / bs as u64) as Lba;
-            for (i, chunk) in remaining.chunks_mut(bs).enumerate() {
-                self.read_block_exact(start_lba + i as Lba, chunk)?;
-            }
-            return Ok(());
-        }
-
-        // Head (unaligned)
-        let (mut lba, off_in_blk) = self.lba_and_off(abs_off);
-        if off_in_blk != 0 {
-            let mut blk = self.temp_block_buf()?;
-            let b = blk.as_mut();
-            self.read_block_exact(lba, b)?;
-            let head = (bs - off_in_blk).min(remaining.len());
-            remaining[..head].copy_from_slice(&b[off_in_blk..off_in_blk + head]);
-            remaining = &mut remaining[head..];
-            lba += 1;
-        }
-
-        // Body (full blocks)
-        while remaining.len() >= bs {
-            self.read_block_exact(lba, &mut remaining[..bs])?;
-            remaining = &mut remaining[bs..];
-        }
-
-        // Tail (partial)
-        if !remaining.is_empty() {
-            let mut blk = self.temp_block_buf()?;
-            let b = blk.as_mut();
-            self.read_block_exact(lba, b)?;
-            let n = remaining.len();
-            remaining.copy_from_slice(&b[..n]);
-        }
-
-        Ok(())
-    }
-
     fn flush(&mut self) -> RimIOResult {
         self.blk
             .flush_blocks()
             .map_err(|_| RimIOError::Other("UEFI flush_blocks failed"))
     }
+}
 
+impl RimIO for UefiRimIO {
     #[inline]
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
@@ -273,10 +292,5 @@ impl RimIO for UefiRimIO {
     #[inline]
     fn partition_offset(&self) -> u64 {
         self.partition_offset
-    }
-
-    #[inline]
-    fn total_size(&mut self) -> RimIOResult<u64> {
-        Ok(self.media_len().saturating_sub(self.partition_offset))
     }
 }

@@ -32,7 +32,7 @@ impl StdResolver {
 }
 
 #[cfg(feature = "std")]
-impl FsTreeResolver for StdResolver {
+impl<'a> FsTreeResolver<'a> for StdResolver {
     /// Returns the list of immediate entries (files and directories) inside the given directory path.
     ///
     /// The returned names are file names only (without path), and are sorted for deterministic output.
@@ -50,6 +50,14 @@ impl FsTreeResolver for StdResolver {
         }
         res.sort_unstable();
         Ok(res)
+    }
+
+    /// Opens a file at the given path for streaming read without heap buffer allocation.
+    fn open_file(&mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'a>> {
+        let path_str = clean_and_normalize_path(path);
+        let file = fs::File::open(&path_str)?;
+        let io = rimio::prelude::ReadOnlyFileRimIO::from_file(file)?;
+        Ok(Box::new(io))
     }
 
     /// Returns the full content of the file at the given path.
@@ -134,22 +142,6 @@ impl FsTreeResolver for StdResolver {
             uid,
             gid,
         })
-    }
-
-    fn resolve_path(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
-        let path_str = clean_and_normalize_path(path);
-        let path = Path::new(&path_str);
-
-        let meta = fs::symlink_metadata(path)?;
-
-        let is_dir = meta.is_dir();
-        let size = if meta.is_file() {
-            meta.len() as usize
-        } else {
-            0
-        };
-
-        Ok((is_dir, 0, size)) // handle/unit = 0 (not used here)
     }
 }
 

@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{vec, vec::Vec};
 
-use rimio::{RimIO, RimIOExt};
+use rimio::{RimIO, RimIOExt, RimRead};
 
 use crate::core::utils::stream_copy::write_stream_to_run_list;
 use crate::core::{injector::*, resolver::*};
@@ -132,7 +132,7 @@ impl<'a, IO: RimIO + ?Sized> FatInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
-    fn set_root_context(&mut self, _: &FsNode) -> FsInjectorResult {
+    fn set_root_context(&mut self, _: &FsNode<'_>) -> FsInjectorResult {
         // Load root cluster’s existing entries, strip trailing EOD region
         let root = self.meta.root_unit();
         let offset = self.meta.unit_offset(root);
@@ -174,8 +174,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
         // Build child directory head in-memory: "." + ".." + EOD.
         let mut child_buf = Vec::with_capacity(self.meta.unit_size());
 
-        FatEntries::dot(handle.cluster_id).to_raw_buffer(&mut child_buf);
-        FatEntries::dotdot(parent_cluster).to_raw_buffer(&mut child_buf);
+        FatEntries::dot(handle.cluster_id, attr).to_raw_buffer(&mut child_buf);
+        FatEntries::dotdot(parent_cluster, attr).to_raw_buffer(&mut child_buf);
 
         // Append the directory entry into the CURRENT parent now (size = 0).
         if let Some(parent) = self.stack.last_mut() {
@@ -192,7 +192,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
     fn write_file(
         &mut self,
         name: &str,
-        source: &mut dyn RimIO,
+        source: &mut dyn RimRead,
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
@@ -294,25 +294,17 @@ mod tests {
                 FsNode::Dir {
                     name: "subdir".to_string(),
                     attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::File {
-                        name: "hello.txt".to_string(),
-                        content: b"Hello World!".to_vec(),
-                        attr: FileAttributes::new_file(),
-                    }],
+                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
                 },
-                FsNode::File {
-                    name: "readme.md".to_string(),
-                    content: b"Test Readme".to_vec(),
-                    attr: FileAttributes::new_file(),
-                },
+                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
         let mut parser_back = FatResolver::new(&mut io, &meta);
-        let mut parsed_tree = parser_back.parse_tree("/*").expect("parse_tree failed");
+        let mut parsed_tree = parser_back.resolve_tree("/*").expect("resolve_tree failed");
 
         tree.sort_children_recursively();
         parsed_tree.sort_children_recursively();
@@ -411,27 +403,23 @@ mod tests {
         let mut formatter = FatFormatter::new(&mut io, &meta_rim);
         formatter.format(true).unwrap();
 
-        let node = FsNode::File {
-            name: "reli.txt".to_string(),
-            content: b"Reliable content".to_vec(),
-            attr: FileAttributes::new_file(),
-        };
+        let node = FsNode::new_file("reli.txt", b"Reliable content".to_vec());
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![node],
         };
 
         {
             let mut injector = FatInjector::new(&mut io, &meta_rim).unwrap();
-            injector.inject_tree(&tree).unwrap();
+            injector.inject_tree(&mut tree).unwrap();
         }
 
         // 2. Read with Resolver (Should work)
         {
             let mut resolver = FatResolver::new(&mut io, &meta_rim);
-            let (_is_dir, _first_cluster, size) = resolver.resolve_path("/reli.txt").unwrap();
-            assert_eq!(size, 16);
+            let attr = resolver.read_attributes("/reli.txt").unwrap();
+            assert!(attr.is_file());
             let content = resolver.read_file("/reli.txt").unwrap();
             assert_eq!(content, b"Reliable content");
         }

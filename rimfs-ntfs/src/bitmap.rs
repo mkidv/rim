@@ -1,13 +1,9 @@
-// SPDX-License-Identifier: MIT
-//! NTFS cluster bitmap ($Bitmap) IO helpers
-//!
-//! Provides stateless helpers for writing the cluster bitmap.
-
 use crate::constant::*;
 use crate::meta::NtfsMeta;
 use crate::mft;
 use crate::view::attr_view::AttrView;
 use crate::view::mft_view::MftRecordView;
+use alloc::vec::Vec;
 use rimio::RimIO;
 use rimio::errors::RimIOResult;
 

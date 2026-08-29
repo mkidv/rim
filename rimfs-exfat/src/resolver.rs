@@ -22,11 +22,20 @@ impl<'a, IO: RimIO + ?Sized> ExFatResolver<'a, IO> {
     }
 
     /// Internal helper to get the entry details
-    fn resolve_entry(&mut self, path: &str) -> FsResolverResult<ExFatEntries> {
+    pub fn resolve_entry(&mut self, path: &str) -> FsResolverResult<ExFatEntries> {
         let entry = crate::core::resolver::walker::walk_path(self, path)?.ok_or(
             FsResolverError::Invalid("Cannot resolve file entry for root"),
         )?;
         Ok(entry)
+    }
+
+    pub fn resolve_entry_info(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
+        if path.is_empty() || path == "/" {
+            return Ok((true, self.meta.root_unit(), 0));
+        }
+
+        let entry = self.resolve_entry(path)?;
+        Ok((entry.is_dir(), entry.first_cluster(), entry.size()))
     }
 }
 
@@ -56,9 +65,9 @@ impl<'a, IO: RimIO + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
+impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExFatResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
-        let (is_dir, cluster, _) = self.resolve_path(path)?;
+        let (is_dir, cluster, _) = self.resolve_entry_info(path)?;
         crate::ensure!(is_dir, FsResolverError::Invalid("Expected a directory"));
 
         let entries = read_dir_entries(self.io, self.meta, cluster)?;
@@ -67,6 +76,22 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
             .map(|entry| entry.name())
             .collect::<Result<Vec<String>, _>>()?;
         Ok(entries_string)
+    }
+
+    fn open_file(
+        &mut self,
+        path: &str,
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+        let entry = self.resolve_entry(path)?;
+        crate::ensure!(!entry.is_dir(), FsResolverError::Invalid("Expected a file"));
+
+        let size = entry.size();
+        if size == 0 {
+            return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
+        }
+
+        let data = self.read_file(path)?;
+        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
@@ -111,15 +136,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
         }
 
         Ok(out)
-    }
-
-    fn resolve_path(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
-        if path.is_empty() || path == "/" {
-            return Ok((true, self.meta.root_unit(), 0));
-        }
-
-        let entry = self.resolve_entry(path)?;
-        Ok((entry.is_dir(), entry.first_cluster(), entry.size()))
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {

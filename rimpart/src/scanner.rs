@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: MIT
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{string::String, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use rimio::prelude::*;
 
@@ -186,6 +188,7 @@ pub fn scan_disk<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<DiskInfo> {
     scan_disk_with_sector(io, DEFAULT_SECTOR_SIZE)
 }
 
+#[allow(dead_code)]
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -194,6 +197,7 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 fn pretty_bytes(n: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut val = n as f64;
@@ -210,6 +214,7 @@ fn pretty_bytes(n: u64) -> String {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 fn sep_u64(mut n: u64) -> String {
     // thousands separator "fine": 12 345 678
     if n < 1_000 {

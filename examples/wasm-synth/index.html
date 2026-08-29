@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RIM Browser Synthesis Demo — Bootable Linux & Fast Storage</title>
+  <style>
+    :root {
+      --bg: #0e1117;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --accent: #58a6ff;
+      --accent-hover: #1f6feb;
+      --text: #c9d1d9;
+      --text-bright: #f0f6fc;
+      --text-muted: #8b949e;
+      --border: #30363d;
+      --success: #238636;
+      --success-hover: #2ea043;
+      --error-bg: #490202;
+      --error-border: #da3633;
+      --error-text: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    h1 { color: var(--text-bright); font-size: 1.8rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.75rem; }
+    .badge { background: #1f6feb22; color: var(--accent); border: 1px solid #1f6feb66; font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 999px; font-weight: 500; }
+    p { margin-top: 0; margin-bottom: 1.25rem; color: var(--text-muted); }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
+    .btn-row { display: flex; gap: 1rem; margin-top: 1.25rem; flex-wrap: wrap; }
+    button { font-family: inherit; font-size: 0.95rem; font-weight: 600; padding: 0.65rem 1.25rem; border-radius: 6px; cursor: pointer; border: none; transition: background 0.15s ease, opacity 0.15s ease; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #0d1117; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); color: #ffffff; }
+    .btn-success { background: var(--success); color: #ffffff; }
+    .btn-success:hover:not(:disabled) { background: var(--success-hover); }
+    .btn-download { background: #21262d; color: var(--text-bright); border: 1px solid var(--border); }
+    .btn-download:hover:not(:disabled) { background: #30363d; border-color: #8b949e; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .stat-box { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 1rem; text-align: center; }
+    .stat-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.25rem; }
+    .stat-val { font-size: 1.4rem; font-weight: 700; color: var(--text-bright); font-family: monospace; }
+    pre#log { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 1rem; color: #7ee787; font-family: ui-monospace, monospace; font-size: 0.85rem; height: 220px; overflow-y: auto; margin-top: 1rem; white-space: pre-wrap; word-break: break-word; }
+    .error-box { background: var(--error-bg); border: 1px solid var(--error-border); color: var(--error-text); padding: 0.75rem 1rem; border-radius: 6px; margin-top: 1rem; display: none; font-family: monospace; font-size: 0.9rem; }
+    .partition-list { margin-top: 1rem; font-size: 0.85rem; border-collapse: collapse; width: 100%; }
+    .partition-list th, .partition-list td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+    .partition-list th { background: #0d1117; color: var(--text-bright); }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+    .tab-btn { background: transparent; color: var(--text-muted); border: none; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.9rem; cursor: pointer; }
+    .tab-btn.active { background: #21262d; color: var(--text-bright); font-weight: 600; }
+    .code-snippet { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; font-family: monospace; font-size: 0.85rem; color: #79c0ff; overflow-x: auto; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>RIM Storage Synthesizer <span class="badge">WASM Client-Side</span></h1>
+    <p>Synthesize partition tables (GPT) and genuine filesystems (FAT32, EXT4) entirely in memory inside your browser using the portable RIM Rust engine compiled to WebAssembly. Zero backend, zero server generation.</p>
+
+    <div class="card">
+      <div class="tabs">
+        <button class="tab-btn active" id="tabDemo">Preset 1: Fast 64 MiB Demo</button>
+        <button class="tab-btn" id="tabAlpine">Preset 2: Bootable Alpine Linux (227 MiB)</button>
+      </div>
+
+      <div id="panelDemo">
+        <h3 style="margin-top: 0; color: var(--text-bright);">Fast Demo Layout</h3>
+        <table class="partition-list">
+          <thead><tr><th>Partition</th><th>Type / FS</th><th>Size</th><th>Payloads Injected by RIM</th></tr></thead>
+          <tbody>
+            <tr><td><strong>ESP</strong> (Boot)</td><td><code>FAT32</code></td><td>32 MiB</td><td><code>/README.TXT</code></td></tr>
+            <tr><td><strong>rootfs</strong></td><td><code>EXT4</code></td><td>24 MiB</td><td><code>/hello.txt</code>, <code>/etc/rim.conf</code>, <code>/hello_link</code> (symlink)</td></tr>
+          </tbody>
+        </table>
+        <div class="btn-row">
+          <button id="btnBuildDemo" class="btn-primary" disabled>Loading WASM module...</button>
+          <button id="btnDownloadDemo" class="btn-download" disabled>Download .img</button>
+        </div>
+      </div>
+
+      <div id="panelAlpine" style="display: none;">
+        <h3 style="margin-top: 0; color: var(--text-bright);">Bootable Alpine Linux UEFI Layout</h3>
+        <table class="partition-list">
+          <thead><tr><th>Partition</th><th>Type / FS</th><th>Size</th><th>Boot Assets Materialized by RIM</th></tr></thead>
+          <tbody>
+            <tr><td><strong>ESP</strong> (Boot)</td><td><code>FAT32</code></td><td>64 MiB</td><td><code>/EFI/BOOT/BOOTX64.EFI</code> (systemd-boot), <code>/vmlinuz</code>, <code>/initramfs</code>, <code>/loader/entries/alpine.conf</code></td></tr>
+            <tr><td><strong>rootfs</strong></td><td><code>EXT4</code></td><td>160 MiB</td><td>Full Alpine Linux rootfs (~4,000 files, directories, symlinks, permissions)</td></tr>
+          </tbody>
+        </table>
+        <div class="btn-row">
+          <button id="btnBuildAlpine" class="btn-success" disabled>Synthesize Bootable Alpine Linux</button>
+          <button id="btnDownloadAlpine" class="btn-download" disabled>Download bootable .img</button>
+        </div>
+      </div>
+
+      <div class="error-box" id="errorBox"></div>
+    </div>
+
+    <div class="card" id="resultsCard" style="display: none;">
+      <h3 style="margin-top: 0; color: var(--text-bright);">Generation Results</h3>
+      <div class="stats-grid">
+        <div class="stat-box"><div class="stat-label">Image Size</div><div class="stat-val" id="valSize">0 MiB</div></div>
+        <div class="stat-box"><div class="stat-label">Synthesis Time</div><div class="stat-val" id="valTime">0 ms</div></div>
+        <div class="stat-box"><div class="stat-label">Validation</div><div class="stat-val" style="color: #7ee787;">PASS</div></div>
+      </div>
+      <div id="qemuHint" style="display: none; margin-top: 1rem;">
+        <div style="font-size: 0.85rem; color: var(--text-muted);">Boot the generated image directly under native QEMU + OVMF:</div>
+        <div class="code-snippet">qemu-system-x86_64 -enable-kvm -cpu host -m 512M -bios /usr/share/ovmf/OVMF.fd -drive file=rim-alpine-boot.img,format=raw,if=virtio -serial mon:stdio</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top: 0; color: var(--text-bright);">Execution Log</h3>
+      <pre id="log">Initializing WebAssembly runtime...</pre>
+    </div>
+  </div>
+
+  <script>
+    let wasmInstance = null;
+    let generatedBlobUrl = null;
+    let currentDownloadName = 'rim-demo.img';
+
+    const logEl = document.getElementById('log');
+    const tabDemo = document.getElementById('tabDemo');
+    const tabAlpine = document.getElementById('tabAlpine');
+    const panelDemo = document.getElementById('panelDemo');
+    const panelAlpine = document.getElementById('panelAlpine');
+    const btnBuildDemo = document.getElementById('btnBuildDemo');
+    const btnDownloadDemo = document.getElementById('btnDownloadDemo');
+    const btnBuildAlpine = document.getElementById('btnBuildAlpine');
+    const btnDownloadAlpine = document.getElementById('btnDownloadAlpine');
+    const errorBox = document.getElementById('errorBox');
+    const resultsCard = document.getElementById('resultsCard');
+    const valSize = document.getElementById('valSize');
+    const valTime = document.getElementById('valTime');
+    const qemuHint = document.getElementById('qemuHint');
+
+    function log(msg) {
+      logEl.textContent += '[' + new Date().toISOString().slice(11, 19) + '] ' + msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function showError(err) {
+      errorBox.style.display = 'block';
+      errorBox.textContent = 'Error: ' + err;
+      log('[ERROR] ' + err);
+    }
+    function clearError() {
+      errorBox.style.display = 'none';
+      errorBox.textContent = '';
+    }
+
+    tabDemo.addEventListener('click', () => {
+      tabDemo.classList.add('active');
+      tabAlpine.classList.remove('active');
+      panelDemo.style.display = 'block';
+      panelAlpine.style.display = 'none';
+      qemuHint.style.display = 'none';
+    });
+    tabAlpine.addEventListener('click', () => {
+      tabAlpine.classList.add('active');
+      tabDemo.classList.remove('active');
+      panelAlpine.style.display = 'block';
+      panelDemo.style.display = 'none';
+    });
+
+    async function initWasm() {
+      try {
+        log('Fetching wasm_synth.wasm...');
+        const response = await fetch('wasm_synth.wasm');
+        if (!response.ok) throw new Error('HTTP ' + response.status + ' fetching wasm_synth.wasm');
+        const bytes = await response.arrayBuffer();
+        log('Loaded ' + bytes.byteLength + ' bytes of WebAssembly bytecode.');
+        const { instance } = await WebAssembly.instantiate(bytes, { env: {} });
+        wasmInstance = instance;
+        const version = instance.exports.wasm_synth_version();
+        log('RIM WASM Module ready (ABI version ' + version + ').');
+        btnBuildDemo.textContent = 'Synthesize 64 MiB Demo Disk';
+        btnBuildDemo.disabled = false;
+        btnBuildAlpine.disabled = false;
+      } catch (err) {
+        showError(err.message || err);
+        btnBuildDemo.textContent = 'WASM Load Failed';
+      }
+    }
+
+    btnBuildDemo.addEventListener('click', () => {
+      if (!wasmInstance) return;
+      clearError();
+      btnBuildDemo.disabled = true;
+      btnDownloadDemo.disabled = true;
+      resultsCard.style.display = 'none';
+      qemuHint.style.display = 'none';
+      log('----------------------------------------');
+      log('Starting 64 MiB in-memory disk synthesis...');
+
+      setTimeout(() => {
+        const exports = wasmInstance.exports;
+        const t0 = performance.now();
+        try {
+          const res = exports.wasm_build_demo_image();
+          const t1 = performance.now();
+          const elapsed = (t1 - t0).toFixed(2);
+          if (res !== 0) {
+            const errPtr = exports.wasm_get_error_ptr();
+            const errLen = exports.wasm_get_error_len();
+            const errBytes = new Uint8Array(exports.memory.buffer, errPtr, errLen);
+            showError(new TextDecoder().decode(errBytes) || 'Synthesis failed');
+            btnBuildDemo.disabled = false;
+            return;
+          }
+          const imgPtr = exports.wasm_get_image_ptr();
+          const imgLen = exports.wasm_get_image_len();
+          const rptPtr = exports.wasm_get_report_ptr();
+          const rptLen = exports.wasm_get_report_len();
+          const rptJson = new TextDecoder().decode(new Uint8Array(exports.memory.buffer, rptPtr, rptLen));
+          log('Disk image synthesized in ' + elapsed + ' ms.');
+          log('GPT header + backup tables validated.');
+          log('Report: ' + rptJson);
+
+          const imgBytes = new Uint8Array(exports.memory.buffer, imgPtr, imgLen);
+          const copy = new Uint8Array(imgBytes);
+          if (generatedBlobUrl) URL.revokeObjectURL(generatedBlobUrl);
+          generatedBlobUrl = URL.createObjectURL(new Blob([copy], { type: 'application/octet-stream' }));
+          currentDownloadName = 'rim-wasm-demo.img';
+
+          valSize.textContent = (imgLen / (1024 * 1024)).toFixed(1) + ' MiB';
+          valTime.textContent = elapsed + ' ms';
+          resultsCard.style.display = 'block';
+          btnDownloadDemo.disabled = false;
+          btnBuildDemo.disabled = false;
+        } catch (err) {
+          showError(err.message || err);
+          btnBuildDemo.disabled = false;
+        }
+      }, 20);
+    });
+
+    btnBuildAlpine.addEventListener('click', async () => {
+      if (!wasmInstance) return;
+      clearError();
+      btnBuildAlpine.disabled = true;
+      btnDownloadAlpine.disabled = true;
+      resultsCard.style.display = 'none';
+      log('----------------------------------------');
+      log('Fetching Alpine Linux payload TAR (payload/alpine_payload.tar)...');
+
+      try {
+        const resp = await fetch('payload/alpine_payload.tar');
+        if (!resp.ok) throw new Error('Failed to load payload/alpine_payload.tar: ' + resp.status);
+        const tarBytes = new Uint8Array(await resp.arrayBuffer());
+        log('Loaded ' + (tarBytes.byteLength / (1024*1024)).toFixed(2) + ' MiB payload TAR.');
+
+        const exports = wasmInstance.exports;
+        const tarLen = tarBytes.byteLength;
+        const requiredPages = Math.ceil((tarLen + 260 * 1024 * 1024) / 65536);
+        const currentPages = exports.memory.buffer.byteLength / 65536;
+        if (requiredPages > currentPages) exports.memory.grow(requiredPages - currentPages + 100);
+
+        const tarOffset = 1024 * 1024 * 4;
+        new Uint8Array(exports.memory.buffer, tarOffset, tarLen).set(tarBytes);
+
+        log('Synthesizing 227 MiB bootable Alpine Linux disk in WASM memory...');
+        const t0 = performance.now();
+        const res = exports.wasm_build_alpine_from_tar(tarOffset, tarLen);
+        const t1 = performance.now();
+        const elapsed = (t1 - t0).toFixed(2);
+
+        if (res !== 0) {
+          const errPtr = exports.wasm_get_error_ptr();
+          const errLen = exports.wasm_get_error_len();
+          const errBytes = new Uint8Array(exports.memory.buffer, errPtr, errLen);
+          showError(new TextDecoder().decode(errBytes) || 'Alpine disk synthesis failed');
+          btnBuildAlpine.disabled = false;
+          return;
+        }
+
+        const imgPtr = exports.wasm_get_image_ptr();
+        const imgLen = exports.wasm_get_image_len();
+        const rptPtr = exports.wasm_get_report_ptr();
+        const rptLen = exports.wasm_get_report_len();
+        const rptJson = new TextDecoder().decode(new Uint8Array(exports.memory.buffer, rptPtr, rptLen));
+
+        log('Bootable Linux image synthesized in ' + elapsed + ' ms!');
+        log('Partitions: ESP (64 MiB FAT32) + rootfs (160 MiB EXT4).');
+        log('Report: ' + rptJson);
+
+        const imgBytes = new Uint8Array(exports.memory.buffer, imgPtr, imgLen);
+        const copy = new Uint8Array(imgBytes);
+        if (generatedBlobUrl) URL.revokeObjectURL(generatedBlobUrl);
+        generatedBlobUrl = URL.createObjectURL(new Blob([copy], { type: 'application/octet-stream' }));
+        currentDownloadName = 'rim-alpine-boot.img';
+
+        valSize.textContent = (imgLen / (1024 * 1024)).toFixed(1) + ' MiB';
+        valTime.textContent = elapsed + ' ms';
+        resultsCard.style.display = 'block';
+        qemuHint.style.display = 'block';
+
+        btnDownloadAlpine.disabled = false;
+        btnBuildAlpine.disabled = false;
+        log('Bootable image ready for download!');
+      } catch (err) {
+        showError(err.message || err);
+        btnBuildAlpine.disabled = false;
+      }
+    });
+
+    function downloadCurrent() {
+      if (!generatedBlobUrl) return;
+      const a = document.createElement('a');
+      a.href = generatedBlobUrl;
+      a.download = currentDownloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      log('Downloaded ' + currentDownloadName);
+    }
+    btnDownloadDemo.addEventListener('click', downloadCurrent);
+    btnDownloadAlpine.addEventListener('click', downloadCurrent);
+
+    initWasm();
+  </script>
+</body>
+</html>

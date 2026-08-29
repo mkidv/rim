@@ -1,0 +1,23 @@
+[package]
+name = "rimfs-tar"
+description = "TAR archive filesystem driver for rim (formatter, injector, resolver, checker)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["std"]
+alloc = ["rimfs-core/alloc", "rimio/alloc"]
+std = ["alloc", "rimfs-core/std", "rimio/std"]
+
+[dependencies]
+rimfs-core = { path = "../rimfs-core", version = "0.7.0", default-features = false }
+rimio = { path = "../rimio", version = "0.7.0", default-features = false }
+
+[lints]
+workspace = true

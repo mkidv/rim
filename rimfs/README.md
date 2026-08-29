@@ -8,12 +8,13 @@ It provides an ergonomic, feature-gated API while implementations are cleanly se
 - `rimfs-exfat`: ExFAT implementation.
 - `rimfs-ext`: Ext2, Ext3, and Ext4 implementations.
 - `rimfs-ntfs`: Pure-Rust NTFS 3.1 implementation.
+- `rimfs-tar`: POSIX UStar TAR archive implementation.
 
 ## Installation
 
 ```toml
 [dependencies]
-rimfs = "0.6.3"
+rimfs = "0.7.0"
 ```
 
 ## Cargo Features
@@ -22,6 +23,7 @@ rimfs = "0.6.3"
 - `exfat`: Enables ExFAT support.
 - `ext`: Enables EXT (Ext2/3/4) support.
 - `ntfs`: Enables NTFS 3.1 support.
+- `tar`: Enables TAR archive support.
 - `std`: Enables standard library integration (`StdResolver`, File I/O).
 - `alloc`: Enables dynamic allocation support in `no_std` environments.
 - `uefi`: Enables UEFI pre-boot environment integration.
@@ -30,7 +32,7 @@ rimfs = "0.6.3"
 
 `rimfs` re-exports:
 - Shared abstractions from `rimfs-core`.
-- Specialized filesystem modules based on enabled features (`rimfs::fat`, `rimfs::exfat`, `rimfs::ext`, `rimfs::ntfs`).
+- Specialized filesystem modules based on enabled features (`rimfs::fat`, `rimfs::exfat`, `rimfs::ext`, `rimfs::ntfs`, `rimfs::tar`).
 
 Each filesystem follows a standard composable pipeline:
 - `Formatter`: Low-level volume structure initialization.

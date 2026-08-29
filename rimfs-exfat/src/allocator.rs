@@ -1,6 +1,7 @@
 pub use crate::core::allocator::*;
 use crate::core::{bitmap::BitmapDriver, fat::*};
 use crate::meta::*;
+use alloc::vec::Vec;
 use rimio::prelude::*;
 
 #[derive(Debug, Clone)]

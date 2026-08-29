@@ -1,0 +1,46 @@
+[[partitions]]
+name = "RIM FAT32"
+mountpoint = "data/*"
+size = "300M"
+fs = "fat32"
+
+[[partitions]]
+name = "RIM FAT16"
+mountpoint = "data/*"
+size = "50M"
+fs = "fat16"
+
+[[partitions]]
+name = "RIM FAT12"
+mountpoint = "data/*"
+size = "16M"
+fs = "fat12"
+
+[[partitions]]
+name = "RIMFAT"
+mountpoint = "data/*"
+size = "300M"
+fs = "rimfat"
+
+[[partitions]]
+name = "RIM EXFAT"
+mountpoint = "data/*"
+size = "300M"
+fs = "exfat"
+
+[[partitions]]
+name = "RIM EXT4"
+mountpoint = "data/*"
+size = "300M"
+fs = "ext4"
+
+[[partitions]]
+name = "RIM NTFS"
+mountpoint = "data/*"
+size = "300M"
+fs = "ntfs"
+
+[[partitions]]
+name = "RIM RAW"
+size = "300M"
+fs = "raw"

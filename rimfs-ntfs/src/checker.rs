@@ -726,7 +726,10 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             if &raw[0..4] != b"FILE" {
                 rep.push(Finding::err(
                     "MFT.SIG",
-                    format!("Record {rec_num} ({name}) invalid signature: {:?}", &raw[0..4]),
+                    format!(
+                        "Record {rec_num} ({name}) invalid signature: {:?}",
+                        &raw[0..4]
+                    ),
                 ));
                 continue;
             }
@@ -991,7 +994,7 @@ mod tests {
     use crate::upcase::UpcaseFlavor;
     use rimfs_core::checker::Severity;
     use rimfs_core::injector::FsTreeInjector;
-    use rimio::prelude::MemRimIO;
+    use rimio::prelude::*;
 
     #[test]
     fn test_ntfs_checker_basic() {
@@ -1116,19 +1119,18 @@ mod tests {
         // Inject 80 files into root directory to force multiple INDX blocks in $INDEX_ALLOCATION
         let mut children = Vec::new();
         for i in 0..80 {
-            children.push(FsNode::File {
-                name: format!("test_file_entry_{:03}.dat", i),
-                content: vec![0xAB; 100],
-                attr: FileAttributes::new_file(),
-            });
+            children.push(FsNode::new_file(
+                format!("test_file_entry_{:03}.dat", i),
+                vec![0xAB; 100],
+            ));
         }
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children,
         };
 
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
         // Run checker
@@ -1220,19 +1222,18 @@ mod tests {
         // Inject 80 files into root directory
         let mut children = Vec::new();
         for i in 0..80 {
-            children.push(FsNode::File {
-                name: format!("file_{:03}.bin", i),
-                content: vec![0x55; 50],
-                attr: FileAttributes::new_file(),
-            });
+            children.push(FsNode::new_file(
+                format!("file_{:03}.bin", i),
+                vec![0x55; 50],
+            ));
         }
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children,
         };
 
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
         // Run checker
@@ -1291,19 +1292,18 @@ mod tests {
 
         let mut children = Vec::new();
         for i in 0..80 {
-            children.push(FsNode::File {
-                name: format!("file_{:03}.dat", i),
-                content: vec![0x12; 60],
-                attr: FileAttributes::new_file(),
-            });
+            children.push(FsNode::new_file(
+                format!("file_{:03}.dat", i),
+                vec![0x12; 60],
+            ));
         }
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children,
         };
 
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
         // 1. First confirm checker passes on uncorrupted image

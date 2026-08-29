@@ -15,7 +15,6 @@ pub mod stats;
 pub mod utils;
 
 // Backend modules
-#[cfg(feature = "mem")]
 mod mem;
 
 #[cfg(feature = "std")]
@@ -37,16 +36,19 @@ pub mod prelude {
     pub use super::RimIOSetLen;
     pub use super::RimIOStreamExt;
     pub use super::RimIOStructExt;
+    pub use super::RimRead;
+    pub use super::RimWrite;
+    pub use super::copy_range;
     pub use super::errors::*;
+    #[cfg(feature = "alloc")]
+    pub use super::mem::VecRimIO;
+    pub use super::mem::{BoundedRimIO, MemRimIO, SliceRimIO};
     pub use super::run::*;
     pub use super::stats::*;
     pub use super::utils::*;
 
-    #[cfg(feature = "mem")]
-    pub use super::mem::MemRimIO;
-
     #[cfg(feature = "std")]
-    pub use super::std::{FileRimIO, StdRimIO};
+    pub use super::std::{FileRimIO, ReadOnlyFileRimIO, StdRimIO};
 
     #[cfg(feature = "uefi")]
     pub use super::uefi::UefiRimIO;
@@ -55,8 +57,15 @@ pub mod prelude {
     pub use super::mmap::MmapRimIO;
 }
 
-// Re-export errors
+// Re-export errors and memory backends
 pub use errors::*;
+#[cfg(feature = "alloc")]
+pub use mem::VecRimIO;
+pub use mem::{BoundedRimIO, MemRimIO, SliceRimIO};
+#[cfg(feature = "std")]
+pub use std::{FileRimIO, ReadOnlyFileRimIO, StdRimIO};
+#[cfg(feature = "uefi")]
+pub use uefi::UefiRimIO;
 
 // Constants
 
@@ -68,87 +77,140 @@ pub const BLOCK_BUF_SIZE: usize = 1024 * 1024;
 #[cfg(not(feature = "std"))]
 pub const BLOCK_BUF_SIZE: usize = 4096;
 
-// Traits
+// Capability Traits
 
-/// Block IO abstraction trait.
+/// Read-only random-access I/O capability.
 ///
-/// Allows read/write/flush at arbitrary offsets.
-/// Implementations may target RAM, files, block devices, UEFI, BIOS, etc.
-pub trait RimIO {
-    /// Writes `data` at `offset` (absolute).
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult;
-
-    /// Reads `buf.len()` bytes into `buf` from `offset` (absolute).
+/// Implements exact-read contract: `read_at` must fill `buf` completely
+/// or return an error (`OutOfBounds` / `Invalid` / `Other`).
+pub trait RimRead {
+    /// Reads `buf.len()` bytes into `buf` from `offset` (absolute or relative to current partition).
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult;
-    /// Flushes any buffered data (may be a no-op).
-    fn flush(&mut self) -> RimIOResult;
-    fn set_offset(&mut self, partition_offset: u64) -> u64;
-    fn partition_offset(&self) -> u64;
 
-    /// Returns the total size of the storage in bytes accessible from the current partition offset.
+    /// Returns the total size of the storage/source in bytes, if known.
     fn total_size(&mut self) -> RimIOResult<u64> {
         Err(RimIOError::Unsupported)
     }
+}
 
-    /// Copies data from a source `RimIO` into this one.
-    ///
-    /// The default implementation uses an intermediate buffer (double-copy).
-    /// Specialized implementations (like `MemRimIO`) can override this to
-    /// read directly from `src` into their own storage (single-copy).
-    #[cfg(feature = "alloc")]
-    fn copy_from(
-        &mut self,
-        src: &mut dyn RimIO,
-        src_offset: u64,
-        dest_offset: u64,
-        mut len: u64,
-    ) -> RimIOResult {
-        // Default: Large Heap Buffer (Double Copy)
-        // Default: Large Heap Buffer (Double Copy)
-        #[cfg(feature = "std")]
-        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB for std
-        #[cfg(not(feature = "std"))]
-        const CHUNK_SIZE: usize = 64 * 1024; // 64 KiB for alloc-only
-        let mut buf = alloc::vec![0u8; CHUNK_SIZE];
-        let mut s_off = src_offset;
-        let mut d_off = dest_offset;
-
-        while len > 0 {
-            let to_process = len.min(CHUNK_SIZE as u64) as usize;
-            src.read_at(s_off, &mut buf[..to_process])?;
-            self.write_at(d_off, &buf[..to_process])?;
-
-            len -= to_process as u64;
-            s_off += to_process as u64;
-            d_off += to_process as u64;
-        }
-        Ok(())
+impl<R: RimRead + ?Sized> RimRead for &mut R {
+    #[inline]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        (**self).read_at(offset, buf)
     }
 
-    #[cfg(not(feature = "alloc"))]
-    fn copy_from(
-        &mut self,
-        src: &mut dyn RimIO,
-        src_offset: u64,
-        dest_offset: u64,
-        mut len: u64,
-    ) -> RimIOResult {
-        // Default: Stack Buffer (Double Copy for no_std)
-        let mut buf = [0u8; BLOCK_BUF_SIZE];
-        let mut s_off = src_offset;
-        let mut d_off = dest_offset;
-
-        while len > 0 {
-            let to_process = len.min(BLOCK_BUF_SIZE as u64) as usize;
-            src.read_at(s_off, &mut buf[..to_process])?;
-            self.write_at(d_off, &buf[..to_process])?;
-
-            len -= to_process as u64;
-            s_off += to_process as u64;
-            d_off += to_process as u64;
-        }
-        Ok(())
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        (**self).total_size()
     }
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead + ?Sized> RimRead for alloc::boxed::Box<R> {
+    #[inline]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        (**self).read_at(offset, buf)
+    }
+
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        (**self).total_size()
+    }
+}
+
+/// Write random-access I/O capability.
+pub trait RimWrite {
+    /// Writes `data` starting at `offset` (absolute or relative to current partition).
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult;
+
+    /// Flushes any buffered data (may be a no-op).
+    fn flush(&mut self) -> RimIOResult;
+}
+
+impl<W: RimWrite + ?Sized> RimWrite for &mut W {
+    #[inline]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        (**self).write_at(offset, data)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> RimIOResult {
+        (**self).flush()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<W: RimWrite + ?Sized> RimWrite for alloc::boxed::Box<W> {
+    #[inline]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        (**self).write_at(offset, data)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> RimIOResult {
+        (**self).flush()
+    }
+}
+
+/// Full read-write block IO abstraction trait with partition offset tracking.
+///
+/// Implementations may target RAM, files, block devices, UEFI, BIOS, etc.
+pub trait RimIO: RimRead + RimWrite {
+    fn set_offset(&mut self, partition_offset: u64) -> u64;
+    fn partition_offset(&self) -> u64;
+}
+
+impl<IO: RimIO + ?Sized> RimIO for &mut IO {
+    #[inline]
+    fn set_offset(&mut self, partition_offset: u64) -> u64 {
+        (**self).set_offset(partition_offset)
+    }
+
+    #[inline]
+    fn partition_offset(&self) -> u64 {
+        (**self).partition_offset()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<IO: RimIO + ?Sized> RimIO for alloc::boxed::Box<IO> {
+    #[inline]
+    fn set_offset(&mut self, partition_offset: u64) -> u64 {
+        (**self).set_offset(partition_offset)
+    }
+
+    #[inline]
+    fn partition_offset(&self) -> u64 {
+        (**self).partition_offset()
+    }
+}
+
+/// Copies a range of bytes from a `RimRead` source to a `RimWrite` destination
+/// using caller-provided scratch storage.
+pub fn copy_range(
+    src: &mut dyn RimRead,
+    dest: &mut dyn RimWrite,
+    src_offset: u64,
+    dest_offset: u64,
+    mut len: u64,
+    scratch: &mut [u8],
+) -> RimIOResult {
+    if scratch.is_empty() {
+        return Err(RimIOError::InvalidBuffer);
+    }
+    let mut s_off = src_offset;
+    let mut d_off = dest_offset;
+
+    while len > 0 {
+        let chunk_size = len.min(scratch.len() as u64) as usize;
+        src.read_at(s_off, &mut scratch[..chunk_size])?;
+        dest.write_at(d_off, &scratch[..chunk_size])?;
+
+        len -= chunk_size as u64;
+        s_off += chunk_size as u64;
+        d_off += chunk_size as u64;
+    }
+    Ok(())
 }
 
 /// Extension helpers for RimIO.
@@ -209,17 +271,20 @@ pub trait RimIOExt: RimIO {
         Ok(())
     }
 
-    /// Copies data from a source `RimIO` into this one using a provided buffer.
+    /// Copies data from a source `RimRead` into this one using a provided buffer.
     ///
     /// This avoids internal allocation and allows buffer reuse.
     fn copy_from_using_buffer(
         &mut self,
-        src: &mut dyn RimIO,
+        src: &mut dyn RimRead,
         src_offset: u64,
         dest_offset: u64,
         mut len: u64,
         buf: &mut [u8],
     ) -> RimIOResult {
+        if buf.is_empty() {
+            return Err(RimIOError::InvalidBuffer);
+        }
         let mut s_off = src_offset;
         let mut d_off = dest_offset;
 
@@ -235,10 +300,34 @@ pub trait RimIOExt: RimIO {
         Ok(())
     }
 
-    /// Copies data from a source `RimIO` into this one, notifying byte progress via a closure.
+    /// Copies data from a source `RimRead` into this one.
+    fn copy_from(
+        &mut self,
+        src: &mut dyn RimRead,
+        src_offset: u64,
+        dest_offset: u64,
+        len: u64,
+    ) -> RimIOResult {
+        #[cfg(feature = "alloc")]
+        {
+            #[cfg(feature = "std")]
+            const CHUNK_SIZE: usize = 1024 * 1024;
+            #[cfg(not(feature = "std"))]
+            const CHUNK_SIZE: usize = 64 * 1024;
+            let mut buf = alloc::vec![0u8; CHUNK_SIZE];
+            self.copy_from_using_buffer(src, src_offset, dest_offset, len, &mut buf)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let mut buf = [0u8; BLOCK_BUF_SIZE];
+            self.copy_from_using_buffer(src, src_offset, dest_offset, len, &mut buf)
+        }
+    }
+
+    /// Copies data from a source `RimRead` into this one, notifying byte progress via a closure.
     fn copy_from_with_progress<F: FnMut(u64, u64)>(
         &mut self,
-        src: &mut dyn RimIO,
+        src: &mut dyn RimRead,
         src_offset: u64,
         dest_offset: u64,
         mut len: u64,
@@ -428,21 +517,22 @@ pub trait RimIOExt: RimIO {
     fn zero_fill(&mut self, offset: u64, len: usize) -> RimIOResult {
         #[cfg(feature = "std")]
         const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
-        #[cfg(not(feature = "std"))]
+        #[cfg(all(not(feature = "std"), feature = "alloc"))]
+        const CHUNK_SIZE: usize = 64 * 1024; // 64 KiB
+        #[cfg(all(not(feature = "std"), not(feature = "alloc")))]
         const CHUNK_SIZE: usize = BLOCK_BUF_SIZE; // 4 KiB
 
         #[cfg(feature = "std")]
         let buf = ::std::vec![0u8; CHUNK_SIZE]; // Heap alloc for large buffer
-        #[cfg(not(feature = "std"))]
-        const buf: [u8; CHUNK_SIZE] = [0u8; CHUNK_SIZE]; // Stack alloc for small buffer
+        #[cfg(all(not(feature = "std"), feature = "alloc"))]
+        let buf = alloc::vec![0u8; CHUNK_SIZE];
+        #[cfg(all(not(feature = "std"), not(feature = "alloc")))]
+        let buf = [0u8; CHUNK_SIZE]; // Stack alloc for small buffer
 
         let mut remaining = len;
         let mut off = offset;
         while remaining > 0 {
             let chunk = remaining.min(CHUNK_SIZE);
-            #[cfg(feature = "std")]
-            self.write_at(off, &buf[..chunk])?;
-            #[cfg(not(feature = "std"))]
             self.write_at(off, &buf[..chunk])?;
 
             off += chunk as u64;

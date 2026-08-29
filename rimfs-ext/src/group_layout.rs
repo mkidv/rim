@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_ext4_group_layout_computation() {
         const SIZE_BYTES: u64 = 32 * 1024 * 1024;
-        let meta = ExtMeta::new(SIZE_BYTES, Some("LAYOUT"));
+        let meta = ExtMeta::new(SIZE_BYTES, Some("LAYOUT")).unwrap();
 
         for group_id in 0..meta.group_count {
             let layout = GroupLayout::compute(&meta, group_id);

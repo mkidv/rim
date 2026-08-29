@@ -4,11 +4,12 @@
 //! Responsible for adding files and directories to an existing NTFS volume.
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{string::ToString, vec, vec::Vec};
+use alloc::vec::Vec;
 
-use rimio::RimIO;
+use rimio::{RimIO, RimRead, RimWrite};
 
 use crate::allocator::{NtfsAllocator, NtfsHandle};
+use crate::attr::NtfsFileAttributesExt;
 use crate::attr::{AttributeType, NtfsFileNameNamespace};
 use crate::builder::index_layout::IndexTreeBuilder;
 use crate::builder::{NtfsAttribute, NtfsIndexEntry, NtfsMftRecord};
@@ -167,7 +168,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO> {
-    fn set_root_context(&mut self, _node: &FsNode) -> FsInjectorResult {
+    fn set_root_context(&mut self, _node: &FsNode<'_>) -> FsInjectorResult {
         // Root MFT record is 5
         let handle = NtfsHandle::new(5);
 
@@ -179,7 +180,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
         Ok(())
     }
 
-    fn write_dir(&mut self, name: &str, _attr: &FileAttributes) -> FsInjectorResult {
+    fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
         let mft_num = self.allocate_mft_record()?;
         let mft_ref = if mft_num <= 11 {
             build_mft_reference(mft_num, if mft_num == 0 { 1 } else { mft_num as u16 })
@@ -198,7 +199,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 mft_ref,
                 parent_ref,
                 name_utf16,
-                NtfsFileAttributes::DIRECTORY,
+                attr.as_ntfs_attr() | NtfsFileAttributes::DIRECTORY,
                 IndexEntryFlags::empty(),
                 None,
             );
@@ -214,9 +215,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
     fn write_file(
         &mut self,
         name: &str,
-        source: &mut dyn RimIO,
+        source: &mut dyn RimRead,
         size: u64,
-        _attr: &FileAttributes,
+        attr: &FileAttributes,
     ) -> FsInjectorResult {
         let mft_num = self.allocate_mft_record()?;
         let mft_ref = if mft_num <= 11 {
@@ -236,7 +237,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
 
         // Use Builder!
         let mut record = NtfsMftRecord::new(mft_num as u32, false, true);
-        let ntfs_attr = ntfs_attr_from_core(_attr);
+        let ntfs_attr = attr.as_ntfs_attr();
 
         record.add_attribute(NtfsAttribute::standard_info(
             ntfs_attr,
@@ -460,29 +461,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
     }
 }
 
-fn ntfs_attr_from_core(attr: &FileAttributes) -> NtfsFileAttributes {
-    let mut ntfs = NtfsFileAttributes::empty();
-    if attr.is_dir() {
-        ntfs |= NtfsFileAttributes::DIRECTORY;
-    }
-    if attr.is_hidden() {
-        ntfs |= NtfsFileAttributes::HIDDEN;
-    }
-    if attr.is_system() {
-        ntfs |= NtfsFileAttributes::SYSTEM;
-    }
-    if attr.is_readonly() {
-        ntfs |= NtfsFileAttributes::READ_ONLY;
-    }
-    if attr.is_archive() {
-        ntfs |= NtfsFileAttributes::ARCHIVE;
-    }
-    if ntfs.is_empty() {
-        ntfs = NtfsFileAttributes::NORMAL;
-    }
-    ntfs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,27 +480,19 @@ mod tests {
         // Inject
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
 
-        let tree = FsNode::Container {
+        let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![
                 FsNode::Dir {
                     name: "subdir".to_string(),
                     attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::File {
-                        name: "hello.txt".to_string(),
-                        content: b"Hello World!".to_vec(),
-                        attr: FileAttributes::new_file(),
-                    }],
+                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
                 },
-                FsNode::File {
-                    name: "readme.md".to_string(),
-                    content: b"Test Readme".to_vec(),
-                    attr: FileAttributes::new_file(),
-                },
+                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
     }
 }

@@ -1,0 +1,29 @@
+[package]
+name = "wasm-synth"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rimio = { path = "../../rimio", default-features = false, features = ["alloc"] }
+rimpart = { path = "../../rimpart", default-features = false, features = ["alloc"] }
+rimfs = { path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs", "tar"] }
+rimgen = { path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs"] }
+dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
+
+[features]
+default = []
+host = []
+
+[[bin]]
+name = "build_alpine_host"
+path = "src/bin/build_alpine_host.rs"
+required-features = ["host"]
+
+[dev-dependencies]
+rimfs-fat = { path = "../../rimfs-fat", default-features = false, features = ["alloc"] }
+rimfs-ext = { path = "../../rimfs-ext", default-features = false, features = ["alloc"] }

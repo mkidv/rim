@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
+#[macro_use]
 extern crate alloc;
 
 pub use rimfs_core as core;

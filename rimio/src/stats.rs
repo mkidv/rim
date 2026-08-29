@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #![allow(dead_code)]
 
-use crate::{RimIO, RimIOResult};
+use crate::{RimIO, RimIOResult, RimRead, RimWrite};
 
 /// Simple counters, no_std friendly.
 #[derive(Clone, Copy, Default, Debug)]
@@ -120,13 +120,13 @@ fn fmt_pct(numer: u64, denom: u64, f: &mut core::fmt::Formatter<'_>) -> core::fm
     if denom == 0 {
         return write!(f, "—");
     }
-    let pct = (numer as f64) * 100.0 / (denom as f64);
-    // avoid pulling in formatting heavy machinery; keep simple
-    // show with 0 or 1 decimal depending on size
-    if pct.fract() == 0.0 {
-        write!(f, "{}%", pct as u64)
+    let tenths = (numer.saturating_mul(1000)) / denom;
+    let int_part = tenths / 10;
+    let frac_part = tenths % 10;
+    if frac_part == 0 {
+        write!(f, "{int_part}%")
     } else {
-        write!(f, "{pct:.1}%")
+        write!(f, "{int_part}.{frac_part}%")
     }
 }
 
@@ -219,26 +219,7 @@ impl<'a, IO: RimIO + ?Sized> IOCounter<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> RimIO for IOCounter<'a, IO> {
-    #[inline]
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let aligned =
-            offset.is_multiple_of(self.align) && (data.len() as u64).is_multiple_of(self.align);
-        if aligned {
-            self.stats.aligned_writes += 1;
-        } else {
-            self.stats.unaligned_writes += 1;
-        }
-
-        self.stats.writes += 1;
-        self.stats.write_bytes += data.len() as u64;
-        if self.stats.max_write < data.len() as u64 {
-            self.stats.max_write = data.len() as u64;
-        }
-
-        self.inner.write_at(offset, data)
-    }
-
+impl<'a, IO: RimIO + ?Sized> RimRead for IOCounter<'a, IO> {
     #[inline]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let aligned =
@@ -259,11 +240,39 @@ impl<'a, IO: RimIO + ?Sized> RimIO for IOCounter<'a, IO> {
     }
 
     #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        self.inner.total_size()
+    }
+}
+
+impl<'a, IO: RimIO + ?Sized> RimWrite for IOCounter<'a, IO> {
+    #[inline]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let aligned =
+            offset.is_multiple_of(self.align) && (data.len() as u64).is_multiple_of(self.align);
+        if aligned {
+            self.stats.aligned_writes += 1;
+        } else {
+            self.stats.unaligned_writes += 1;
+        }
+
+        self.stats.writes += 1;
+        self.stats.write_bytes += data.len() as u64;
+        if self.stats.max_write < data.len() as u64 {
+            self.stats.max_write = data.len() as u64;
+        }
+
+        self.inner.write_at(offset, data)
+    }
+
+    #[inline]
     fn flush(&mut self) -> RimIOResult {
         self.stats.flushes += 1;
         self.inner.flush()
     }
+}
 
+impl<'a, IO: RimIO + ?Sized> RimIO for IOCounter<'a, IO> {
     #[inline]
     fn set_offset(&mut self, p: u64) -> u64 {
         self.inner.set_offset(p)
@@ -285,19 +294,28 @@ pub struct TracingIO<'a, IO: RimIO + ?Sized, Tr: IOTracer> {
     tracer: Tr,
 }
 
-impl<'a, IO: RimIO + ?Sized, Tr: IOTracer> RimIO for TracingIO<'a, IO, Tr> {
-    fn write_at(&mut self, off: u64, data: &[u8]) -> RimIOResult {
-        self.tracer.on_write(off, data.len());
-        self.inner.write_at(off, data)
-    }
+impl<'a, IO: RimIO + ?Sized, Tr: IOTracer> RimRead for TracingIO<'a, IO, Tr> {
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> RimIOResult {
         self.tracer.on_read(off, buf.len());
         self.inner.read_at(off, buf)
+    }
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        self.inner.total_size()
+    }
+}
+
+impl<'a, IO: RimIO + ?Sized, Tr: IOTracer> RimWrite for TracingIO<'a, IO, Tr> {
+    fn write_at(&mut self, off: u64, data: &[u8]) -> RimIOResult {
+        self.tracer.on_write(off, data.len());
+        self.inner.write_at(off, data)
     }
     fn flush(&mut self) -> RimIOResult {
         self.tracer.on_flush();
         self.inner.flush()
     }
+}
+
+impl<'a, IO: RimIO + ?Sized, Tr: IOTracer> RimIO for TracingIO<'a, IO, Tr> {
     fn set_offset(&mut self, p: u64) -> u64 {
         self.inner.set_offset(p)
     }

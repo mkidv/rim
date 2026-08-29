@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use rimgen::Layout;
+use rimgen::LayoutConfig;
 use std::path::Path;
 use std::process::Command;
 use std::{fs::File, io::Write};
@@ -31,7 +31,7 @@ impl WinScript {
         self
     }
 
-    pub fn new_from(layout: &Layout, vhd_path: &Path) -> anyhow::Result<Self> {
+    pub fn new_from(layout: &LayoutConfig, vhd_path: &Path) -> anyhow::Result<Self> {
         let mut ps = WinScript::new();
 
         ps.add("Import-Module Storage -ErrorAction Stop");

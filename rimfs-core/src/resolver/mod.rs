@@ -3,9 +3,13 @@
 use alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{
+    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
+
+#[cfg(feature = "std")]
+use std::boxed::Box;
 
 #[cfg(feature = "std")]
 pub mod std_resolver;
@@ -19,18 +23,9 @@ pub use node::*;
 
 pub use crate::errors::{FsResolverError, FsResolverResult};
 
-use crate::utils::path_utils::*;
-
-/// Abstraction for reading filesystem content from an external source.
-///
-/// This trait allows building an [`FsNode`] tree by reading a directory or a file hierarchy.
-///
-/// Implementations can target:
-/// - The real filesystem (see [`std_resolver`])
-/// - A virtual filesystem
-/// - A test harness
-///
 use crate::allocator::FsHandle;
+use crate::utils::path_utils::*;
+use rimio::RimRead;
 
 /// Low-level resolver for filesystem units/resources.
 ///
@@ -43,54 +38,62 @@ pub trait FsResolver<Handle: FsHandle> {
 
 /// High-level resolver for filesystem trees (files and directories).
 ///
-/// Previously `FsResolver`.
-pub trait FsTreeResolver {
+/// Symmetric counterpart to `FsTreeInjector`.
+pub trait FsTreeResolver<'a> {
+    /// Returns the attributes of the entry at the given path.
+    ///
+    /// The path may refer to a file, directory, or symlink.
+    fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes>;
+
     /// Returns the list of immediate entries (files and directories) inside the given directory path.
     ///
-    /// The returned names should not include path separators. They should be sorted if deterministic order is desired.
+    /// The returned names should not include path separators.
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>>;
+
+    /// Opens a file at the given path for streaming read without heap buffer allocation.
+    fn open_file(&mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'a>>;
 
     /// Returns the full content of the file at the given path.
     ///
-    /// The path must refer to a regular file, not a directory.
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>>;
+    /// Default implementation streams from `open_file`.
+    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
+        let mut stream = self.open_file(path)?;
+        let size = stream.total_size().map_err(FsResolverError::IO)? as usize;
+        #[cfg(feature = "alloc")]
+        {
+            let mut buf = alloc::vec![0u8; size];
+            stream.read_at(0, &mut buf).map_err(FsResolverError::IO)?;
+            Ok(buf)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = size;
+            Err(FsResolverError::Unsupported)
+        }
+    }
 
     /// Returns the symbolic link target at the given path.
     fn read_link(&mut self, _path: &str) -> FsResolverResult<String> {
         Err(FsResolverError::Unsupported)
     }
 
-    /// Returns the attributes of the entry at the given path.
+    /// Resolves an entry or directory hierarchy into an `FsNode`.
     ///
-    /// The path may refer to a file, directory, or symlink.
-    fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes>;
-
-    /// Recursively builds an [`FsNode`] tree starting from `path`.
-    ///
-    /// If `path` ends with `/*`, a [`FsNode::Container`] is created
-    /// with all children of the base path.
-    ///
-    /// If `path` points to a directory:
-    /// - If `recurse` is true, all subdirectories are traversed recursively.
-    /// - If `recurse` is false, only the directory itself is created with no children.
-    ///
-    /// If `path` points to a file:
-    /// - An [`FsNode::File`] is created with its content.
-    ///
-    /// Returns an [`FsResolverResult`] wrapping the built [`FsNode`].
-    fn build_node(&mut self, path: &str, recurse: bool) -> FsResolverResult<FsNode> {
+    /// If `path` ends with `/*`, a `FsNode::Container` is created with all children.
+    /// If `recurse` is true, subdirectories are traversed recursively.
+    fn resolve_node(&mut self, path: &str, recurse: bool) -> FsResolverResult<FsNode<'a>> {
         if is_wildcard(path) {
             let base_path = strip_wildcard(path);
             let mut children = vec![];
             for entry in self.read_dir(base_path)? {
                 let entry_path = join_paths(base_path, &entry);
-                let child = self.build_node(&entry_path, recurse)?;
+                let child = self.resolve_node(&entry_path, recurse)?;
                 children.push(child);
             }
             children.sort_by_key(|c| c.name().to_ascii_lowercase());
             Ok(FsNode::Container {
                 children,
-                attr: FileAttributes::new_dir(), // convention
+                attr: FileAttributes::new_dir(),
             })
         } else {
             let attr = self.read_attributes(path)?;
@@ -100,7 +103,7 @@ pub trait FsTreeResolver {
                     if recurse {
                         for entry in self.read_dir(path)? {
                             let entry_path = join_paths(path, &entry);
-                            let child = self.build_node(&entry_path, recurse)?;
+                            let child = self.resolve_node(&entry_path, recurse)?;
                             children.push(child);
                         }
                         children.sort_by_key(|c| c.name().to_ascii_lowercase());
@@ -120,10 +123,10 @@ pub trait FsTreeResolver {
                     })
                 }
                 _ => {
-                    let content = self.read_file(path)?;
+                    let source = self.open_file(path)?;
                     Ok(FsNode::File {
                         name: extract_name_from_path(path).to_string(),
-                        content,
+                        source,
                         attr,
                     })
                 }
@@ -131,19 +134,37 @@ pub trait FsTreeResolver {
         }
     }
 
-    /// Parses an entire directory tree starting from `path`.
-    ///
-    /// Equivalent to calling [`Self::build_node`] with `recurse = true`.
-    fn parse_tree(&mut self, path: &str) -> FsResolverResult<FsNode> {
-        self.build_node(path, true)
+    /// Resolves an entire directory tree starting from `path`.
+    #[inline]
+    fn resolve_tree(&mut self, path: &str) -> FsResolverResult<FsNode<'a>> {
+        self.resolve_node(path, true)
     }
 
-    /// Parses a single path (file or directory), without recursing into subdirectories.
-    ///
-    /// Equivalent to calling [`Self::build_node`] with `recurse = false`.
-    fn parse_path(&mut self, path: &str) -> FsResolverResult<FsNode> {
-        self.build_node(path, false)
+    /// Resolves a single path (file or directory) without recursing into subdirectories.
+    #[inline]
+    fn resolve_entry(&mut self, path: &str) -> FsResolverResult<FsNode<'a>> {
+        self.resolve_node(path, false)
     }
 
-    fn resolve_path(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)>;
+    /// Checks if a path exists.
+    #[inline]
+    fn exists(&mut self, path: &str) -> bool {
+        self.read_attributes(path).is_ok()
+    }
+
+    /// Checks if a path is a directory.
+    #[inline]
+    fn is_dir(&mut self, path: &str) -> bool {
+        self.read_attributes(path)
+            .map(|a| a.is_dir())
+            .unwrap_or(false)
+    }
+
+    /// Checks if a path is a regular file.
+    #[inline]
+    fn is_file(&mut self, path: &str) -> bool {
+        self.read_attributes(path)
+            .map(|a| a.is_file())
+            .unwrap_or(false)
+    }
 }

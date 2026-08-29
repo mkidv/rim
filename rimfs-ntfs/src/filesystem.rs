@@ -45,6 +45,6 @@ impl<'a> FsFilesystem<'a> for Ntfs {
     }
 
     fn identifier() -> &'static str {
-        "NTFS"
+        "ntfs"
     }
 }

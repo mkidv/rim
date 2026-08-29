@@ -488,13 +488,13 @@ fn bench_deep_path_compare(c: &mut Criterion) {
         }
         node = dir;
     }
-    let root = FsNode::new_container(vec![node]);
+    let mut root = FsNode::new_container(vec![node]);
 
     let (mut rim_disk, rim_meta) = init_rimfs_disk();
     {
         let mut io = MemRimIO::new(&mut rim_disk);
         let mut injector = FatInjector::new(&mut io, &rim_meta).unwrap();
-        injector.inject_tree(&root).unwrap();
+        injector.inject_tree(&mut root).unwrap();
         injector.flush().unwrap();
     }
 

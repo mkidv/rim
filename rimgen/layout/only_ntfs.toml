@@ -1,5 +1,0 @@
-[[partitions]]
-name = "NTFS"
-# mountpoint = "data/*"
-size = "300M"
-fs = "ntfs"

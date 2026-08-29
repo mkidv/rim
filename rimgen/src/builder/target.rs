@@ -5,12 +5,7 @@ use rimio::prelude::*;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DryRunMode {
-    Off,
-    Plan,
-    Tempfile,
-}
+use crate::builder::DryRunMode;
 
 pub(crate) struct TargetImage {
     /// Keep ownership for the duration of the run.

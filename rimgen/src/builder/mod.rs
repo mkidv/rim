@@ -2,22 +2,42 @@
 
 pub mod gpt;
 pub mod inject;
+#[cfg(feature = "std")]
 pub mod target;
 
 use crate::errors::{GenError, GenResult};
-use crate::layout::Layout;
 use crate::layout::constants::*;
+use crate::layout::*;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::time::Duration;
+use gpt::{calculate_total_disk_sectors, partition_to_gpt_entry};
+#[cfg(feature = "std")]
 use gpt::{
-    calculate_total_disk_sectors, parse_alignment_sectors, partition_to_gpt_partition_entry,
+    calculate_total_disk_sectors_from_config, parse_alignment_sectors,
+    partition_config_to_gpt_entry,
 };
 pub use inject::PartitionReport;
+#[cfg(feature = "std")]
+use rimfs::core::resolver::FsTreeResolver;
+#[cfg(feature = "std")]
 use rimimg::ImageFormat;
 use rimio::prelude::*;
+#[cfg(feature = "std")]
 use std::path::Path;
-use std::time::{Duration, Instant};
-pub use target::DryRunMode;
+#[cfg(feature = "std")]
+use std::time::Instant;
+#[cfg(feature = "std")]
 pub(crate) use target::TargetImage;
+#[cfg(feature = "std")]
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DryRunMode {
+    Off,
+    Plan,
+    Tempfile,
+}
 
 /// Events emitted during disk image generation.
 #[derive(Debug, Clone)]
@@ -55,15 +75,17 @@ pub struct BuildReport {
 pub type BuildEventHandler = Box<dyn FnMut(BuildEvent)>;
 
 /// Declarative builder for disk images.
+#[cfg(feature = "std")]
 pub struct ImageBuilder {
-    pub layout: Layout,
+    pub layout: LayoutConfig,
     pub truncate: bool,
     pub dry_mode: DryRunMode,
     pub on_event: Option<BuildEventHandler>,
 }
 
-impl std::fmt::Debug for ImageBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#[cfg(feature = "std")]
+impl core::fmt::Debug for ImageBuilder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ImageBuilder")
             .field("layout", &self.layout)
             .field("truncate", &self.truncate)
@@ -72,9 +94,10 @@ impl std::fmt::Debug for ImageBuilder {
     }
 }
 
+#[cfg(feature = "std")]
 impl ImageBuilder {
-    /// Create a new builder with the given declarative layout.
-    pub fn new(mut layout: Layout) -> Self {
+    /// Create a new builder with the given declarative layout config.
+    pub fn new(mut layout: LayoutConfig) -> Self {
         let _ = layout.resolve_partition();
         layout.assign_guids();
         Self {
@@ -128,13 +151,14 @@ impl ImageBuilder {
             None => &mut noop,
         };
 
-        build_on_io_with_events(&self.layout, io, cb)
+        build_layout_on_io(&self.layout, io, cb)
     }
 }
 
 /// Build an image with automatic format wrapping via `rimimg`.
+#[cfg(feature = "std")]
 pub fn build_image(
-    layout: &Layout,
+    layout: &LayoutConfig,
     output: &Path,
     truncate: &bool,
     dry_mode: DryRunMode,
@@ -143,15 +167,16 @@ pub fn build_image(
 }
 
 /// Build an image with automatic format wrapping and event callbacks.
+#[cfg(feature = "std")]
 pub fn build_image_with_events<F: FnMut(BuildEvent)>(
-    layout: &Layout,
+    layout: &LayoutConfig,
     output: &Path,
     truncate: &bool,
     dry_mode: DryRunMode,
     mut on_event: F,
 ) -> GenResult<BuildReport> {
     let format = ImageFormat::from_path(output)
-        .map_err(|e| GenError::ContainerError(format!("Failed to determine format: {e}")))?;
+        .map_err(|e| GenError::ContainerError(alloc::format!("Failed to determine format: {e}")))?;
 
     match format {
         ImageFormat::Raw => build_raw_with_events(layout, output, truncate, dry_mode, on_event),
@@ -166,7 +191,7 @@ pub fn build_image_with_events<F: FnMut(BuildEvent)>(
 
             if matches!(dry_mode, DryRunMode::Off) {
                 rimimg::wrap(&temp_raw, output, format).map_err(|e| {
-                    GenError::ContainerError(format!("Failed to wrap container: {e}"))
+                    GenError::ContainerError(alloc::format!("Failed to wrap container: {e}"))
                 })?;
             }
 
@@ -176,8 +201,9 @@ pub fn build_image_with_events<F: FnMut(BuildEvent)>(
 }
 
 /// Create raw disk image on the filesystem.
+#[cfg(feature = "std")]
 pub fn build_raw(
-    layout: &Layout,
+    layout: &LayoutConfig,
     output: &Path,
     truncate: &bool,
     dry_mode: DryRunMode,
@@ -186,15 +212,16 @@ pub fn build_raw(
 }
 
 /// Create raw disk image on the filesystem with event callbacks.
+#[cfg(feature = "std")]
 pub fn build_raw_with_events<F: FnMut(BuildEvent)>(
-    layout: &Layout,
+    layout: &LayoutConfig,
     output: &Path,
     truncate: &bool,
     dry_mode: DryRunMode,
     mut on_event: F,
 ) -> GenResult<BuildReport> {
     let t0 = Instant::now();
-    let total_sectors = calculate_total_disk_sectors(layout);
+    let total_sectors = calculate_total_disk_sectors_from_config(layout);
     let total_bytes = total_sectors * DEFAULT_SECTOR_SIZE;
 
     // Determine alignment
@@ -221,7 +248,7 @@ pub fn build_raw_with_events<F: FnMut(BuildEvent)>(
                 total_sectors,
             });
         }
-        partition_entries.push(partition_to_gpt_partition_entry(part, start, end)?);
+        partition_entries.push(partition_config_to_gpt_entry(part, start, end)?);
         start = rimpart::gpt::align_up(end, align_sectors);
     }
 
@@ -288,7 +315,26 @@ pub fn build_raw_with_events<F: FnMut(BuildEvent)>(
         let mut io = target.as_io()?;
         let (_hdr, entries) = rimpart::gpt::read_gpt_with_sector(&mut io, DEFAULT_SECTOR_SIZE)?;
 
-        inject::format_inject_all(&mut io, layout, &entries, on_event)?
+        let mut resolved = layout.to_layout(&mut crate::guid::RandomGuidGenerator)?;
+        let mut parser = rimfs::core::StdResolver::new();
+        for (i, part) in layout.partitions.iter().enumerate() {
+            let mountpoint = part.mountpoint.as_deref().unwrap_or("");
+            if !mountpoint.is_empty() {
+                let source_path = layout.base_dir.join(mountpoint);
+                let node = parser.resolve_tree(source_path.to_str().unwrap_or(""))?;
+                resolved.partitions[i].root = Some(node);
+            }
+            if let Some(payload_relative) = &part.payload {
+                let payload_path = layout.base_dir.join(payload_relative);
+                let file = std::fs::File::open(&payload_path)?;
+                let file_size = file.metadata()?.len();
+                let file_io = rimio::prelude::ReadOnlyFileRimIO::from_file(file)?;
+                resolved.partitions[i].raw_source = Some(Box::new(file_io));
+                resolved.partitions[i].raw_size = file_size;
+            }
+        }
+
+        inject::format_inject_resolved_all(&mut io, &mut resolved, &entries, on_event)?
     };
 
     Ok(BuildReport {
@@ -300,36 +346,56 @@ pub fn build_raw_with_events<F: FnMut(BuildEvent)>(
     })
 }
 
-/// Build a disk layout directly onto an open `RimIO` stream.
-pub fn build_on_io(layout: &Layout, io: &mut dyn RimIO) -> GenResult<BuildReport> {
-    build_on_io_with_events(layout, io, |_| {})
+/// Build a layout directly onto an open `RimIO` stream using host std files.
+#[cfg(feature = "std")]
+pub fn build_layout_on_io<F: FnMut(BuildEvent)>(
+    layout: &LayoutConfig,
+    io: &mut dyn RimIO,
+    on_event: F,
+) -> GenResult<BuildReport> {
+    let mut resolved = layout.to_layout(&mut crate::guid::RandomGuidGenerator)?;
+    let mut parser = rimfs::core::StdResolver::new();
+    for (i, part) in layout.partitions.iter().enumerate() {
+        let mountpoint = part.mountpoint.as_deref().unwrap_or("");
+        if !mountpoint.is_empty() {
+            let source_path = layout.base_dir.join(mountpoint);
+            let node = parser.resolve_tree(source_path.to_str().unwrap_or(""))?;
+            resolved.partitions[i].root = Some(node);
+        }
+        if let Some(payload_relative) = &part.payload {
+            let payload_path = layout.base_dir.join(payload_relative);
+            let file = std::fs::File::open(&payload_path)?;
+            let file_size = file.metadata()?.len();
+            let file_io = rimio::prelude::ReadOnlyFileRimIO::from_file(file)?;
+            resolved.partitions[i].raw_source = Some(Box::new(file_io));
+            resolved.partitions[i].raw_size = file_size;
+        }
+    }
+    build_on_io(&mut resolved, io, on_event)
 }
 
-/// Build a disk layout directly onto an open `RimIO` stream with event callbacks.
-pub fn build_on_io_with_events<F: FnMut(BuildEvent)>(
-    layout: &Layout,
+/// Build a layout directly onto an open `RimIO` stream.
+pub fn build_on_io_simple(layout: &mut Layout<'_>, io: &mut dyn RimIO) -> GenResult<BuildReport> {
+    build_on_io(layout, io, |_| {})
+}
+
+/// Build a layout directly onto an open `RimIO` stream with event callbacks.
+pub fn build_on_io<F: FnMut(BuildEvent)>(
+    layout: &mut Layout<'_>,
     io: &mut dyn RimIO,
     mut on_event: F,
 ) -> GenResult<BuildReport> {
+    #[cfg(feature = "std")]
     let t0 = Instant::now();
     let total_sectors = calculate_total_disk_sectors(layout);
     let total_bytes = total_sectors * DEFAULT_SECTOR_SIZE;
 
-    let align_sectors = if let Some(disk) = &layout.disk {
-        if let Some(align_str) = &disk.alignment {
-            parse_alignment_sectors(align_str)?
-        } else {
-            rimpart::gpt::align_lba_1m(DEFAULT_SECTOR_SIZE)
-        }
-    } else {
-        rimpart::gpt::align_lba_1m(DEFAULT_SECTOR_SIZE)
-    };
-
+    let align_sectors = layout.alignment_sectors;
     let mut start = align_sectors;
-    let mut partition_entries = vec![];
+    let mut partition_entries = Vec::with_capacity(layout.partitions.len());
 
     for part in &layout.partitions {
-        let sectors = gpt::size_to_sectors(&part.size);
+        let sectors = part.size_sectors;
         let end = start + sectors - 1;
         if end >= total_sectors {
             return Err(GenError::PartitionDoesNotFit {
@@ -338,7 +404,7 @@ pub fn build_on_io_with_events<F: FnMut(BuildEvent)>(
                 total_sectors,
             });
         }
-        partition_entries.push(partition_to_gpt_partition_entry(part, start, end)?);
+        partition_entries.push(partition_to_gpt_entry(part, start, end));
         start = rimpart::gpt::align_up(end, align_sectors);
     }
 
@@ -347,21 +413,15 @@ pub fn build_on_io_with_events<F: FnMut(BuildEvent)>(
         total_sectors,
     });
 
-    let disk_guid = if let Some(disk) = &layout.disk {
-        if let Some(guid) = disk.guid {
-            *guid.as_bytes()
-        } else {
-            *Uuid::new_v4().as_bytes()
-        }
-    } else {
-        *Uuid::new_v4().as_bytes()
-    };
-
+    #[cfg(feature = "std")]
     let gpt_t0 = Instant::now();
     rimpart::mbr::write_mbr_protective(io, total_sectors)?;
-    rimpart::gpt::write_gpt_from_entries(io, &partition_entries, total_sectors, disk_guid)?;
+    rimpart::gpt::write_gpt_from_entries(io, &partition_entries, total_sectors, layout.disk_guid)?;
     rimpart::validate_full_disk(io)?;
+    #[cfg(feature = "std")]
     let gpt_duration = gpt_t0.elapsed();
+    #[cfg(not(feature = "std"))]
+    let gpt_duration = Duration::ZERO;
 
     on_event(BuildEvent::GptWritten {
         duration: gpt_duration,
@@ -369,13 +429,19 @@ pub fn build_on_io_with_events<F: FnMut(BuildEvent)>(
 
     let (_hdr, entries) = rimpart::gpt::read_gpt_with_sector(io, DEFAULT_SECTOR_SIZE)?;
 
-    let partitions = inject::format_inject_all(io, layout, &entries, on_event)?;
+    let partitions = inject::format_inject_resolved_all(io, layout, &entries, on_event)?;
+    io.set_offset(0);
+
+    #[cfg(feature = "std")]
+    let total_duration = t0.elapsed();
+    #[cfg(not(feature = "std"))]
+    let total_duration = Duration::ZERO;
 
     Ok(BuildReport {
         total_bytes,
         total_sectors,
         gpt_duration,
         partitions,
-        total_duration: t0.elapsed(),
+        total_duration,
     })
 }

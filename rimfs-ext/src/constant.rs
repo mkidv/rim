@@ -51,7 +51,7 @@ pub const EXT_MAX_INODE_SIZE: usize = 1024;
 // Block Groups
 
 pub const EXT_DEFAULT_BLOCKS_PER_GROUP: u32 = 8192;
-pub const EXT_DEFAULT_INODES_PER_GROUP: u32 = 256;
+pub const EXT_DEFAULT_INODES_PER_GROUP: u32 = 2048;
 
 // BGDT entry size
 pub const EXT_BGDT_ENTRY_SIZE: usize = 64;

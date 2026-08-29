@@ -501,22 +501,46 @@ impl ExtDirEntry {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
-    fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
-        let (is_dir, inode, _) = self.resolve_path(path)?;
-        if !is_dir {
-            return Err(FsResolverError::Invalid("Not a directory"));
+impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
+    pub fn resolve_entry_info(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
+        match crate::core::resolver::walker::walk_path(self, path)? {
+            Some(entry) => {
+                // Get size from inode
+                let inode_buf = self.read_inode(entry.inode)?;
+                let size = self.inode_size(&inode_buf) as usize;
+                Ok((entry.is_dir(), entry.inode, size))
+            }
+            None => Ok((true, EXT_ROOT_INODE, 0)),
         }
+    }
+}
+
+impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExtResolver<'a, IO> {
+    fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
+        let (is_dir, inode, _) = self.resolve_entry_info(path)?;
+        crate::ensure!(is_dir, FsResolverError::Invalid("Not a directory"));
 
         let entries = self.read_dir_entries(inode)?;
         Ok(entries.into_iter().map(|e| e.name).collect())
     }
 
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (is_dir, inode, _) = self.resolve_path(path)?;
-        if is_dir {
-            return Err(FsResolverError::Invalid("Not a file"));
+    fn open_file(
+        &mut self,
+        path: &str,
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+        let (is_dir, inode, size) = self.resolve_entry_info(path)?;
+        crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
+        if size == 0 {
+            return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
+
+        let data = self.read_file_content(inode)?;
+        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+    }
+
+    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
+        let (is_dir, inode, _) = self.resolve_entry_info(path)?;
+        crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
 
         self.read_file_content(inode)
     }
@@ -538,9 +562,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
                     .map(u16::from_le_bytes)
                     .unwrap_or(0);
 
-                if (i_mode & 0xF000) != 0xA000 {
-                    return Err(FsResolverError::Invalid("Not a symlink"));
-                }
+                crate::ensure!(
+                    (i_mode & 0xF000) == 0xA000,
+                    FsResolverError::Invalid("Not a symlink")
+                );
 
                 let size = self.inode_size(&inode_buf) as usize;
                 let i_blocks = inode_buf
@@ -611,18 +636,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
         }
 
         Err(FsResolverError::Invalid("Invalid path"))
-    }
-
-    fn resolve_path(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
-        match crate::core::resolver::walker::walk_path(self, path)? {
-            Some(entry) => {
-                // Get size from inode
-                let inode_buf = self.read_inode(entry.inode)?;
-                let size = self.inode_size(&inode_buf) as usize;
-                Ok((entry.is_dir(), entry.inode, size))
-            }
-            None => Ok((true, EXT_ROOT_INODE, 0)),
-        }
     }
 }
 
@@ -736,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_extent_tree_depth_0() {
-        let meta = ExtMeta::new(64 * 1024 * 1024, None);
+        let meta = ExtMeta::new(64 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0u8; 64 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut disk);
         let mut resolver = ExtResolver::new(&mut io, &meta);
@@ -768,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_extent_tree_depth_1() {
-        let meta = ExtMeta::new(64 * 1024 * 1024, None);
+        let meta = ExtMeta::new(64 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0u8; 64 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut disk);
 
@@ -828,7 +841,7 @@ mod tests {
 
     #[test]
     fn test_uninit_extent_zero_fill() {
-        let meta = ExtMeta::new(32 * 1024 * 1024, None);
+        let meta = ExtMeta::new(32 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0xAAu8; 32 * 1024 * 1024]; // Pre-fill disk with garbage
         let mut io = MemRimIO::new(&mut disk);
 
@@ -865,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_triple_indirect_block_map() {
-        let meta = ExtMeta::new_ext2(64 * 1024 * 1024, None);
+        let meta = ExtMeta::new_ext2(64 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0u8; 64 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut disk);
 
@@ -894,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_ext2_32byte_bgdt_and_128byte_inode() {
-        let meta = ExtMeta::new_ext2(32 * 1024 * 1024, Some("EXT2VOL"));
+        let meta = ExtMeta::new_ext2(32 * 1024 * 1024, Some("EXT2VOL")).unwrap();
         assert_eq!(meta.inode_size, 128);
         assert_eq!(meta.bgdt_entry_size, 32);
         assert!(!meta.features.has_extents);

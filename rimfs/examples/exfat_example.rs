@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PARSE FS SOURCE (host)
     let t1 = Instant::now();
     let mut parser = StdResolver::new();
-    let tree = parser.parse_tree(test_data_path).expect("parse failed");
+    let mut tree = parser.resolve_tree(test_data_path).expect("parse failed");
     let dt_parse_std = t1.elapsed();
 
     // INJECT - new counter to isolate the phase
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t2 = Instant::now();
     let mut injector = ExFatInjector::new(&mut io_for_inject, &meta)
         .map_err(|e| format!("Injector error: {e}"))?;
-    injector.inject_tree(&tree).expect("inject failed");
+    injector.inject_tree(&mut tree).expect("inject failed");
     let dt_inject = t2.elapsed();
     let stats_inject = io_for_inject.snapshot();
 
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut io_for_parse_back = IOCounter::with_align(io_for_check.into_inner(), align);
     let t4 = Instant::now();
     let mut resolver = ExFatResolver::new(&mut io_for_parse_back, &meta);
-    let node = resolver.parse_tree("/*").expect("parse_tree failed");
+    let node = resolver.resolve_tree("/*").expect("resolve_tree failed");
     let dt_parse_fat = t4.elapsed();
     let stats_parse_fat = io_for_parse_back.snapshot();
 

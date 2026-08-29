@@ -4,7 +4,7 @@
 //! Contains the computed parameters for an NTFS volume.
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 pub use crate::core::meta::*;
 
@@ -92,20 +92,23 @@ impl NtfsMeta {
             .map_err(|_| FsError::Invalid("Failed to read NTFS boot sector"))?;
 
         let oem_id = boot.oem_id;
-        if &oem_id != b"NTFS    " {
-            return Err(FsError::Invalid("Not an NTFS volume (OEM ID mismatch)"));
-        }
+        crate::ensure!(
+            &oem_id == b"NTFS    ",
+            FsError::Invalid("Not an NTFS volume (OEM ID mismatch)")
+        );
 
         let end_marker = boot.end_marker;
-        if end_marker != 0xAA55 {
-            return Err(FsError::Invalid("Invalid boot sector signature"));
-        }
+        crate::ensure!(
+            end_marker == 0xAA55,
+            FsError::Invalid("Invalid boot sector signature")
+        );
 
         let bytes_per_sector = boot.bytes_per_sector;
         let sectors_per_cluster = boot.sectors_per_cluster;
-        if bytes_per_sector == 0 || sectors_per_cluster == 0 {
-            return Err(FsError::Invalid("Invalid sector or cluster size"));
-        }
+        crate::ensure!(
+            bytes_per_sector > 0 && sectors_per_cluster > 0,
+            FsError::Invalid("Invalid sector or cluster size")
+        );
         let bytes_per_cluster = boot.bytes_per_cluster();
         let total_sectors = boot.total_sectors;
         let volume_size_bytes = (total_sectors + 1) * bytes_per_sector as u64;
@@ -119,8 +122,7 @@ impl NtfsMeta {
 
         let reserved_mft_records = 16;
         let bitmap_size_bytes = total_clusters.div_ceil(8);
-        let mirr_clusters =
-            (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
+        let mirr_clusters = (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
         let logfile_lcn = mft_mirr_lcn + mirr_clusters;
         let bitmap_lcn = mft_lcn
             + (reserved_mft_records * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
@@ -178,15 +180,18 @@ impl NtfsMeta {
         upcase_flavor: UpcaseFlavor,
     ) -> FsResult<Self> {
         // Validate parameters
-        if bytes_per_cluster < bytes_per_sector as u32 {
-            return Err(FsError::Invalid("cluster size must be >= sector size"));
-        }
-        if !bytes_per_cluster.is_power_of_two() {
-            return Err(FsError::Invalid("cluster size must be power of 2"));
-        }
-        if !mft_record_size.is_power_of_two() {
-            return Err(FsError::Invalid("MFT record size must be power of 2"));
-        }
+        crate::ensure!(
+            bytes_per_cluster >= bytes_per_sector as u32,
+            FsError::Invalid("cluster size must be >= sector size")
+        );
+        crate::ensure!(
+            bytes_per_cluster.is_power_of_two(),
+            FsError::Invalid("cluster size must be power of 2")
+        );
+        crate::ensure!(
+            mft_record_size.is_power_of_two(),
+            FsError::Invalid("MFT record size must be power of 2")
+        );
 
         let sectors_per_cluster = (bytes_per_cluster / bytes_per_sector as u32) as u8;
         // BPB_TotSec64 must be PartitionSectors - 1 (the last sector is reserved for backup VBR)

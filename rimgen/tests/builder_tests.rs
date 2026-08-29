@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use rimgen::{DiskLayout, Filesystem, ImageBuilder, Partition, Size};
+use rimgen::{Filesystem, ImageBuilder, LayoutConfig, PartitionConfig, Size};
 use rimimg::ImageFormat;
 use rimio::prelude::*;
 use std::fs::File;
@@ -17,10 +17,10 @@ fn test_declarative_builder_and_format_conversions() {
     let vmdk_path = dir.path().join("test_disk.vmdk");
 
     // 1. Build a multi-partition layout
-    let layout = DiskLayout {
+    let layout = LayoutConfig {
         base_dir: PathBuf::from("."),
         partitions: vec![
-            Partition {
+            PartitionConfig {
                 name: "ESP".to_string(),
                 size: Size::Fixed(16),
                 fs: Filesystem::Fat16,
@@ -33,7 +33,7 @@ fn test_declarative_builder_and_format_conversions() {
                 label: None,
                 uuid: None,
             },
-            Partition {
+            PartitionConfig {
                 name: "DATA_EXT4".to_string(),
                 size: Size::Fixed(16),
                 fs: Filesystem::Ext4,
@@ -46,7 +46,7 @@ fn test_declarative_builder_and_format_conversions() {
                 label: None,
                 uuid: None,
             },
-            Partition {
+            PartitionConfig {
                 name: "DATA_EXFAT".to_string(),
                 size: Size::Fixed(16),
                 fs: Filesystem::ExFat,

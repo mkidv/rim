@@ -11,29 +11,30 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["mem", "std", "fat", "exfat", "ext", "ntfs"]
-mem = ["rimfs-core/mem", "rimfs-fat?/mem", "rimfs-exfat?/mem", "rimfs-ext?/mem", "rimfs-ntfs?/mem"]
-std = ["alloc", "rimfs-core/std", "rimfs-fat?/std", "rimfs-exfat?/std", "rimfs-ext?/std", "rimfs-ntfs?/std"]
-uefi = ["alloc", "rimfs-core/uefi", "rimfs-fat?/uefi", "rimfs-exfat?/uefi", "rimfs-ext?/uefi", "rimfs-ntfs?/uefi"]
-alloc = ["rimfs-core/alloc", "rimfs-fat?/alloc", "rimfs-exfat?/alloc", "rimfs-ext?/alloc", "rimfs-ntfs?/alloc"]
+default = ["std", "fat", "exfat", "ext", "ntfs", "tar"]
+alloc = ["rimfs-core/alloc", "rimfs-fat?/alloc", "rimfs-exfat?/alloc", "rimfs-ext?/alloc", "rimfs-ntfs?/alloc", "rimfs-tar?/alloc"]
+mem = ["alloc"]
+std = ["alloc", "rimfs-core/std", "rimfs-fat?/std", "rimfs-exfat?/std", "rimfs-ext?/std", "rimfs-ntfs?/std", "rimfs-tar?/std"]
 fat = ["alloc", "dep:rimfs-fat"]
 exfat = ["alloc", "dep:rimfs-exfat"]
 ext = ["alloc", "dep:rimfs-ext"]
 ntfs = ["alloc", "dep:rimfs-ntfs"]
+tar = ["alloc", "dep:rimfs-tar"]
 
 [dependencies]
-rimfs-core = { path = "../rimfs-core", version = "0.6.3", default-features = false }
-rimfs-fat = { path = "../rimfs-fat", version = "0.6.3", default-features = false, optional = true }
-rimfs-exfat = { path = "../rimfs-exfat", version = "0.6.3", default-features = false, optional = true }
-rimfs-ext = { path = "../rimfs-ext", version = "0.6.3", default-features = false, optional = true }
-rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.6.3", default-features = false, optional = true }
+rimfs-core = { path = "../rimfs-core", version = "0.7.0", default-features = false }
+rimfs-fat = { path = "../rimfs-fat", version = "0.7.0", default-features = false, optional = true }
+rimfs-exfat = { path = "../rimfs-exfat", version = "0.7.0", default-features = false, optional = true }
+rimfs-ext = { path = "../rimfs-ext", version = "0.7.0", default-features = false, optional = true }
+rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.7.0", default-features = false, optional = true }
+rimfs-tar = { path = "../rimfs-tar", version = "0.7.0", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3.20.0"
 fatfs = "0.3"
 fscommon = "0.1"
-rimio = { path = "../rimio", version = "0.6.3", features = ["mmap", "std"] }
+rimio = { path = "../rimio", version = "0.7.0", features = ["mmap", "std"] }
 
 [package.metadata.docs.rs]
 features = ["std"]

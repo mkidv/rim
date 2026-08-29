@@ -12,7 +12,7 @@ use rimio::prelude::*;
 pub fn write_stream_to_units<IO, M, U>(
     dest: &mut IO,
     meta: &M,
-    source: &mut (dyn RimIO + '_),
+    source: &mut (dyn RimRead + '_),
     units: &[U],
     total_size: u64,
 ) -> RimIOResult<()>
@@ -51,7 +51,7 @@ where
 pub fn write_stream_to_run_list<IO, M, U>(
     dest: &mut IO,
     meta: &M,
-    source: &mut (dyn RimIO + '_),
+    source: &mut (dyn RimRead + '_),
     runs: &RunList,
     total_size: u64,
 ) -> RimIOResult<()>

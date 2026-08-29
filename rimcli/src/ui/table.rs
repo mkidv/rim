@@ -3,11 +3,11 @@
 use crate::ui::badge::fs_badge;
 use crate::ui::format::pretty_bytes;
 use colored::Colorize;
-use rimgen::Layout;
+use rimgen::LayoutConfig;
 use rimpart::scanner::DiskInfo;
 
-/// Print a formatted table representing the declarative layout.
-pub fn print_layout_table(layout: &Layout) {
+/// Print a formatted table representing the declarative layout config.
+pub fn print_layout_table(layout: &LayoutConfig) {
     println!(
         "{: <4} | {: <16} | {: <8} | {: <10} | {: <6} | {: <16}",
         "#".bold(),

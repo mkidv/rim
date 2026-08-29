@@ -11,17 +11,16 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["mem", "std", "alloc"]
-mem = ["rimio/mem", "rimfs-core/mem"]
-std = ["rimio/std", "alloc", "crc32fast/std", "time/std", "rimfs-core/std"]
-uefi = ["rimio/uefi", "alloc", "rimfs-core/uefi"]
-alloc = ["rimfs-core/alloc"]
+default = ["std"]
+alloc = ["rimio/alloc", "rimfs-core/alloc"]
+mem = ["alloc"]
+std = ["alloc", "rimio/std", "crc32fast/std", "time/std", "rimfs-core/std"]
 
 [dependencies]
 bitflags = "2.9.1"
 crc32fast = { version = "1.4.2", default-features = false }
-rimio = { path = "../rimio", version = "0.6.3", default-features = false }
-rimfs-core = { path = "../rimfs-core", version = "0.6.3", default-features = false }
+rimio = { path = "../rimio", version = "0.7.0", default-features = false }
+rimfs-core = { path = "../rimfs-core", version = "0.7.0", default-features = false }
 time = { version = "0.3.41", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = ["derive"] }
 

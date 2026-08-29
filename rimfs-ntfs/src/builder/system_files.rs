@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::attr::{AttributeType, NtfsFileNameNamespace};
 use crate::builder::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};

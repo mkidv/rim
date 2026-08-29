@@ -22,11 +22,15 @@ pub mod linux;
 pub mod macos;
 
 use cmd_builder::FormatCommandBuilder;
-use rimgen::Layout;
+use rimgen::LayoutConfig;
 use std::path::Path;
 
 /// Execute host-native formatting and injection on an image file.
-pub fn format_inject_host(layout: &Layout, img_path: &Path, dry_run: bool) -> anyhow::Result<()> {
+pub fn format_inject_host(
+    layout: &LayoutConfig,
+    img_path: &Path,
+    dry_run: bool,
+) -> anyhow::Result<()> {
     for p in &layout.partitions {
         if p.is_mountable() {
             p.fs.validate_binaries()?;

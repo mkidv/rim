@@ -6,7 +6,7 @@ use ::alloc::{
     vec::Vec,
 };
 
-use rimio::{RimIO, RimIOExt};
+use rimio::{RimIO, RimIOExt, RimRead};
 
 use crate::core::{fat::*, injector::*, resolver::*};
 
@@ -92,7 +92,7 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, IO> {
-    fn set_root_context(&mut self, _: &FsNode) -> FsInjectorResult {
+    fn set_root_context(&mut self, _: &FsNode<'_>) -> FsInjectorResult {
         let offset = self.meta.unit_offset(self.meta.root_unit());
 
         let mut buf = vec![0u8; self.meta.unit_size()];
@@ -131,7 +131,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
     fn write_file(
         &mut self,
         name: &str,
-        source: &mut dyn RimIO,
+        source: &mut dyn RimRead,
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
@@ -285,21 +285,13 @@ mod tests {
                 FsNode::Dir {
                     name: "subdir".to_string(),
                     attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::File {
-                        name: "hello.txt".to_string(),
-                        content: b"Hello World!".to_vec(),
-                        attr: FileAttributes::new_file(),
-                    }],
+                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
                 },
-                FsNode::File {
-                    name: "readme.md".to_string(),
-                    content: b"Test Readme".to_vec(),
-                    attr: FileAttributes::new_file(),
-                },
+                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
             ],
         };
 
-        injector.inject_tree(&tree).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
 
         // Debug: hexdump the root directory
         let mut root_data = vec![0u8; meta.unit_size()];
@@ -332,7 +324,7 @@ mod tests {
         println!("Root entries found by read_dir: {root_entries:?}");
 
         let mut parser_back = ExFatResolver::new(&mut io, &meta);
-        let mut parsed_tree = parser_back.parse_tree("/*").expect("parse_tree failed");
+        let mut parsed_tree = parser_back.resolve_tree("/*").expect("resolve_tree failed");
 
         tree.sort_children_recursively();
         parsed_tree.sort_children_recursively();

@@ -1,6 +1,3 @@
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{boxed::Box, vec};
-
 use crate::{
     FsMeta,
     core::{FsResolverResult, utils::upcase::UpcaseHandle as CoreUpcase},

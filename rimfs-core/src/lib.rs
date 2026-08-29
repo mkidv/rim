@@ -15,8 +15,10 @@ pub mod fat;
 pub mod feature;
 pub mod filesystem;
 pub mod formatter;
+#[cfg(feature = "alloc")]
 pub mod injector;
 pub mod meta;
+#[cfg(feature = "alloc")]
 pub mod resolver;
 pub mod utils;
 pub mod validate;
@@ -27,8 +29,10 @@ pub mod traits {
     pub use super::feature::FsSystemFeature;
     pub use super::filesystem::FsFilesystem;
     pub use super::formatter::FsFormatter;
+    #[cfg(feature = "alloc")]
     pub use super::injector::{FsContext, FsInjector, FsTreeInjector};
     pub use super::meta::FsMeta;
+    #[cfg(feature = "alloc")]
     pub use super::resolver::{
         FsNode, FsResolver, FsTreeResolver, attr::FileAttributes, attr::NodeKind,
     };
@@ -36,7 +40,10 @@ pub mod traits {
 }
 
 pub use errors::*;
-pub use utils::{path_utils::*, time_utils::*, volume::*};
+pub use time;
+#[cfg(feature = "alloc")]
+pub use utils::path_utils::*;
+pub use utils::{time_utils::*, volume::*};
 
 #[cfg(feature = "std")]
 pub use resolver::std_resolver::StdResolver;

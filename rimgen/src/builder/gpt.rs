@@ -5,19 +5,32 @@ use crate::layout::constants::*;
 use crate::layout::*;
 use rimpart::{gpt::GptEntry, guids::*};
 
-/// Encode a Partition as a GPTPartitionEntry.
-pub fn partition_to_gpt_partition_entry(
-    partition: &Partition,
+/// Encode a Partition as a GptEntry.
+pub fn partition_to_gpt_entry(partition: &Partition<'_>, start: u64, end: u64) -> GptEntry {
+    let type_guid = gpt_type_guid_for_kind(&partition.kind);
+    GptEntry::new(
+        type_guid,
+        partition.guid,
+        start,
+        end,
+        if partition.bootable { 1 } else { 0 },
+        &partition.name,
+    )
+}
+
+/// Encode a PartitionConfig as a GptEntry.
+pub fn partition_config_to_gpt_entry(
+    partition: &PartitionConfig,
     start: u64,
     end: u64,
 ) -> GenResult<GptEntry> {
     let type_guid = gpt_type_guid_for_kind(&partition.effective_kind());
 
-    let unique_guid = partition
-        .guid
-        .unwrap_or_else(uuid::Uuid::new_v4)
-        .as_u128()
-        .to_le_bytes();
+    let unique_guid = if let Some(guid) = partition.guid {
+        guid.as_u128().to_le_bytes()
+    } else {
+        [0u8; 16]
+    };
 
     Ok(GptEntry::new(
         type_guid,
@@ -50,14 +63,24 @@ pub fn size_to_sectors(size: &Size) -> u64 {
     }
 }
 
-/// Calculate total disk sectors needed for a layout.
-pub fn calculate_total_disk_sectors(layout: &Layout) -> u64 {
+/// Calculate total disk sectors needed for a layout config.
+pub fn calculate_total_disk_sectors_from_config(layout: &LayoutConfig) -> u64 {
     layout
         .partitions
         .iter()
         .map(|p| size_to_sectors(&p.size) + DEFAULT_ALIGNMENT)
         .sum::<u64>()
         + DEFAULT_ALIGNMENT
+}
+
+/// Calculate total disk sectors needed for a layout.
+pub fn calculate_total_disk_sectors(layout: &Layout<'_>) -> u64 {
+    layout
+        .partitions
+        .iter()
+        .map(|p| p.size_sectors + layout.alignment_sectors)
+        .sum::<u64>()
+        + layout.alignment_sectors
 }
 
 /// Parse alignment string to sector count.
@@ -102,13 +125,13 @@ pub fn parse_alignment_sectors(s: &str) -> GenResult<u64> {
             })?
     };
 
-    if bytes % DEFAULT_SECTOR_SIZE != 0 {
-        return Err(LayoutError::InvalidAlignment {
+    crate::ensure!(
+        bytes % DEFAULT_SECTOR_SIZE == 0,
+        LayoutError::InvalidAlignment {
             bytes,
             sector_size: DEFAULT_SECTOR_SIZE,
         }
-        .into());
-    }
+    );
 
     Ok(bytes / DEFAULT_SECTOR_SIZE)
 }

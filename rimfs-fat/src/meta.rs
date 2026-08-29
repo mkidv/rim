@@ -1,3 +1,4 @@
+use alloc::string::{String, ToString};
 use rimio::{RimIO, RimIOStructExt};
 
 use crate::core::errors::{FsError, FsResult};

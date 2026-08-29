@@ -92,7 +92,7 @@ mod tests {
     const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
 
     fn make_meta_32mb() -> ExtMeta {
-        ExtMeta::new(SIZE_BYTES, Some("TESTEXT"))
+        ExtMeta::new(SIZE_BYTES, Some("TESTEXT")).unwrap()
     }
 
     #[test]

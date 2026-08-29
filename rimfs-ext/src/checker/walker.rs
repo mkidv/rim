@@ -135,6 +135,7 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn walk_from_root(
         &mut self,
         rep: &mut VerifyReport,

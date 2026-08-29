@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: MIT
-
-use crate::prelude::*;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[cfg(feature = "alloc")]
+use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 //
@@ -24,9 +23,11 @@ impl Run {
 }
 
 /// A list of physical runs, typically representing a fragmented allocation.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunList(pub Vec<Run>);
 
+#[cfg(feature = "alloc")]
 impl RunList {
     pub const fn new() -> Self {
         Self(Vec::new())
@@ -133,6 +134,7 @@ impl RunList {
 //
 
 /// A wrapper that implements `RimIO` over a fragmented `RunList`.
+#[cfg(feature = "alloc")]
 pub struct MappedRimIO<'a, IO: RimIO + ?Sized> {
     inner: &'a mut IO,
     runs: &'a RunList,
@@ -143,6 +145,7 @@ pub struct MappedRimIO<'a, IO: RimIO + ?Sized> {
     last_run_idx: usize,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a, IO: RimIO + ?Sized> MappedRimIO<'a, IO> {
     pub fn new(inner: &'a mut IO, runs: &'a RunList, unit_size: usize) -> Self {
         Self {
@@ -198,7 +201,8 @@ impl<'a, IO: RimIO + ?Sized> MappedRimIO<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> RimIO for MappedRimIO<'a, IO> {
+#[cfg(feature = "alloc")]
+impl<'a, IO: RimIO + ?Sized> RimRead for MappedRimIO<'a, IO> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let mut remaining = buf.len();
         let mut logical_ptr = offset;
@@ -231,7 +235,10 @@ impl<'a, IO: RimIO + ?Sized> RimIO for MappedRimIO<'a, IO> {
 
         Ok(())
     }
+}
 
+#[cfg(feature = "alloc")]
+impl<'a, IO: RimIO + ?Sized> RimWrite for MappedRimIO<'a, IO> {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         let mut remaining = data.len();
         let mut logical_ptr = offset;
@@ -266,7 +273,10 @@ impl<'a, IO: RimIO + ?Sized> RimIO for MappedRimIO<'a, IO> {
     fn flush(&mut self) -> RimIOResult {
         self.inner.flush()
     }
+}
 
+#[cfg(feature = "alloc")]
+impl<'a, IO: RimIO + ?Sized> RimIO for MappedRimIO<'a, IO> {
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.inner.set_offset(partition_offset)
     }
@@ -277,7 +287,7 @@ impl<'a, IO: RimIO + ?Sized> RimIO for MappedRimIO<'a, IO> {
 }
 
 //
-// MappedRun and MappedRunList
+// MappedRimIO
 //
 
 /// Represents a run mapped to a specific logical offset.
@@ -299,9 +309,11 @@ impl MappedRun {
 }
 
 /// A list of mapped runs, providing a complete logical-to-physical mapping.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MappedRunList(pub Vec<MappedRun>);
 
+#[cfg(feature = "alloc")]
 impl MappedRunList {
     pub const fn new() -> Self {
         Self(Vec::new())

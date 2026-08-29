@@ -33,7 +33,7 @@ fn main() {
     // 2. PARSE HOST DATA (Benchmark only)
     let t1 = Instant::now();
     let mut parser = StdResolver::new();
-    let tree = parser.parse_tree(test_data_path).expect("parse failed");
+    let mut tree = parser.resolve_tree(test_data_path).expect("parse failed");
     let dt_parse_std = t1.elapsed();
 
     // 3. INJECT WITH RIM-INTEGRITY
@@ -41,7 +41,7 @@ fn main() {
     let t2 = Instant::now();
 
     let mut injector = FatInjector::new(&mut io_for_inject, &meta).expect("injector failed");
-    injector.inject_tree(&tree).expect("inject failed");
+    injector.inject_tree(&mut tree).expect("inject failed");
     injector.flush().expect("flush failed");
 
     let dt_inject = t2.elapsed();
@@ -60,7 +60,7 @@ fn main() {
     let t4 = Instant::now();
     let node = {
         let mut resolver = FatResolver::new(&mut io_for_parse_back, &meta);
-        resolver.parse_tree("/*").expect("parse_tree failed")
+        resolver.resolve_tree("/*").expect("resolve_tree failed")
     };
     let dt_parse_fat = t4.elapsed();
     let stats_parse_fat = io_for_parse_back.snapshot();

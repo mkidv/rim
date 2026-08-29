@@ -3,7 +3,7 @@
 
 use crate::upcase::UpcaseHandle;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 /// Apply Update Sequence Array (USA) fixups to a record (Write-side)
@@ -156,8 +156,6 @@ pub fn current_ntfs_time() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Offset between 1601-01-01 and 1970-01-01 in 100-ns intervals
-        const FILETIME_UNIX_DIFF: u64 = 116444736000000000;
-
         if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
             let ticks = duration.as_nanos() / 100;
             return ticks as u64 + FILETIME_UNIX_DIFF;
@@ -166,6 +164,18 @@ pub fn current_ntfs_time() -> u64 {
 
     // Default: 2024-01-01 00:00:00 UTC
     133477536000000000
+}
+
+/// Offset between 1601-01-01 and 1970-01-01 in 100-ns intervals
+pub const FILETIME_UNIX_DIFF: u64 = 116444736000000000;
+
+/// Convert NTFS FILETIME (100-ns intervals since 1601-01-01) to time::OffsetDateTime
+pub fn ntfs_time_to_offset_date_time(filetime: u64) -> Option<time::OffsetDateTime> {
+    if filetime < FILETIME_UNIX_DIFF {
+        return None;
+    }
+    let nanos_since_epoch = (filetime - FILETIME_UNIX_DIFF) * 100;
+    time::OffsetDateTime::from_unix_timestamp_nanos(nanos_since_epoch as i128).ok()
 }
 
 /// Decoded data run
@@ -350,7 +360,11 @@ mod tests {
 
         // Length 128 (0x80) has high bit set, must encode as 2 bytes to stay positive
         let (run128, len128) = encode_data_run(4101, 128);
-        assert_eq!(run128[0] & 0x0F, 2, "Length 128 must use 2 bytes (0x80, 0x00)");
+        assert_eq!(
+            run128[0] & 0x0F,
+            2,
+            "Length 128 must use 2 bytes (0x80, 0x00)"
+        );
         assert_eq!(run128[1], 0x80);
         assert_eq!(run128[2], 0x00);
         let decoded = decode_data_runs(&run128[..len128]);

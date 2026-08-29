@@ -4,6 +4,45 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-29
+### Added
+*   **POSIX UStar TAR Archive Engine (`rimfs-tar`)**:
+    *   New dedicated `no_std + alloc` TAR filesystem driver implementing the complete `rimfs` pipeline (`Tar`, `TarFormatter`, `TarAllocator`, `TarInjector`, `TarResolver`, `TarChecker`).
+    *   Standard UStar 512-byte header serialization, octal integer encoding/decoding, header checksum validation, and end-of-archive (`2 x 512` zero bytes) management.
+    *   Integrated into the `rimfs` public facade via the `tar` cargo feature.
+*   **WebAssembly & UEFI In-Memory Synthesis Demos (`examples/wasm-synth`, `examples/uefi-synth`)**:
+    *   `wasm-synth`: Standalone WebAssembly synthesis module (`wasm32-unknown-unknown`) producing valid multi-partition GPT images in RAM with real-time browser inspection UI.
+    *   `uefi-synth`: Bare-metal UEFI application (`x86_64-unknown-uefi`) running under `#![no_std]` without standard library.
+    *   Automated release web asset pipeline via `scripts/update_web_assets.ps1`.
+*   **NTFS File Attributes Extension & Deep Metadata Resolution (`rimfs-ntfs`)**:
+    *   Introduced `NtfsFileAttributesExt` trait (`as_ntfs_attr()`, `from_ntfs_attr()`) implemented on `FileAttributes`, re-exported in `prelude` and `traits`.
+    *   Enhanced `NtfsResolver::read_attributes` to parse `$STANDARD_INFORMATION` (type `0x10`) resident attributes, decoding file flags and Windows FILETIME timestamps (`created`, `modified`, `accessed`) into `OffsetDateTime`.
+    *   Transparent resolution for named (`$I30`) and unnamed `$INDEX_ROOT` and `$INDEX_ALLOCATION` directory streams.
+*   **Bounded I/O Streams (`rimio`)**:
+    *   Introduced `BoundedRimIO` for zero-overhead bounded partition slicing and isolated sub-stream operations.
+    *   Enhanced `IOCounter` metrics with alignment tracking and snapshotting.
+*   **Declarative Engine & Layout Invariants (`rimgen`)**:
+    *   Added minimum volume size boundary `Filesystem::Ntfs if size_mb < 4` in `check_size_limit`.
+    *   Full support for `part.uuid` (hex 64-bit/32-bit `1234-5678` or UUID 128-bit) in `format_inject_ntfs`.
+    *   Generalization of error macros (`ensure!`, `bail!`) via `gen_error_wiring!`.
+    *   Added multi-filesystem portable in-memory synthesis and layout equivalence tests (`portable_in_memory_test.rs`, `identical_engine_equivalence_test.rs`).
+
+### Changed
+*   **Filesystem Drivers API Harmonization (`rimfs-*`)**:
+    *   Uniformized driver identifiers across all crates in lowercase: `fat`, `exfat`, `ext4`, `ntfs`, `tar`.
+    *   Renamed `TarFs` directly to `Tar`, exporting standard `traits` and `prelude` submodules in `rimfs-tar`.
+    *   Made `ExtMeta::new(...)`, `new_ext2`, `new_ext3`, `new_custom` fallible (`FsResult<ExtMeta>`) with strict geometry validation (power-of-two block size 1KB-64KB, block count $\ge 16$, inodes per group $> 0$).
+    *   Made `ExtInjector::new(...)` and `TarInjector::new(...)` fallible (`FsInjectorResult<Self>`).
+    *   Renamed partition layout structures: `ResolvedPartition` $\rightarrow$ `Partition`, and raw configuration input to `PartitionConfig`.
+*   **Modular Ecosystem Expansion**:
+    *   Workspace expanded from 12 to 13 decoupled crates.
+
+### Fixed
+*   **EXT4 Bit-Exact Deterministic Synthesis (`rimfs-ext`)**:
+    *   Defaulted timestamps to `OffsetDateTime::UNIX_EPOCH` instead of `now_utc()` when `None` in `ExtInode::from_attr` and fast symlinks, ensuring 100% reproducible bit-for-bit synthesis.
+*   **Cleaned Repository Noise**:
+    *   Removed unused `rimgen::utils::string` dead code, legacy layout data files, and empty `rimfs-ntfs/src/features` directory.
+
 ## [0.6.3] - 2026-08-27
 ### Fixed
 *   **NTFS Native Tool Compatibility & Mount Support (`rimfs-ntfs`)**:

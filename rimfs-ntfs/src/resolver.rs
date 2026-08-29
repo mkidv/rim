@@ -175,8 +175,14 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
 
         let mut entries = Vec::new();
 
-        // 1. Read Resident $INDEX_ROOT
-        if let Some(attr) = self.find_attribute(&record, ATTR_INDEX_ROOT)? {
+        // 1. Read Resident $INDEX_ROOT ($I30 or unnamed)
+        let index_root_attr =
+            match self.find_attribute_named(&record, ATTR_INDEX_ROOT, Some("$I30"))? {
+                Some(a) => Some(a),
+                None => self.find_attribute(&record, ATTR_INDEX_ROOT)?,
+            };
+
+        if let Some(attr) = index_root_attr {
             let content = self.get_resident_attribute_content(attr)?;
 
             // Parse Index Root Header (16 bytes)
@@ -190,8 +196,14 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
             }
         }
 
-        // 2. Read Non-Resident $INDEX_ALLOCATION
-        if let Some(attr) = self.find_attribute(&record, ATTR_INDEX_ALLOCATION)? {
+        // 2. Read Non-Resident $INDEX_ALLOCATION ($I30 or unnamed)
+        let index_alloc_attr =
+            match self.find_attribute_named(&record, ATTR_INDEX_ALLOCATION, Some("$I30"))? {
+                Some(a) => Some(a),
+                None => self.find_attribute(&record, ATTR_INDEX_ALLOCATION)?,
+            };
+
+        if let Some(attr) = index_alloc_attr {
             // Check if resident or non-resident (Index Allocation is typically non-resident)
             let content = if let Ok(res) = self.get_resident_attribute_content(attr) {
                 res.to_vec()
@@ -314,86 +326,14 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
         }
         Ok(())
     }
-}
 
-impl<'a, IO: RimIO + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
-    fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
-        let (found, mft_num, _) = self.resolve_path(path)?;
-        if !found {
-            return Err(FsResolverError::NotFound);
-        }
-
-        let entries = self.read_directory_entries(mft_num as u64)?;
-        Ok(entries.into_iter().map(|(name, _, _)| name).collect())
-    }
-
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (found, mft_num, _) = self.resolve_path(path)?;
-        if !found {
-            return Err(FsResolverError::NotFound);
-        }
-
-        let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
-        if header.is_dir() {
-            return Err(FsResolverError::Invalid("not a file"));
-        }
-
-        if let Some(attr) = self.find_attribute(&record, ATTR_DATA)? {
-            if attr.is_resident() {
-                let content = self.get_resident_attribute_content(attr)?;
-                Ok(content.to_vec())
-            } else {
-                self.get_non_resident_attribute_content(attr)
-            }
-        } else {
-            Ok(Vec::new()) // Empty file
-        }
-    }
-
-    fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
-        let (found, _, _) = self.resolve_path(path)?; // Returns generic path info if matched
-        // resolve_path returns (found, mft_num, size?)
-        // Wait, the trait says: resolve_path -> (bool, u32, usize)
-        // bool: exists
-        // u32: start cluster (here mft record)
-        // usize: size
-
-        // Actually I should reuse read_directory_entries or specific logic to get attributes
-        // But resolve_path gives me the MFT number. I can read the record.
-
-        if !found {
-            return Err(FsResolverError::NotFound);
-        }
-
-        // Re-resolve to get attr? Or duplicate logic?
-        // Let's implement resolve_path to do the work
-        // But here I need to return FileAttributes.
-        // HACK: I will re-read the MFT record of the target and check directory flag
-        // A full impl would parse STANDARD_INFORMATION
-
-        // NOTE: Trait signature of resolve_path is `(bool, u32, usize)`.
-        // I implemented it to return MFT record as u32.
-
-        // Let's call resolve_path
-        let (_, mft_num, _) = self.resolve_path(path)?;
-        let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
-
-        if header.is_dir() {
-            Ok(FileAttributes::new_dir())
-        } else {
-            Ok(FileAttributes::new_file())
-        }
-    }
-
-    fn resolve_path(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
+    pub fn resolve_path_internal(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
         // Start at root
         let mut current_mft = MFT_RECORD_ROOT;
 
         // Trim leading slash
         let clean_path = path.trim_start_matches('/');
-        if clean_path.is_empty() {
+        if clean_path.empty_or_root() {
             return Ok((true, current_mft as u32, 0));
         }
 
@@ -425,11 +365,102 @@ impl<'a, IO: RimIO + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
     }
 }
 
+trait EmptyOrRoot {
+    fn empty_or_root(&self) -> bool;
+}
+
+impl EmptyOrRoot for &str {
+    fn empty_or_root(&self) -> bool {
+        self.is_empty() || *self == "/"
+    }
+}
+
+impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for NtfsResolver<'a, IO> {
+    fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
+        let (found, mft_num, _) = self.resolve_path_internal(path)?;
+        crate::ensure!(found, FsResolverError::NotFound);
+
+        let entries = self.read_directory_entries(mft_num as u64)?;
+        Ok(entries.into_iter().map(|(name, _, _)| name).collect())
+    }
+
+    fn open_file(
+        &mut self,
+        path: &str,
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+        let (found, mft_num, _) = self.resolve_path_internal(path)?;
+        crate::ensure!(found, FsResolverError::NotFound);
+
+        let record = self.read_mft_record(mft_num as u64)?;
+        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
+        crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
+
+        let data = self.read_file(path)?;
+        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+    }
+
+    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
+        let (found, mft_num, _) = self.resolve_path_internal(path)?;
+        crate::ensure!(found, FsResolverError::NotFound);
+
+        let record = self.read_mft_record(mft_num as u64)?;
+        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
+        crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
+
+        if let Some(attr) = self.find_attribute(&record, ATTR_DATA)? {
+            if attr.is_resident() {
+                let content = self.get_resident_attribute_content(attr)?;
+                Ok(content.to_vec())
+            } else {
+                self.get_non_resident_attribute_content(attr)
+            }
+        } else {
+            Ok(Vec::new()) // Empty file
+        }
+    }
+
+    fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
+        let (found, mft_num, _) = self.resolve_path_internal(path)?;
+        if !found {
+            return Err(FsResolverError::NotFound);
+        }
+
+        let record = self.read_mft_record(mft_num as u64)?;
+        let view = MftRecordView::new(&record)
+            .map_err(|_| FsResolverError::Invalid("Failed to parse MFT record"))?;
+
+        let is_dir = view.is_dir();
+        let mut attr = if is_dir {
+            FileAttributes::new_dir()
+        } else {
+            FileAttributes::new_file()
+        };
+
+        if let Ok(Some(std_info_attr)) = view.find(AttributeType::StandardInformation.code())
+            && let Ok(AttrView::Resident { value, .. }) = std_info_attr.as_view()
+            && let Ok((std_info, _)) = StandardInformation::read_from_prefix(value)
+        {
+            let ntfs_attr = NtfsFileAttributes::from_bits_truncate(std_info.file_attributes);
+            attr.read_only = ntfs_attr.contains(NtfsFileAttributes::READ_ONLY);
+            attr.hidden = ntfs_attr.contains(NtfsFileAttributes::HIDDEN);
+            attr.system = ntfs_attr.contains(NtfsFileAttributes::SYSTEM);
+            attr.archive = ntfs_attr.contains(NtfsFileAttributes::ARCHIVE);
+
+            attr.created = crate::utils::ntfs_time_to_offset_date_time(std_info.creation_time);
+            attr.modified = crate::utils::ntfs_time_to_offset_date_time(std_info.modification_time);
+            attr.accessed = crate::utils::ntfs_time_to_offset_date_time(std_info.access_time);
+        }
+
+        Ok(attr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::builder::{MftRecordBuilder, NtfsAttribute};
     use crate::types::MftRecordHeader;
+    use rimfs_core::injector::FsTreeInjector;
     use rimio::prelude::MemRimIO;
 
     #[test]
@@ -472,5 +503,44 @@ mod tests {
         // Non-existent stream should return NotFound
         let res = resolver.read_file_stream(16, Some("non_existent"));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_ntfs_read_attributes_full() {
+        let meta = NtfsMeta::new(10 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0u8; 10 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+
+        crate::formatter::NtfsFormatter::new(&mut io, &meta)
+            .format(true)
+            .unwrap();
+
+        let mut injector = crate::injector::NtfsInjector::new(&mut io, &meta).unwrap();
+        let mut custom_attr = FileAttributes::new_file();
+        custom_attr.read_only = true;
+        custom_attr.hidden = true;
+        custom_attr.archive = true;
+
+        let mut tree = crate::core::resolver::FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: vec![crate::core::resolver::FsNode::new_file_from_source(
+                "secret.txt",
+                alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(b"TopSecret".to_vec())),
+                custom_attr,
+            )],
+        };
+
+        injector.inject_tree(&mut tree).unwrap();
+        injector.flush().unwrap();
+
+        let mut resolver = NtfsResolver::new(&mut io, &meta);
+        let read_attr = resolver.read_attributes("/secret.txt").unwrap();
+
+        assert!(read_attr.read_only);
+        assert!(read_attr.hidden);
+        assert!(read_attr.archive);
+        assert!(!read_attr.is_dir());
+        assert!(read_attr.created.is_some());
+        assert!(read_attr.modified.is_some());
     }
 }

@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
+#[macro_use]
 extern crate alloc;
 
 pub use rimfs_core as core;
@@ -30,6 +31,7 @@ pub use self::system::upcase;
 
 pub mod traits {
     pub use super::allocator::{NtfsAllocator, NtfsHandle};
+    pub use super::attr::NtfsFileAttributesExt;
     pub use super::checker::NtfsChecker;
     pub use super::formatter::NtfsFormatter;
     pub use super::injector::NtfsInjector;
@@ -39,6 +41,7 @@ pub mod traits {
 }
 
 pub mod prelude {
+    pub use super::attr::NtfsFileAttributesExt;
     pub use super::filesystem::Ntfs;
     pub use super::traits::*;
     pub use super::view::attr_view::*;

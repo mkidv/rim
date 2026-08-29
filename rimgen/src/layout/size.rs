@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 
-use crate::errors::{GenResult, LayoutError, LayoutResult};
+#[cfg(feature = "std")]
+use crate::errors::GenResult;
+use crate::errors::{LayoutError, LayoutResult};
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use serde::{Deserialize, Deserializer};
+#[cfg(feature = "std")]
 use std::{fs, path::Path};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -20,7 +25,7 @@ impl<'de> Deserialize<'de> for Size {
         impl<'de> serde::de::Visitor<'de> for SizeVisitor {
             type Value = Size;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
                 f.write_str("a size string like '512M', '1G', '128K' or 'auto'")
             }
 
@@ -32,7 +37,7 @@ impl<'de> Deserialize<'de> for Size {
                     if value.trim().eq_ignore_ascii_case("auto") {
                         Ok(Size::Auto)
                     } else {
-                        Err(E::custom(format!(
+                        Err(E::custom(alloc::format!(
                             "Invalid size format '{value}'. Use K, M or G suffix."
                         )))
                     }
@@ -44,8 +49,8 @@ impl<'de> Deserialize<'de> for Size {
     }
 }
 
-impl std::fmt::Display for Size {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Size {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Size::Auto => write!(f, "auto"),
             Size::Fixed(mb) => write!(f, "{mb} MB"),
@@ -61,7 +66,7 @@ pub fn parse_size_mb(size: &str) -> LayoutResult<u64> {
             .trim()
             .parse::<u64>()
             .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
-        Ok(((kb as f64) / 1024.0).ceil() as u64)
+        Ok(kb.div_ceil(1024))
     } else if let Some(num) = lower.strip_suffix("m") {
         num.trim()
             .parse::<u64>()
@@ -73,10 +78,11 @@ pub fn parse_size_mb(size: &str) -> LayoutResult<u64> {
             .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
         Ok(gb * 1024)
     } else {
-        Err(LayoutError::InvalidSizeFormat(size.to_string()))
+        crate::bail!(LayoutError::InvalidSizeFormat(size.to_string()));
     }
 }
 
+#[cfg(feature = "std")]
 pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> GenResult<u64> {
     const BLOCK_SIZE: u64 = 4096;
     const OVERHEAD_FACTOR: f64 = 1.10;

@@ -2,10 +2,6 @@
 
 #[cfg(all(not(feature = "std"), feature = "alloc", test))]
 use alloc::string::ToString;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
 use crate::core::FsInjectorResult;
 use crate::{allocator::ExtAllocator, constant::*, group_layout::GroupLayout, meta::ExtMeta};

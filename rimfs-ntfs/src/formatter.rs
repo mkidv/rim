@@ -10,8 +10,7 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{vec, vec::Vec};
 
-use rimio::prelude::MemRimIO;
-use rimio::{RimIO, RimIOExt};
+use rimio::{MemRimIO, RimIO, RimIOExt, RimWrite};
 
 use crate::allocator::NtfsAllocator;
 use crate::attrdef;

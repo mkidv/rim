@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use rimgen::{DiskLayout, Filesystem, ImageBuilder, Partition, Size};
+use rimgen::{Filesystem, ImageBuilder, LayoutConfig, PartitionConfig, Size};
 use rimimg::ImageFormat;
 use std::fs::File;
 use std::path::PathBuf;
@@ -13,10 +13,10 @@ fn test_cli_builder_and_check() {
     let vhd_path = dir.path().join("cli_test_disk.vhd");
 
     // 1. Build layout
-    let layout = DiskLayout {
+    let layout = LayoutConfig {
         base_dir: PathBuf::from("."),
         partitions: vec![
-            Partition {
+            PartitionConfig {
                 name: "ESP".to_string(),
                 size: Size::Fixed(16),
                 fs: Filesystem::Fat16,
@@ -29,7 +29,7 @@ fn test_cli_builder_and_check() {
                 label: None,
                 uuid: None,
             },
-            Partition {
+            PartitionConfig {
                 name: "DATA_EXT4".to_string(),
                 size: Size::Fixed(16),
                 fs: Filesystem::Ext4,

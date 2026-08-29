@@ -5,7 +5,7 @@ use crate::ui::format::{format_duration, pretty_bytes, sep_u64};
 use crate::ui::progress::create_spinner;
 use crate::ui::table::print_layout_table;
 use colored::Colorize;
-use rimgen::{BuildEvent, DiskLayout, DryRunMode, ImageBuilder};
+use rimgen::{BuildEvent, DryRunMode, ImageBuilder, LayoutConfig};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -27,7 +27,7 @@ pub fn run(
         );
     }
 
-    let layout = DiskLayout::from_file(&layout_path)?;
+    let layout = LayoutConfig::from_file(&layout_path)?;
     layout.validate()?;
 
     let out_path = output.unwrap_or_else(|| layout_path.with_extension("img"));

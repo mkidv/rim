@@ -3,14 +3,6 @@
 //
 // no_std + alloc friendly
 
-#![cfg_attr(not(feature = "std"), no_std)]
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-extern crate alloc;
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{boxed::Box, vec, vec::Vec};
-
 use crate::constant::upcase::UPCASE_TABLE;
 use crate::core::utils::upcase::UpcaseHandle as CoreUpcase;
 

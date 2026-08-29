@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
@@ -15,95 +15,155 @@ permissions:
   checks: write
 
 jobs:
-  check:
-    name: Check & Audit
+  portable:
+    name: Portable Validation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check Workspace
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run Tests
+        run: cargo test --workspace --all-features
+
+  embedded-targets:
+    name: Embedded & Portable Targets (no_std, WASM, UEFI)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, x86_64-unknown-uefi
       - uses: Swatinem/rust-cache@v2
-      - name: Check Workspace
-        run: cargo check --workspace --all-targets --all-features
+      - name: Check pure no_std (rimio, rimpart)
+        run: cargo check -p rimio -p rimpart --no-default-features --target wasm32-unknown-unknown
+      - name: Check portable core (alloc + fs engines on wasm32)
+        run: cargo check -p rimio -p rimpart -p rimfs-core -p rimfs-fat -p rimfs-exfat -p rimfs-ext -p rimfs-ntfs -p rimfs -p rimgen --no-default-features --features "alloc,fat,exfat,ext,ntfs" --target wasm32-unknown-unknown
+      - name: Check UEFI full-stack integration
+        run: cargo check -p uefi-synth --target x86_64-unknown-uefi
+      - name: Check WASM browser synthesis
+        run: cargo check -p wasm-synth --target wasm32-unknown-unknown
+
+  quality:
+    name: Quality & Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: Security Audit
         uses: actions-rust-lang/audit@v1
         with:
           denyWarnings: false
 
-  test:
-    name: Test Suite (${{ matrix.os }})
-    needs: check
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run Tests
-        run: cargo test --workspace --all-features
-
-  lint:
-    name: Lints & Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Rustfmt Check
-        run: cargo fmt --all -- --check
-      - name: Clippy Check
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    needs: test
+    needs: portable
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Install Tarpaulin
-        run: |
-          cargo install cargo-tarpaulin --locked || true
+        run: cargo install cargo-tarpaulin --locked || true
+
       - name: Generate Coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --timeout 180 --out Xml
+        run: >
+          cargo tarpaulin
+          --verbose
+          --all-features
+          --workspace
+          --timeout 180
+          --out Xml
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  integrity:
-    name: Image Integrity & Native fsck Verification
+  integrity-linux:
+    name: Native FS Integrity (Linux)
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - portable
+      - quality
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Filesystem Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dosfstools exfatprogs e2fsprogs ntfs-3g fdisk util-linux
+          sudo apt-get install -y \
+            dosfstools \
+            exfatprogs \
+            e2fsprogs \
+            ntfs-3g \
+            fdisk \
+            util-linux
 
-      - name: Build rimcli (Release)
+      - name: Build rimcli
         run: cargo build --release -p rimcli
 
-      - name: Test CLI Inspection & Generation (ESP)
+      - name: CLI Smoke Test
         run: |
-          ./target/release/rim generate examples/esp-boot.toml --output test_esp.img
+          ./target/release/rim generate \
+            examples/esp-boot.toml \
+            --output test_esp.img
+
           ./target/release/rim inspect test_esp.img
           ./target/release/rim check test_esp.img --verbose
-          ./target/release/rim convert test_esp.img test_esp.qcow2
+
+          ./target/release/rim convert \
+            test_esp.img \
+            test_esp.qcow2
+
           ./target/release/rim inspect test_esp.qcow2
 
-      - name: Prepare POSIX Rootfs Test Tree
+      - name: Prepare POSIX Rootfs
         run: |
-          mkdir -p examples/rootfs/bin examples/rootfs/etc examples/rootfs/var/shared examples/rootfs/tmp examples/rootfs/private
+          mkdir -p \
+            examples/rootfs/bin \
+            examples/rootfs/etc \
+            examples/rootfs/var/shared \
+            examples/rootfs/tmp \
+            examples/rootfs/private
+
           echo "echo hello" > examples/rootfs/bin/hello.sh
           chmod 755 examples/rootfs/bin/hello.sh
 
@@ -113,83 +173,145 @@ jobs:
           chmod 2775 examples/rootfs/var/shared
           chmod 1777 examples/rootfs/tmp
           chmod 700 examples/rootfs/private
+
           echo "secret data" > examples/rootfs/private/secret.txt
           chmod 600 examples/rootfs/private/secret.txt
 
-          # Fast symlink (< 60 bytes)
-          ln -s hello.sh examples/rootfs/bin/hello_link
+          # Fast symlink
+          ln -s \
+            hello.sh \
+            examples/rootfs/bin/hello_link
 
-          # Slow symlink (>= 60 bytes)
-          ln -s ../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing examples/rootfs/bin/slow_link
+          # Slow symlink
+          ln -s \
+            ../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing \
+            examples/rootfs/bin/slow_link
 
           # Dangling symlink
-          ln -s /nonexistent/target examples/rootfs/etc/dangling_link
+          ln -s \
+            /nonexistent/target \
+            examples/rootfs/etc/dangling_link
 
-      - name: Test Multi-FS Image Generation
+      - name: Generate Multi-FS Image
         run: |
-          ./target/release/rim generate examples/multi-fs-vm.toml --output test_multifs.img
+          ./target/release/rim generate \
+            examples/multi-fs-vm.toml \
+            --output test_multifs.img
+
           ./target/release/rim inspect test_multifs.img
-          ./target/release/rim check test_multifs.img --verbose
 
-      - name: Verify Partitions with Linux Kernel & fsck Tools
+          ./target/release/rim check \
+            test_multifs.img \
+            --verbose
+
+      - name: Attach Image
+        id: loop
+        shell: bash
         run: |
-          # Attach loop device with partition scanning (-P)
           sudo losetup -P -f test_multifs.img
+
           LOOPDEV=$(losetup -j test_multifs.img | cut -d: -f1)
-          echo "Attached to $LOOPDEV"
-          ls -la ${LOOPDEV}*
 
-          # Partition 1: EFI / FAT32
-          echo ">>> Checking p1 (FAT32)..."
-          sudo fsck.vfat -v -n ${LOOPDEV}p1
+          if [ -z "$LOOPDEV" ]; then
+            echo "Could not attach image to loop device"
+            exit 1
+          fi
 
-          # Partition 2: Linux Root / EXT4
-          echo ">>> Checking p2 (EXT4)..."
-          sudo e2fsck -n -f ${LOOPDEV}p2
+          echo "loopdev=$LOOPDEV" >> "$GITHUB_OUTPUT"
 
-          # Partition 3: Shared Data / ExFAT
-          echo ">>> Checking p3 (ExFAT)..."
-          sudo fsck.exfat -n ${LOOPDEV}p3
+          echo "Attached image to $LOOPDEV"
+          ls -la "${LOOPDEV}"*
 
-          # Partition 4: Windows Data / NTFS
-          echo ">>> Checking p4 (NTFS)..."
-          sudo ntfsfix -n ${LOOPDEV}p4
-
-          echo ">>> All Native Linux Kernel & fsck Integrity Checks Passed!"
-
-      - name: Mount & Verify Semantic Integrity of EXT4 (POSIX Metadata & Symlinks)
+      - name: Native Filesystem Checks
+        shell: bash
         run: |
-          LOOPDEV=$(losetup -j test_multifs.img | cut -d: -f1)
-          mkdir -p /mnt/ext_test
-          sudo mount ${LOOPDEV}p2 /mnt/ext_test
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
 
-          echo ">>> Validating mounted EXT4 POSIX semantics..."
-          
-          # Check directory mode preservation
-          [ "$(stat -c '%a' /mnt/ext_test/private)" = "700" ] || (echo "private mode mismatch: $(stat -c '%a' /mnt/ext_test/private)" && exit 1)
-          [ "$(stat -c '%a' /mnt/ext_test/private/secret.txt)" = "600" ] || (echo "secret.txt mode mismatch" && exit 1)
-          
-          # Check special permission bits
-          [ "$(stat -c '%a' /mnt/ext_test/bin/su_dummy)" = "4755" ] || (echo "su_dummy mode mismatch: $(stat -c '%a' /mnt/ext_test/bin/su_dummy)" && exit 1)
-          [ "$(stat -c '%a' /mnt/ext_test/var/shared)" = "2775" ] || (echo "var/shared mode mismatch: $(stat -c '%a' /mnt/ext_test/var/shared)" && exit 1)
-          [ "$(stat -c '%a' /mnt/ext_test/tmp)" = "1777" ] || (echo "tmp mode mismatch: $(stat -c '%a' /mnt/ext_test/tmp)" && exit 1)
+          echo ">>> FAT32"
+          sudo fsck.vfat -v -n "${LOOPDEV}p1"
 
-          # Check Fast Symlink (< 60 bytes)
-          [ -L /mnt/ext_test/bin/hello_link ] || (echo "hello_link is not a symlink" && exit 1)
-          [ "$(readlink /mnt/ext_test/bin/hello_link)" = "hello.sh" ] || (echo "hello_link target mismatch" && exit 1)
-          # Fast symlink block count must be 0
-          [ "$(stat -c '%b' /mnt/ext_test/bin/hello_link)" = "0" ] || (echo "fast symlink allocated blocks != 0" && exit 1)
+          echo ">>> EXT4"
+          sudo e2fsck -n -f "${LOOPDEV}p2"
 
-          # Check Slow Symlink (>= 60 bytes)
-          [ -L /mnt/ext_test/bin/slow_link ] || (echo "slow_link is not a symlink" && exit 1)
-          [ "$(readlink /mnt/ext_test/bin/slow_link)" = "../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing" ] || (echo "slow_link target mismatch" && exit 1)
+          echo ">>> exFAT"
+          sudo fsck.exfat -n "${LOOPDEV}p3"
 
-          # Check Dangling Symlink
-          [ -L /mnt/ext_test/etc/dangling_link ] || (echo "dangling_link is not a symlink" && exit 1)
-          [ "$(readlink /mnt/ext_test/etc/dangling_link)" = "/nonexistent/target" ] || (echo "dangling_link target mismatch" && exit 1)
+          echo ">>> NTFS"
+          sudo ntfsfix -n "${LOOPDEV}p4"
 
-          echo ">>> Semantic verification passed! Content reads correctly:"
-          cat /mnt/ext_test/bin/hello_link
+          echo ">>> All native filesystem checks passed"
 
-          sudo umount /mnt/ext_test
-          sudo losetup -d $LOOPDEV
+      - name: Verify EXT4 POSIX Semantics
+        shell: bash
+        run: |
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
+          MOUNT_DIR="${RUNNER_TEMP}/rim-ext-test"
+
+          mkdir -p "$MOUNT_DIR"
+
+          cleanup_mount() {
+            sudo umount "$MOUNT_DIR" 2>/dev/null || true
+          }
+
+          trap cleanup_mount EXIT
+
+          sudo mount -o ro "${LOOPDEV}p2" "$MOUNT_DIR"
+
+          echo ">>> Checking permissions"
+
+          test "$(stat -c '%a' "$MOUNT_DIR/private")" = "700"
+
+          test "$(stat -c '%a' \
+            "$MOUNT_DIR/private/secret.txt")" = "600"
+
+          test "$(stat -c '%a' \
+            "$MOUNT_DIR/bin/su_dummy")" = "4755"
+
+          test "$(stat -c '%a' \
+            "$MOUNT_DIR/var/shared")" = "2775"
+
+          test "$(stat -c '%a' \
+            "$MOUNT_DIR/tmp")" = "1777"
+
+          echo ">>> Checking fast symlink"
+
+          test -L "$MOUNT_DIR/bin/hello_link"
+
+          test "$(readlink \
+            "$MOUNT_DIR/bin/hello_link")" = "hello.sh"
+
+          test "$(stat -c '%b' \
+            "$MOUNT_DIR/bin/hello_link")" = "0"
+
+          echo ">>> Checking slow symlink"
+
+          test -L "$MOUNT_DIR/bin/slow_link"
+
+          test "$(readlink \
+            "$MOUNT_DIR/bin/slow_link")" = \
+            "../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing"
+
+          echo ">>> Checking dangling symlink"
+
+          test -L "$MOUNT_DIR/etc/dangling_link"
+
+          test "$(readlink \
+            "$MOUNT_DIR/etc/dangling_link")" = \
+            "/nonexistent/target"
+
+          echo ">>> Checking content through symlink"
+
+          OUTPUT=$(cat "$MOUNT_DIR/bin/hello_link")
+          test "$OUTPUT" = "echo hello"
+
+          echo ">>> EXT4 POSIX semantic validation passed"
+
+      - name: Detach Image
+        if: always()
+        shell: bash
+        run: |
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
+
+          if [ -n "$LOOPDEV" ]; then
+            sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+          fi

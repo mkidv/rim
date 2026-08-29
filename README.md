@@ -9,7 +9,7 @@ Designed from the ground up for high reliability, streaming I/O, rootless usersp
 
 ---
 
-## 📦 Modular Ecosystem (12 Crates)
+## 📦 Modular Ecosystem (13 Crates)
 
 The project is structured into modular, decoupled crates:
 
@@ -25,6 +25,7 @@ The project is structured into modular, decoupled crates:
 | **[`rimfs-exfat`](rimfs-exfat)** | ExFAT implementation with allocation bitmap tracking, upcase table compilation, and consistency checker. |
 | **[`rimfs-ext`](rimfs-ext)** | Ext2, Ext3, and Ext4 with 48-bit physical extent trees, indirect block maps, 32-bit UID/GID, and fast/slow symlinks. |
 | **[`rimfs-ntfs`](rimfs-ntfs)** | Pure-Rust NTFS 3.1 ($Boot, $MFT, non-resident $UpCase, $Secure, B-tree directory indexing, data runs). |
+| **[`rimfs-tar`](rimfs-tar)** | POSIX UStar archive filesystem driver (`no_std + alloc`) with full injector/resolver/checker support. |
 | **[`rimpart`](rimpart)** | Partition table management for GPT, streaming GPT (`gpt_stream` on-the-fly CRC32), and MBR. |
 | **[`rimio`](rimio)** | Low-level I/O abstraction (`StdRimIO`, `FileRimIO` positioned I/O, `MemRimIO`, `MmapRimIO`, `UefiRimIO`). |
 | **[`sector-analyzer`](sector-analyzer)** | Forensic analysis tool (signatures, entropy, MFT/$Secure dumping, sector diffing). |
@@ -43,6 +44,7 @@ The project is structured into modular, decoupled crates:
   - **ExFAT**: Full formatting, directory injection, and consistency verification.
   - **EXT**: Ext2, Ext3, Ext4 (48-bit extent trees, block group descriptors, POSIX permissions & symlinks).
   - **NTFS**: Pure-Rust NTFS 3.1 ($MFT records, non-resident $UpCase, `$Secure` security descriptors, INDX B-tree directories).
+  - **TAR**: POSIX UStar streaming archive creation, injection, extraction, and validation.
 - **Supported Disk & Container Formats**:
   - Raw images: `.img`, `.raw`
   - Microsoft VHD: `.vhd` (fixed VHD)
@@ -50,7 +52,7 @@ The project is structured into modular, decoupled crates:
   - QEMU QCOW2: `.qcow2` (v2/v3 header)
   - VirtualBox VDI: `.vdi` (fixed)
 - **Bare-Metal & Embedded Ready**:
-  - `no_std`, `alloc`, and native **UEFI** firmware (`EFI_BLOCK_IO_PROTOCOL`) support.
+  - `no_std`, `alloc`, **WebAssembly** (`wasm32-unknown-unknown`), and native **UEFI** firmware (`EFI_BLOCK_IO_PROTOCOL`) support.
 
 ---
 

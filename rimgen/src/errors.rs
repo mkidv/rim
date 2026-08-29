@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 use crate::layout::{Filesystem, PartitionKind};
+use alloc::string::String;
+use core::fmt;
 use rimfs::FsError;
 use rimio::RimIOError;
 use rimpart::PartError;
-use std::fmt;
 
 pub type GenResult<T = ()> = Result<T, GenError>;
 pub type LayoutResult<T = ()> = Result<T, LayoutError>;
@@ -16,7 +17,9 @@ pub enum GenError {
     Fs(FsError),
     Part(PartError),
     Layout(LayoutError),
+    #[cfg(feature = "std")]
     StdIo(std::io::Error),
+    #[cfg(feature = "std")]
     Toml(toml::de::Error),
     UnsupportedFs(Filesystem),
     PartitionDoesNotFit {
@@ -43,7 +46,9 @@ impl fmt::Display for GenError {
             GenError::Fs(e) => write!(f, "Filesystem error: {e}"),
             GenError::Part(e) => write!(f, "Partitioning error: {e}"),
             GenError::Layout(e) => write!(f, "Layout error: {e}"),
+            #[cfg(feature = "std")]
             GenError::StdIo(e) => write!(f, "System I/O error: {e}"),
+            #[cfg(feature = "std")]
             GenError::Toml(e) => write!(f, "TOML parsing error: {e}"),
             GenError::UnsupportedFs(fs) => write!(
                 f,
@@ -74,6 +79,7 @@ impl fmt::Display for GenError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for GenError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -161,22 +167,35 @@ impl fmt::Display for LayoutError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for LayoutError {}
-
-// --- Error wiring macro ---
 
 crate::gen_error_wiring! {
     top => GenError {
-        RimIOError: IO,
-        FsError: Fs,
-        PartError: Part,
-        LayoutError: Layout,
-        std::io::Error: StdIo,
-        toml::de::Error: Toml,
+        RimIOError  : IO,
+        FsError     : Fs,
+        PartError   : Part,
+        LayoutError : Layout,
     },
-    str_into => [ LayoutError ],
+    str_into => [
+        LayoutError,
+    ],
     sub => {
-        rimfs::core::errors::FsResolverError => [ GenError::Fs ],
+        rimfs::core::errors::FsResolverError => [GenError::Fs],
+    },
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for GenError {
+    fn from(e: std::io::Error) -> Self {
+        GenError::StdIo(e)
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<toml::de::Error> for GenError {
+    fn from(e: toml::de::Error) -> Self {
+        GenError::Toml(e)
     }
 }
 

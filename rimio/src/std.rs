@@ -5,17 +5,17 @@ use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 #[cfg(feature = "std")]
 use crate::RimIOSetLen;
-use crate::{RimIO, RimIOError, RimIOResult};
+use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
-pub struct StdRimIO<'a, T: Read + Write + Seek> {
+pub struct StdRimIO<'a, T> {
     io: &'a mut T,
     partition_offset: u64,
 }
 
 #[cfg(feature = "std")]
-impl<'a, T: Read + Write + Seek> StdRimIO<'a, T> {
+impl<'a, T> StdRimIO<'a, T> {
     #[inline]
     pub fn new(io: &'a mut T) -> Self {
         Self {
@@ -34,14 +34,7 @@ impl<'a, T: Read + Write + Seek> StdRimIO<'a, T> {
 }
 
 #[cfg(feature = "std")]
-impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
-        self.io.seek(SeekFrom::Start(abs_offset))?;
-        self.io.write_all(data)?;
-        Ok(())
-    }
-
+impl<'a, T: Read + Seek> RimRead for StdRimIO<'a, T> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let abs_offset = self.partition_offset + offset;
         self.io.seek(SeekFrom::Start(abs_offset))?;
@@ -49,11 +42,31 @@ impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
         Ok(())
     }
 
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        let current = self.io.stream_position()?;
+        let end = self.io.seek(SeekFrom::End(0))?;
+        self.io.seek(SeekFrom::Start(current))?;
+        Ok(end.saturating_sub(self.partition_offset))
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T: Read + Write + Seek> RimWrite for StdRimIO<'a, T> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let abs_offset = self.partition_offset + offset;
+        self.io.seek(SeekFrom::Start(abs_offset))?;
+        self.io.write_all(data)?;
+        Ok(())
+    }
+
     fn flush(&mut self) -> RimIOResult {
         self.io.flush()?;
         Ok(())
     }
+}
 
+#[cfg(feature = "std")]
+impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
     #[inline]
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
@@ -64,12 +77,64 @@ impl<'a, T: Read + Write + Seek> RimIO for StdRimIO<'a, T> {
     fn partition_offset(&self) -> u64 {
         self.partition_offset
     }
+}
+
+/// A read-only file source that implements `RimRead` only (no write support).
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct ReadOnlyFileRimIO {
+    file: std::fs::File,
+    size: u64,
+}
+
+#[cfg(feature = "std")]
+impl ReadOnlyFileRimIO {
+    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, std::io::Error> {
+        let file = std::fs::File::open(path)?;
+        let size = file.metadata()?.len();
+        Ok(Self { file, size })
+    }
+
+    pub fn from_file(file: std::fs::File) -> Result<Self, std::io::Error> {
+        let size = file.metadata()?.len();
+        Ok(Self { file, size })
+    }
+}
+
+#[cfg(feature = "std")]
+impl RimRead for ReadOnlyFileRimIO {
+    #[cfg(target_family = "unix")]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        use std::os::unix::fs::FileExt;
+        self.file.read_exact_at(buf, offset)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        use std::os::windows::fs::FileExt;
+        let mut read = 0;
+        while read < buf.len() {
+            let n = self
+                .file
+                .seek_read(&mut buf[read..], offset + read as u64)?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_family = "unix", target_os = "windows")))]
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(buf)?;
+        Ok(())
+    }
 
     fn total_size(&mut self) -> RimIOResult<u64> {
-        let current = self.io.stream_position()?;
-        let end = self.io.seek(SeekFrom::End(0))?;
-        self.io.seek(SeekFrom::Start(current))?;
-        Ok(end.saturating_sub(self.partition_offset))
+        Ok(self.size)
     }
 }
 
@@ -95,36 +160,7 @@ impl FileRimIO {
 }
 
 #[cfg(feature = "std")]
-impl RimIO for FileRimIO {
-    #[cfg(target_family = "unix")]
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        use std::os::unix::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
-        self.file.write_all_at(data, abs_offset)?;
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        use std::os::windows::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
-        self.file.seek_write(data, abs_offset)?;
-        Ok(())
-    }
-
-    #[cfg(not(any(target_family = "unix", target_os = "windows")))]
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
-        // fallback to seek if not supported (rare for std)
-        // We need a ref to file, but seek needs mut. File needs mut for seek?
-        // std::fs::File seek takes &mut self.
-        // So we are good.
-        use std::io::{Seek, Serializer};
-        self.file.seek(SeekFrom::Start(abs_offset))?;
-        self.file.write_all(data)?;
-        Ok(())
-    }
-
+impl RimRead for FileRimIO {
     #[cfg(target_family = "unix")]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         use std::os::unix::fs::FileExt;
@@ -158,11 +194,46 @@ impl RimIO for FileRimIO {
         Ok(())
     }
 
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        let len = self.file.metadata()?.len();
+        Ok(len.saturating_sub(self.partition_offset))
+    }
+}
+
+#[cfg(feature = "std")]
+impl RimWrite for FileRimIO {
+    #[cfg(target_family = "unix")]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        use std::os::unix::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        self.file.write_all_at(data, abs_offset)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        use std::os::windows::fs::FileExt;
+        let abs_offset = self.partition_offset + offset;
+        self.file.seek_write(data, abs_offset)?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_family = "unix", target_os = "windows")))]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let abs_offset = self.partition_offset + offset;
+        self.file.seek(SeekFrom::Start(abs_offset))?;
+        self.file.write_all(data)?;
+        Ok(())
+    }
+
     fn flush(&mut self) -> RimIOResult {
         self.file.flush()?;
         Ok(())
     }
+}
 
+#[cfg(feature = "std")]
+impl RimIO for FileRimIO {
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
         partition_offset
@@ -170,11 +241,6 @@ impl RimIO for FileRimIO {
 
     fn partition_offset(&self) -> u64 {
         self.partition_offset
-    }
-
-    fn total_size(&mut self) -> RimIOResult<u64> {
-        let len = self.file.metadata()?.len();
-        Ok(len.saturating_sub(self.partition_offset))
     }
 }
 

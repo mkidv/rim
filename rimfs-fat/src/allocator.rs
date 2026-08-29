@@ -1,4 +1,5 @@
 pub use crate::core::allocator::*;
+use alloc::vec::Vec;
 use rimio::prelude::*;
 
 use crate::core::fat::*;
@@ -84,9 +85,7 @@ impl<'a> FsAllocator<FatHandle> for FatAllocator<'a> {
         io: &mut IO,
         count: usize,
     ) -> FsAllocatorResult<FatHandle> {
-        if count == 0 {
-            return Err(FsAllocatorError::InvalidSize);
-        }
+        crate::ensure!(count > 0, FsAllocatorError::InvalidSize);
 
         let mut chain = RunList::new();
         let start = self.next_free_hint;
@@ -100,9 +99,7 @@ impl<'a> FsAllocator<FatHandle> for FatAllocator<'a> {
         let mut driver = FatDriver::new(self.meta);
 
         while chain.total_units() < count as u64 {
-            if searched_count > total_units {
-                return Err(FsAllocatorError::OutOfBlocks);
-            }
+            crate::ensure!(searched_count <= total_units, FsAllocatorError::OutOfBlocks);
 
             // Check if cluster is free using buffered view
             let val = driver
@@ -137,9 +134,7 @@ impl<'a> FsAllocator<FatHandle> for FatAllocator<'a> {
         io: &mut IO,
         count: usize,
     ) -> FsAllocatorResult<FatHandle> {
-        if count == 0 {
-            return Err(FsAllocatorError::InvalidSize);
-        }
+        crate::ensure!(count > 0, FsAllocatorError::InvalidSize);
 
         let start = self.next_free_hint;
         let end = self.meta.last_data_unit();

@@ -12,6 +12,7 @@ pub enum RimIOError {
     Invalid(&'static str),
     OutOfBounds,
     Unsupported,
+    InvalidBuffer,
 }
 
 impl RimIOError {
@@ -21,6 +22,7 @@ impl RimIOError {
             RimIOError::Invalid(msg) => msg,
             RimIOError::OutOfBounds => "Out of bounds",
             RimIOError::Unsupported => "Unsupported operation",
+            RimIOError::InvalidBuffer => "Invalid or insufficient buffer",
         }
     }
 }

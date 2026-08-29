@@ -58,9 +58,10 @@ where
         let mut chain = vec![0u32; count];
         for unit in &mut chain {
             let next_unit = self.next_free;
-            if next_unit > self.meta.last_data_unit() {
-                return Err(FsAllocatorError::OutOfBlocks);
-            }
+            crate::ensure!(
+                next_unit <= self.meta.last_data_unit(),
+                FsAllocatorError::OutOfBlocks
+            );
             self.next_free += 1;
             *unit = next_unit;
         }

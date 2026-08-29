@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen};
+use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite};
 use memmap2::MmapMut;
 use std::fs::File;
 use std::io;
@@ -64,18 +63,7 @@ impl MmapRimIO {
     }
 }
 
-impl RimIO for MmapRimIO {
-    #[inline(always)]
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
-        self.check_bounds(abs_off, data.len())?;
-
-        let mmap = self.mmap.as_mut().ok_or(RimIOError::Other("Empty mmap"))?;
-        let dst = &mut mmap[abs_off as usize..abs_off as usize + data.len()];
-        dst.copy_from_slice(data);
-        Ok(())
-    }
-
+impl RimRead for MmapRimIO {
     #[inline(always)]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         let abs_off = self.partition_offset + offset;
@@ -87,6 +75,24 @@ impl RimIO for MmapRimIO {
         Ok(())
     }
 
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Ok(self.len.saturating_sub(self.partition_offset))
+    }
+}
+
+impl RimWrite for MmapRimIO {
+    #[inline(always)]
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let abs_off = self.partition_offset + offset;
+        self.check_bounds(abs_off, data.len())?;
+
+        let mmap = self.mmap.as_mut().ok_or(RimIOError::Other("Empty mmap"))?;
+        let dst = &mut mmap[abs_off as usize..abs_off as usize + data.len()];
+        dst.copy_from_slice(data);
+        Ok(())
+    }
+
     fn flush(&mut self) -> RimIOResult {
         if let Some(mmap) = self.mmap.as_mut() {
             mmap.flush()
@@ -95,7 +101,9 @@ impl RimIO for MmapRimIO {
             Ok(())
         }
     }
+}
 
+impl RimIO for MmapRimIO {
     #[inline]
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
@@ -105,29 +113,6 @@ impl RimIO for MmapRimIO {
     #[inline]
     fn partition_offset(&self) -> u64 {
         self.partition_offset
-    }
-
-    #[inline]
-    fn total_size(&mut self) -> RimIOResult<u64> {
-        Ok(self.len.saturating_sub(self.partition_offset))
-    }
-
-    // Optimized single-copy implementation
-    fn copy_from(
-        &mut self,
-        src: &mut dyn RimIO,
-        src_offset: u64,
-        dest_offset: u64,
-        len: u64,
-    ) -> RimIOResult {
-        let abs_offset = self.partition_offset + dest_offset;
-        let len_usize = len as usize;
-        self.check_bounds(abs_offset, len_usize)?;
-
-        let mmap = self.mmap.as_mut().ok_or(RimIOError::Other("Empty mmap"))?;
-        let dst = &mut mmap[abs_offset as usize..abs_offset as usize + len_usize];
-        src.read_at(src_offset, dst)?;
-        Ok(())
     }
 }
 

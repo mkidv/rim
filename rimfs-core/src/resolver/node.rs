@@ -1,20 +1,24 @@
 pub use crate::resolver::attr::FileAttributes;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::string::ToString;
 use core::fmt;
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{string::String, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+
+use rimio::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FsNodeCounts {
     pub dirs: usize,
     pub files: usize,
     pub symlinks: usize,
-    // optional: total bytes if you want to display it
     pub bytes: u64,
 }
 
@@ -36,24 +40,20 @@ impl fmt::Display for FsNodeCounts {
 
 /// Generic representation of a filesystem node (file, directory, symlink, or container).
 ///
-/// This structure is used internally to model parsed filesystem content
-/// and externally to describe tree structures for injection or comparison.
-///
 /// Variants:
-/// - `File`  : a regular file with name, content, and attributes
+/// - `File`  : a regular file with name, streaming readable source, and attributes
 /// - `Dir`   : a directory with name, children, and attributes
 /// - `Symlink` : a symbolic link with name, target path, and attributes
 /// - `Container` : an anonymous container node used to group multiple nodes
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FsNode {
+pub enum FsNode<'a> {
     File {
         name: String,
-        content: Vec<u8>,
+        source: Box<dyn RimRead + 'a>,
         attr: FileAttributes,
     },
     Dir {
         name: String,
-        children: Vec<FsNode>,
+        children: Vec<FsNode<'a>>,
         attr: FileAttributes,
     },
     Symlink {
@@ -62,12 +62,45 @@ pub enum FsNode {
         attr: FileAttributes,
     },
     Container {
-        children: Vec<FsNode>,
+        children: Vec<FsNode<'a>>,
         attr: FileAttributes,
     },
 }
 
-impl FsNode {
+impl<'a> core::fmt::Debug for FsNode<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            FsNode::File { name, attr, .. } => f
+                .debug_struct("File")
+                .field("name", name)
+                .field("attr", attr)
+                .finish_non_exhaustive(),
+            FsNode::Dir {
+                name,
+                children,
+                attr,
+            } => f
+                .debug_struct("Dir")
+                .field("name", name)
+                .field("children", children)
+                .field("attr", attr)
+                .finish(),
+            FsNode::Symlink { name, target, attr } => f
+                .debug_struct("Symlink")
+                .field("name", name)
+                .field("target", target)
+                .field("attr", attr)
+                .finish(),
+            FsNode::Container { children, attr } => f
+                .debug_struct("Container")
+                .field("children", children)
+                .field("attr", attr)
+                .finish(),
+        }
+    }
+}
+
+impl<'a> FsNode<'a> {
     #[inline]
     pub fn name(&self) -> &str {
         match self {
@@ -106,7 +139,7 @@ impl FsNode {
     }
 
     pub fn sort_children_recursively(&mut self) {
-        fn rank(n: &FsNode) -> u8 {
+        fn rank(n: &FsNode<'_>) -> u8 {
             match n {
                 FsNode::Container { .. } => 0,
                 FsNode::Dir { .. } => 1,
@@ -132,11 +165,10 @@ impl FsNode {
     }
 
     pub fn counts(&self) -> FsNodeCounts {
-        fn walk(n: &FsNode, acc: &mut FsNodeCounts) {
+        fn walk(n: &FsNode<'_>, acc: &mut FsNodeCounts) {
             match n {
-                FsNode::File { content, .. } => {
+                FsNode::File { .. } => {
                     acc.files += 1;
-                    acc.bytes = acc.bytes.saturating_add(content.len() as u64);
                 }
                 FsNode::Dir { children, .. } => {
                     acc.dirs += 1;
@@ -148,7 +180,6 @@ impl FsNode {
                     acc.symlinks += 1;
                 }
                 FsNode::Container { children, .. } => {
-                    // we don't count the container itself
                     for c in children {
                         walk(c, acc);
                     }
@@ -160,26 +191,21 @@ impl FsNode {
         out
     }
 
-    pub fn display_with<'a>(&'a self, opts: FsTreeDisplayOpts) -> FsTreeDisplay<'a> {
+    pub fn display_with<'b>(&'b self, opts: FsTreeDisplayOpts) -> FsTreeDisplay<'b, 'a> {
         FsTreeDisplay::new(self, opts)
     }
 
-    /// Compares structure and content, ignoring timestamps and mode in attributes.
-    /// Useful for tests where the filesystem sets its own timestamps.
+    /// Compares structure and attributes, ignoring volatile timestamps.
     pub fn structural_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
                 FsNode::File {
-                    name: n1,
-                    content: c1,
-                    attr: a1,
+                    name: n1, attr: a1, ..
                 },
                 FsNode::File {
-                    name: n2,
-                    content: c2,
-                    attr: a2,
+                    name: n2, attr: a2, ..
                 },
-            ) => n1 == n2 && c1 == c2 && a1.structural_eq(a2),
+            ) => n1 == n2 && a1.structural_eq(a2),
             (
                 FsNode::Dir {
                     name: n1,
@@ -236,12 +262,34 @@ impl FsNode {
         }
     }
 
-    /// Creates a new file node with content.
+    /// Creates a new file node from an in-memory byte buffer.
     pub fn new_file(name: impl Into<String>, content: Vec<u8>) -> Self {
         Self::File {
             name: name.into(),
-            content,
+            source: Box::new(VecRimIO::new(content)),
             attr: FileAttributes::default(),
+        }
+    }
+
+    /// Creates a new file node from an in-memory borrowed slice.
+    pub fn new_file_from_slice(name: impl Into<String>, slice: &'a [u8]) -> Self {
+        Self::File {
+            name: name.into(),
+            source: Box::new(SliceRimIO::new(slice)),
+            attr: FileAttributes::default(),
+        }
+    }
+
+    /// Creates a new file node from any `RimRead` source.
+    pub fn new_file_from_source(
+        name: impl Into<String>,
+        source: Box<dyn RimRead + 'a>,
+        attr: FileAttributes,
+    ) -> Self {
+        Self::File {
+            name: name.into(),
+            source,
+            attr,
         }
     }
 
@@ -255,7 +303,7 @@ impl FsNode {
     }
 
     /// Creates a new container node (anonymous).
-    pub fn new_container(children: Vec<FsNode>) -> Self {
+    pub fn new_container(children: Vec<FsNode<'a>>) -> Self {
         Self::Container {
             children,
             attr: FileAttributes::default(),
@@ -300,18 +348,18 @@ impl Default for FsTreeDisplayOpts {
 }
 
 /// Formatter / Display
-pub struct FsTreeDisplay<'a> {
-    root: &'a FsNode,
+pub struct FsTreeDisplay<'a, 'b> {
+    root: &'a FsNode<'b>,
     opts: FsTreeDisplayOpts,
 }
-impl<'a> FsTreeDisplay<'a> {
-    pub fn new(root: &'a FsNode, opts: FsTreeDisplayOpts) -> Self {
+impl<'a, 'b> FsTreeDisplay<'a, 'b> {
+    pub fn new(root: &'a FsNode<'b>, opts: FsTreeDisplayOpts) -> Self {
         Self { root, opts }
     }
 }
-impl<'a> fmt::Display for FsTreeDisplay<'a> {
+impl<'a, 'b> fmt::Display for FsTreeDisplay<'a, 'b> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut stack: Vec<(&FsNode, String, bool, usize)> = Vec::new(); // node, prefix, last, depth
+        let mut stack: Vec<(&FsNode<'b>, String, bool, usize)> = Vec::new(); // node, prefix, last, depth
         stack.push((self.root, String::new(), true, 0));
 
         let mut printed = 0usize;
@@ -328,17 +376,10 @@ impl<'a> fmt::Display for FsTreeDisplay<'a> {
             write!(f, "{}{}", prefix, if last { "└── " } else { "├── " })?;
 
             match node {
-                FsNode::File { name, content, .. } => {
+                FsNode::File { name, .. } => {
                     write!(f, "{}", truncate(name, self.opts.name_width))?;
                     if self.opts.show_attrs {
                         write!(f, " [{:?}]", node.attr())?;
-                    }
-                    if self.opts.show_sizes {
-                        if self.opts.human_size {
-                            write!(f, " ({})", pretty_bytes(content.len() as u64))?;
-                        } else {
-                            write!(f, " ({} bytes)", content.len())?;
-                        }
                     }
                     writeln!(f)?;
                     printed += 1;
@@ -383,6 +424,7 @@ impl<'a> fmt::Display for FsTreeDisplay<'a> {
     }
 }
 
+#[allow(dead_code)]
 fn pretty_bytes(n: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut val = n as f64;
@@ -398,6 +440,7 @@ fn pretty_bytes(n: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn sep_u64(mut n: u64) -> String {
     // "thin" thousand separator: 12 345 678
     if n < 1_000 {
@@ -420,7 +463,7 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..max]
 }
 
-impl fmt::Display for FsNode {
+impl<'a> fmt::Display for FsNode<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         FsTreeDisplay::new(self, FsTreeDisplayOpts::default()).fmt(f)
     }

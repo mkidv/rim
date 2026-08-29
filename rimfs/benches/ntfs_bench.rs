@@ -62,13 +62,9 @@ fn bench_ntfs_large_write(c: &mut Criterion) {
                 let mut io = MemRimIO::new(&mut local_buf);
                 let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
 
-                let node = FsNode::File {
-                    name: "large.bin".to_string(),
-                    content: content_copy,
-                    attr: FileAttributes::new_file(),
-                };
+                let mut node = FsNode::new_file("large.bin", content_copy);
 
-                injector.inject_tree(&node).unwrap();
+                injector.inject_tree(&mut node).unwrap();
                 injector.flush().unwrap();
             },
         );
@@ -91,13 +87,9 @@ fn bench_ntfs_large_read(c: &mut Criterion) {
 
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
         let content = vec![0xAAu8; WRITE_SIZE];
-        let node = FsNode::File {
-            name: "large.bin".to_string(),
-            content,
-            attr: FileAttributes::new_file(),
-        };
+        let mut node = FsNode::new_file("large.bin", content);
 
-        injector.inject_tree(&node).unwrap();
+        injector.inject_tree(&mut node).unwrap();
         injector.flush().unwrap();
     }
 
@@ -131,26 +123,23 @@ fn bench_ntfs_small_files(c: &mut Criterion) {
         NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
     }
 
-    let files: Vec<FsNode> = (0..NUM_FILES)
-        .map(|i| FsNode::File {
-            name: format!("file_{i}.txt"),
-            content: vec![0xBB; FILE_SIZE],
-            attr: FileAttributes::new_file(),
-        })
-        .collect();
-    let tree = FsNode::Container {
-        attr: FileAttributes::new_dir(),
-        children: files,
-    };
-
     group.throughput(Throughput::Elements(NUM_FILES as u64));
     group.bench_function("create_100_small_files_mem", |b| {
         b.iter_with_setup(
-            || disk_buf.clone(),
-            |mut local_buf| {
+            || {
+                let files: Vec<FsNode> = (0..NUM_FILES)
+                    .map(|i| FsNode::new_file(format!("file_{i}.txt"), vec![0xBB; FILE_SIZE]))
+                    .collect();
+                let tree = FsNode::Container {
+                    attr: FileAttributes::new_dir(),
+                    children: files,
+                };
+                (disk_buf.clone(), tree)
+            },
+            |(mut local_buf, mut local_tree)| {
                 let mut io = MemRimIO::new(&mut local_buf);
                 let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
-                injector.inject_tree(&tree).unwrap();
+                injector.inject_tree(&mut local_tree).unwrap();
                 injector.flush().unwrap();
             },
         );

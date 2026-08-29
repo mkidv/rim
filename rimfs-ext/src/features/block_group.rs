@@ -3,9 +3,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "std"))]
-use alloc::borrow::Cow;
-
 use rimio::prelude::*;
 use zerocopy::IntoBytes;
 

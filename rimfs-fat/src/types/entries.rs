@@ -111,16 +111,7 @@ impl FatEntries {
     }
 
     pub fn volume_label(name: [u8; 11]) -> Self {
-        let (date, time, fine) = utils::datetime_now();
-        let entry = FatEntry::new(
-            name,
-            FatAttributes::VOLUME_ID.bits(),
-            0,
-            0,
-            date,
-            time,
-            fine,
-        );
+        let entry = FatEntry::new(name, FatAttributes::VOLUME_ID.bits(), 0, 0, 0, 0, 0);
         Self {
             lfn: vec![],
             entry,
@@ -128,8 +119,8 @@ impl FatEntries {
         }
     }
 
-    pub fn dot(current_cluster: u32) -> Self {
-        let (date, time, fine) = utils::datetime_now();
+    pub fn dot(current_cluster: u32, attr: &FileAttributes) -> Self {
+        let (date, time, fine) = utils::datetime_from_attr(attr);
         let entry = FatEntry::new(
             *FAT_DOT_NAME,
             FatAttributes::DIRECTORY.bits(),
@@ -146,8 +137,8 @@ impl FatEntries {
         }
     }
 
-    pub fn dotdot(parent_cluster: u32) -> Self {
-        let (date, time, fine) = utils::datetime_now();
+    pub fn dotdot(parent_cluster: u32, attr: &FileAttributes) -> Self {
+        let (date, time, fine) = utils::datetime_from_attr(attr);
         let entry = FatEntry::new(
             *FAT_DOTDOT_NAME,
             FatAttributes::DIRECTORY.bits(),
@@ -189,13 +180,14 @@ impl FatEntries {
         lfn_stack: &[[u8; 32]],
         raw_entry: &[u8],
     ) -> FsParsingResult<Self> {
-        if raw_entry.len() != 32 {
-            return Err(FsParsingError::Invalid("Invalid Dir entry"));
-        }
-
-        if raw_entry[0] == 0x00 || raw_entry[0] == 0xE5 {
-            return Err(FsParsingError::Invalid("Unused or deleted entry"));
-        }
+        crate::ensure!(
+            raw_entry.len() == 32,
+            FsParsingError::Invalid("Invalid Dir entry")
+        );
+        crate::ensure!(
+            raw_entry[0] != 0x00 && raw_entry[0] != 0xE5,
+            FsParsingError::Invalid("Unused or deleted entry")
+        );
 
         let entry = FatEntry::read_from_bytes(raw_entry)
             .map_err(|_| FsParsingError::Invalid("Invalid SFN entry"))?;
@@ -205,9 +197,10 @@ impl FatEntries {
         let lfn = lfn_stack
             .iter()
             .map(|bytes| {
-                if bytes.len() != 32 {
-                    return Err(FsParsingError::Invalid("Invalid Name Entry size"));
-                }
+                crate::ensure!(
+                    bytes.len() == 32,
+                    FsParsingError::Invalid("Invalid Name Entry size")
+                );
 
                 FatLFNEntry::read_from_bytes(bytes)
                     .map_err(|_| FsParsingError::Invalid("Invalid LFN structure"))
@@ -224,9 +217,10 @@ impl FatEntries {
             let actual_value = entry.integrity_checksum;
             let actual_crc = actual_value % 100;
 
-            if expected_crc != actual_crc {
-                return Err(FsParsingError::Invalid("RIM-FAT: Entry CRC mismatch"));
-            }
+            crate::ensure!(
+                expected_crc == actual_crc,
+                FsParsingError::Invalid("RIM-FAT: Entry CRC mismatch")
+            );
 
             // Valid RIM-FAT hint: only trust contiguous if CRC is valid
             let is_contiguous = actual_value >= 100;
@@ -335,14 +329,16 @@ impl Validate<FatMeta> for FatEntry {
 
     fn validate(&self, meta: &FatMeta) -> Result<(), Self::Err> {
         // Forbid empty SFN (11 x ' ') for a real entry
-        if self.name.iter().all(|&b| b == b' ') {
-            return Err(FsParsingError::Invalid("SFN: empty 8.3 name"));
-        }
+        crate::ensure!(
+            !self.name.iter().all(|&b| b == b' '),
+            FsParsingError::Invalid("SFN: empty 8.3 name")
+        );
         // If first_cluster != 0, it must be within the data range
         let c = self.first_cluster();
-        if c != 0 && (c < FAT_FIRST_CLUSTER || c > meta.last_data_unit()) {
-            return Err(FsParsingError::Invalid("Entry: first_cluster out of range"));
-        }
+        crate::ensure!(
+            c == 0 || (c >= FAT_FIRST_CLUSTER && c <= meta.last_data_unit()),
+            FsParsingError::Invalid("Entry: first_cluster out of range")
+        );
 
         Ok(())
     }
@@ -613,8 +609,9 @@ mod tests {
 
         // Build a minimal "directory head" buffer: '.', '..', EOD
         let mut buf = Vec::with_capacity(3 * 32);
-        FatEntries::dot(self_cluster).to_raw_buffer(&mut buf); // slot 0
-        FatEntries::dotdot(parent_cluster).to_raw_buffer(&mut buf); // slot 1
+        let dir_attr = FileAttributes::new_dir();
+        FatEntries::dot(self_cluster, &dir_attr).to_raw_buffer(&mut buf); // slot 0
+        FatEntries::dotdot(parent_cluster, &dir_attr).to_raw_buffer(&mut buf); // slot 1
         FatEodEntry::new().to_raw_buffer(&mut buf); // slot 2
 
         assert!(buf.len() >= 96, "dir head too small ({} bytes)", buf.len());
@@ -719,8 +716,9 @@ mod tests {
 
     #[test]
     fn test_dot_dotdot_have_no_lfn_and_zero_size() {
-        let dot = FatEntries::dot(100);
-        let dd = FatEntries::dotdot(50);
+        let dir_attr = FileAttributes::new_dir();
+        let dot = FatEntries::dot(100, &dir_attr);
+        let dd = FatEntries::dotdot(50, &dir_attr);
 
         assert!(
             dot.lfn.is_empty() && dd.lfn.is_empty(),

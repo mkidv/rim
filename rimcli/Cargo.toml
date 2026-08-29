@@ -19,12 +19,12 @@ anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 colored = "3.1.1"
 indicatif = "0.18.3"
-rimfs.workspace = true
-rimgen.workspace = true
+rimfs = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
+rimgen = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
 rimhost.workspace = true
 rimimg.workspace = true
-rimio.workspace = true
-rimpart.workspace = true
+rimio = { workspace = true, features = ["std"] }
+rimpart = { workspace = true, features = ["std"] }
 tempfile = "3.20.0"
 
 [lints]

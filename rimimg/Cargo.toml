@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1.0"
-rimio.workspace = true
+rimio = { workspace = true, features = ["std"] }
 tempfile = "3.20"
 time = { version = "0.3.41", default-features = false, features = ["std"] }
 uuid = { version = "1.17", features = ["v4"] }

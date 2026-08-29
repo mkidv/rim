@@ -7,22 +7,24 @@ name = "EFI"
 fs = "fat32"
 size = "64M"
 bootable = true
+type = "esp"
+label = "BOOT"
 
 [[partitions]]
 name = "LINUX_ROOT"
 fs = "ext4"
-size = "512M"
+size = "128M"
 label = "ROOTFS"
 mountpoint = "rootfs/*"
 
 [[partitions]]
 name = "SHARED_DATA"
 fs = "exfat"
-size = "256M"
+size = "64M"
 label = "DATA"
 
 [[partitions]]
 name = "WINDOWS_DATA"
 fs = "ntfs"
-size = "256M"
+size = "128M"
 label = "WIN_DATA"
