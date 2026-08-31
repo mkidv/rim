@@ -302,11 +302,11 @@ impl<'a> FsNode<'a> {
         }
     }
 
-    /// Creates a new container node (anonymous).
+    /// Creates an anonymous root-like container node.
     pub fn new_container(children: Vec<FsNode<'a>>) -> Self {
         Self::Container {
             children,
-            attr: FileAttributes::default(),
+            attr: FileAttributes::new_dir(),
         }
     }
 }

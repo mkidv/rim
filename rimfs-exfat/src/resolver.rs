@@ -2,7 +2,7 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 
 use crate::core::cursor::ClusterCursor;
 pub use crate::core::resolver::*;
@@ -11,12 +11,12 @@ use crate::core::FsCursorError;
 use crate::core::utils::path_utils::*;
 use crate::{constant::*, meta::*, types::*};
 
-pub struct ExFatResolver<'a, IO: RimIO + ?Sized> {
+pub struct ExFatResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     meta: &'a ExFatMeta,
 }
 
-impl<'a, IO: RimIO + ?Sized> ExFatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> ExFatResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExFatMeta) -> Self {
         Self { io, meta }
     }
@@ -41,7 +41,7 @@ impl<'a, IO: RimIO + ?Sized> ExFatResolver<'a, IO> {
 
 use crate::core::resolver::walker::WalkerDataSource;
 
-impl<'a, IO: RimIO + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
     type Entry = ExFatEntries;
 
     fn root_cluster(&self) -> u32 {
@@ -65,7 +65,7 @@ impl<'a, IO: RimIO + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
     }
 }
 
-impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExFatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, cluster, _) = self.resolve_entry_info(path)?;
         crate::ensure!(is_dir, FsResolverError::Invalid("Expected a directory"));
@@ -78,10 +78,10 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExFatResolver<'a, IO> {
         Ok(entries_string)
     }
 
-    fn open_file(
-        &mut self,
+    fn open_file<'c>(
+        &'c mut self,
         path: &str,
-    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'c>> {
         let entry = self.resolve_entry(path)?;
         crate::ensure!(!entry.is_dir(), FsResolverError::Invalid("Expected a file"));
 
@@ -90,8 +90,46 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExFatResolver<'a, IO> {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
 
-        let data = self.read_file(path)?;
-        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+        let first_cluster = entry.first_cluster();
+        let is_contiguous = entry.stream.is_contiguous();
+        let total_size = size as u64;
+
+        if is_contiguous {
+            let phys_offset = self.meta.unit_offset(first_cluster);
+            return Ok(alloc::boxed::Box::new(
+                rimio::extent::ExtentRimRead::from_contiguous(
+                    &mut *self.io,
+                    phys_offset,
+                    total_size,
+                ),
+            ));
+        }
+
+        let cs = self.meta.unit_size() as u64;
+        let mut extents = Vec::new();
+        let mut logical_offset = 0u64;
+        let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
+        cur.for_each_run(self.io, |_io, start, len| {
+            if logical_offset >= total_size {
+                return Ok(());
+            }
+            let phys_offset = self.meta.unit_offset(start);
+            let run_bytes = (len as u64) * cs;
+            let extent_len = core::cmp::min(run_bytes, total_size - logical_offset);
+            extents.push(rimio::extent::IoExtent {
+                logical_offset,
+                source_offset: Some(phys_offset),
+                len: extent_len,
+            });
+            logical_offset += extent_len;
+            Ok(())
+        })?;
+
+        Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
+            &mut *self.io,
+            extents,
+            total_size,
+        )))
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
@@ -162,7 +200,7 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExFatResolver<'a, IO> {
     }
 }
 
-fn read_dir_entries<IO: RimIO + ?Sized>(
+fn read_dir_entries<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     start_cluster: u32,
@@ -256,7 +294,7 @@ fn read_dir_entries<IO: RimIO + ?Sized>(
 /// - Traversal by runs to minimize I/O.
 /// - Allows system clusters (root directory, etc.).
 /// - Maintains PRIMARY/STREAM/NAME state across clusters and runs.
-pub fn find_in_dir<IO: RimIO + ?Sized>(
+pub fn find_in_dir<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,
     dir_cluster: u32,

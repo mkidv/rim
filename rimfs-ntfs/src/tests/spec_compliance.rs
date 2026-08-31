@@ -53,20 +53,6 @@ fn test_resident_attribute_header_layout() {
 
 #[test]
 fn test_non_resident_attribute_header_layout() {
-    // Spec: "The non-resident data is 48 or 56 bytes in size"
-    // Our struct includes the common header? No, `NonResidentAttributeHeader` in code seems to be just the body?
-    // Let's check `types/record.rs`.
-    // Struct `NonResidentAttributeHeader` has fields:
-    // lowest_vcn (8)
-    // highest_vcn (8)
-    // data_runs_offset (2)
-    // compression_unit (2)
-    // padding (4)
-    // allocated_size (8)
-    // data_size (8)
-    // initialized_size (8)
-    // Total = 8+8+2+2+4+8+8+8 = 48 bytes.
-    // Spec says 48 or 56. 48 is standard.
     assert_eq!(
         core::mem::size_of::<NonResidentAttributeHeader>(),
         48,

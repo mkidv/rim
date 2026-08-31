@@ -12,6 +12,8 @@ members = [
     "rimfs-ext",
     "rimfs-ntfs",
     "rimfs-tar",
+    "rimfs-zip",
+    "rimfs-iso",
     "rimfs",
     "rimpart",
     "rimio",
@@ -20,10 +22,10 @@ members = [
     "examples/wasm-synth",
 ]
 
-default-members = ["rimcli", "rimgen", "rimimg", "rimhost", "rimfs-core", "rimfs-fat", "rimfs-exfat", "rimfs-ext", "rimfs-ntfs", "rimfs-tar", "rimfs", "rimpart", "rimio"]
+default-members = ["rimcli", "rimgen", "rimimg", "rimhost", "rimfs-core", "rimfs-fat", "rimfs-exfat", "rimfs-ext", "rimfs-ntfs", "rimfs-tar", "rimfs-zip", "rimfs-iso", "rimfs", "rimpart", "rimio"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 authors = ["Killian Massa (Mki) <contact@mki.dev>"]
@@ -33,19 +35,21 @@ keywords = ["fat", "exfat", "ext", "ntfs", "mbr", "gpt", "disk-image"]
 categories = ["filesystem", "embedded", "no-std", "development-tools"]
 
 [workspace.dependencies]
-rimcli = { path = "rimcli", version = "0.7.0", default-features = false }
-rimfs = { path = "rimfs", version = "0.7.0", default-features = false }
-rimfs-core = { path = "rimfs-core", version = "0.7.0", default-features = false }
-rimfs-fat = { path = "rimfs-fat", version = "0.7.0", default-features = false }
-rimfs-exfat = { path = "rimfs-exfat", version = "0.7.0", default-features = false }
-rimfs-ext = { path = "rimfs-ext", version = "0.7.0", default-features = false }
-rimfs-ntfs = { path = "rimfs-ntfs", version = "0.7.0", default-features = false }
-rimfs-tar = { path = "rimfs-tar", version = "0.7.0", default-features = false }
-rimgen = { path = "rimgen", version = "0.7.0", default-features = false }
-rimhost = { path = "rimhost", version = "0.7.0", default-features = false }
-rimimg = { path = "rimimg", version = "0.7.0", default-features = false }
-rimio = { path = "rimio", version = "0.7.0", default-features = false }
-rimpart = { path = "rimpart", version = "0.7.0", default-features = false }
+rimcli = { path = "rimcli", version = "0.8.0", default-features = false }
+rimfs = { path = "rimfs", version = "0.8.0", default-features = false }
+rimfs-core = { path = "rimfs-core", version = "0.8.0", default-features = false }
+rimfs-fat = { path = "rimfs-fat", version = "0.8.0", default-features = false }
+rimfs-exfat = { path = "rimfs-exfat", version = "0.8.0", default-features = false }
+rimfs-ext = { path = "rimfs-ext", version = "0.8.0", default-features = false }
+rimfs-ntfs = { path = "rimfs-ntfs", version = "0.8.0", default-features = false }
+rimfs-tar = { path = "rimfs-tar", version = "0.8.0", default-features = false }
+rimfs-zip = { path = "rimfs-zip", version = "0.8.0", default-features = false }
+rimfs-iso = { path = "rimfs-iso", version = "0.8.0", default-features = false }
+rimgen = { path = "rimgen", version = "0.8.0", default-features = false }
+rimhost = { path = "rimhost", version = "0.8.0", default-features = false }
+rimimg = { path = "rimimg", version = "0.8.0", default-features = false }
+rimio = { path = "rimio", version = "0.8.0", default-features = false }
+rimpart = { path = "rimpart", version = "0.8.0", default-features = false }
 
 [workspace.lints.clippy]
 chunks_exact_to_as_chunks = "allow"

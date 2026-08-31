@@ -10,7 +10,7 @@ use crate::{FsResult, resolver::FsTreeResolver};
 /// Checks if a file exists at the given path.
 ///
 /// Returns `Ok(())` if the path exists and is a file, or an `FsError` otherwise.
-pub fn check_file_exists<'a, P: FsTreeResolver<'a>>(parser: &mut P, path: &str) -> FsResult {
+pub fn check_file_exists<P: FsTreeResolver>(parser: &mut P, path: &str) -> FsResult {
     let node = parser.resolve_entry(path)?;
     if node.is_file() {
         Ok(())
@@ -22,7 +22,7 @@ pub fn check_file_exists<'a, P: FsTreeResolver<'a>>(parser: &mut P, path: &str) 
 /// Checks if a directory exists at the given path.
 ///
 /// Returns `Ok(())` if the path exists and is a directory, or an `FsError` otherwise.
-pub fn check_dir_exists<'a, P: FsTreeResolver<'a>>(parser: &mut P, path: &str) -> FsResult {
+pub fn check_dir_exists<P: FsTreeResolver>(parser: &mut P, path: &str) -> FsResult {
     let node = parser.resolve_entry(path)?;
     if node.is_dir() {
         Ok(())
@@ -34,7 +34,7 @@ pub fn check_dir_exists<'a, P: FsTreeResolver<'a>>(parser: &mut P, path: &str) -
 /// Checks if the content of a file at the given path matches `expected_content`.
 ///
 /// Returns `Ok(())` if the content matches exactly, or an `FsError` otherwise.
-pub fn check_file_content<'a, P: FsTreeResolver<'a>>(
+pub fn check_file_content<P: FsTreeResolver>(
     parser: &mut P,
     path: &str,
     expected_content: &[u8],

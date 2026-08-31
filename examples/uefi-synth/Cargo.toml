@@ -1,9 +1,17 @@
 [package]
 name = "uefi-synth"
+description = "UEFI BlockIO disk synthesis example for rim"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 publish = false
+
+[features]
+default = []
+dangerous-uefi-write = []
 
 [[bin]]
 name = "uefi-synth"
@@ -12,7 +20,7 @@ test = false
 
 [dependencies]
 uefi = { version = "0.36.1", default-features = false, features = ["alloc"] }
-rimio = { path = "../../rimio", default-features = false, features = ["alloc", "uefi"] }
-rimpart = { path = "../../rimpart", default-features = false, features = ["alloc"] }
-rimfs = { path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat", "tar"] }
-rimgen = { path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat"] }
+rimio = { version = "0.8.0", path = "../../rimio", default-features = false, features = ["alloc", "uefi"] }
+rimpart = { version = "0.8.0", path = "../../rimpart", default-features = false, features = ["alloc"] }
+rimfs = { version = "0.8.0", path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat", "tar"] }
+rimgen = { version = "0.8.0", path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat"] }

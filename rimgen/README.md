@@ -9,24 +9,21 @@ It automates the pipeline of partitioning, formatting, and file injection from a
 - **Pure Rust & Rootless**: Runs in userspace without requiring root privileges or loop device mounts.
 - **Direct Stream Synthesis (`build_on_io`)**: Build directly onto any `RimIO` stream (RAM buffers, raw files, UEFI blocks) without writing temporary files.
 - **Typed Event Notifications (`BuildEvent`)**: Real-time event hooks for layout planning, GPT writes, partition formatting, and payload progress.
-- **Container Format Wrapping**: Native integration with `rimimg` for automatic packaging into VHD, VMDK, QCOW2, and VDI formats.
+- **Direct Container Output**: Native integration with `rimimg` container-backed I/O for VHD, VMDK, QCOW2, and VDI outputs.
 
 ## Basic Usage
 
 ```rust
-use rimgen::{DiskLayout, ImageBuilder};
-use std::path::Path;
+use rimgen::{build_config_on_io, LayoutConfig};
+use rimio::prelude::MemRimIO;
 
 fn main() -> anyhow::Result<()> {
-    let layout = DiskLayout::from_file(Path::new("layout.toml"))?;
+    let layout = LayoutConfig::from_file(std::path::Path::new("layout.toml"))?;
+    let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(&layout) * 512;
 
-    let mut builder = ImageBuilder::new(layout)
-        .truncate(true)
-        .on_event(|event| {
-            println!("Event: {:?}", event);
-        });
-
-    let report = builder.build_to_file("output.img")?;
+    let mut buffer = vec![0u8; raw_len as usize];
+    let mut io = MemRimIO::new(&mut buffer);
+    let report = build_config_on_io(&layout, &mut io)?;
     println!("Built {} bytes in {:?}", report.total_bytes, report.total_duration);
 
     Ok(())
@@ -36,3 +33,7 @@ fn main() -> anyhow::Result<()> {
 ## License
 
 MIT License.
+
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

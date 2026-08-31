@@ -7,25 +7,29 @@ extern crate alloc;
 pub use rimfs_core as core;
 pub use rimfs_core::{bail, ensure};
 
-pub mod allocator;
-pub mod attr;
-pub mod checker;
-pub mod constant;
-pub mod features;
-pub mod filesystem;
-pub mod formatter;
-pub mod group_layout;
-pub mod injector;
-pub mod meta;
-pub mod ops;
-pub mod resolver;
+mod allocator;
+mod attr;
+mod checker;
+#[allow(dead_code)]
+pub(crate) mod constant;
+#[allow(dead_code)]
+pub(crate) mod features;
+mod filesystem;
+mod formatter;
+pub(crate) mod group_layout;
+mod injector;
+mod meta;
+#[allow(dead_code)]
+pub(crate) mod ops;
+mod resolver;
 pub mod types;
-pub mod updates;
-pub mod utils;
+pub(crate) mod updates;
+#[allow(dead_code)]
+pub(crate) mod utils;
 
 pub mod traits {
     pub use super::allocator::{ExtAllocator, ExtHandle};
-    pub use super::checker::ExtChecker;
+    pub use super::checker::{ExtChecker, ExtCheckerOptions};
     pub use super::filesystem::Ext;
     pub use super::formatter::ExtFormatter;
     pub use super::injector::ExtInjector;

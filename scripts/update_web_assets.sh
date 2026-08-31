@@ -17,17 +17,28 @@ cargo build -p wasm-synth --target wasm32-unknown-unknown --release
 
 # 2. Paths
 WASM_SRC="$RIM_ROOT/target/wasm32-unknown-unknown/release/wasm_synth.wasm"
-PAYLOAD_SRC="$RIM_ROOT/examples/wasm-synth/payload/alpine_payload.tar"
+ALPINE_PAYLOAD_SRC="$RIM_ROOT/examples/wasm-synth/payload/alpine_payload.tar"
+UEFI_PAYLOAD_SRC="$RIM_ROOT/examples/wasm-synth/payload/uefi_payload.tar"
 WASM_DEST="$WEB_REPO/public/rim/wasm_synth.wasm"
-PAYLOAD_DEST="$WEB_REPO/public/rim/payload/alpine_payload.tar"
+ALPINE_PAYLOAD_DEST="$WEB_REPO/public/rim/payload/alpine_payload.tar"
+UEFI_PAYLOAD_DEST="$WEB_REPO/public/rim/payload/uefi_payload.tar"
 
-mkdir -p "$(dirname "$PAYLOAD_DEST")"
+mkdir -p "$(dirname "$ALPINE_PAYLOAD_DEST")"
 
 # 3. Copy
 echo "[2/3] Copying artifacts to $WEB_REPO/public/rim/..."
 cp -f "$WASM_SRC" "$WASM_DEST"
-cp -f "$PAYLOAD_SRC" "$PAYLOAD_DEST"
+cp -f "$ALPINE_PAYLOAD_SRC" "$ALPINE_PAYLOAD_DEST"
+if [[ -f "$UEFI_PAYLOAD_SRC" ]]; then
+  cp -f "$UEFI_PAYLOAD_SRC" "$UEFI_PAYLOAD_DEST"
+else
+  echo "warning: UEFI payload TAR not found at $UEFI_PAYLOAD_SRC; keeping existing web payload if present." >&2
+fi
 
 echo "[3/3] Verifying copied artifacts:"
-ls -lh "$WASM_DEST" "$PAYLOAD_DEST"
+if [[ -f "$UEFI_PAYLOAD_DEST" ]]; then
+  ls -lh "$WASM_DEST" "$ALPINE_PAYLOAD_DEST" "$UEFI_PAYLOAD_DEST"
+else
+  ls -lh "$WASM_DEST" "$ALPINE_PAYLOAD_DEST"
+fi
 echo "=== Web assets successfully updated! ==="

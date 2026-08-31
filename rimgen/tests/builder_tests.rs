@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-use rimgen::{Filesystem, ImageBuilder, LayoutConfig, PartitionConfig, Size};
+use rimgen::{Filesystem, LayoutConfig, PartitionConfig, Size};
 use rimimg::ImageFormat;
 use rimio::prelude::*;
 use std::fs::File;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -64,8 +66,7 @@ fn test_declarative_builder_and_format_conversions() {
     };
 
     // 2. Build RAW image
-    let mut builder = ImageBuilder::new(layout);
-    builder.build_to_file(&img_path).unwrap();
+    build_config_to_file(&layout, &img_path, ImageFormat::Raw);
     assert!(img_path.exists());
 
     // 3. Scan RAW image partitions via rimpart
@@ -79,22 +80,60 @@ fn test_declarative_builder_and_format_conversions() {
         assert_eq!(scan.partitions[2].name, "DATA_EXFAT");
     }
 
-    // 4. Convert to all container formats
-    rimimg::convert(&img_path, &vhd_path).unwrap();
-    rimimg::convert(&img_path, &qcow2_path).unwrap();
-    rimimg::convert(&img_path, &vdi_path).unwrap();
-    rimimg::convert(&img_path, &vmdk_path).unwrap();
+    // 4. Build directly to all container formats
+    for (path, format) in [
+        (&vhd_path, ImageFormat::Vhd),
+        (&qcow2_path, ImageFormat::Qcow2),
+        (&vdi_path, ImageFormat::Vdi),
+        (&vmdk_path, ImageFormat::Vmdk),
+    ] {
+        build_config_to_file(&layout, path, format);
+        assert_eq!(detect_format(path), format);
+        assert_partition_layout(path);
+    }
+}
 
-    // 5. Inspect and detect container formats
-    let mut f = File::open(&vhd_path).unwrap();
-    assert_eq!(ImageFormat::from_file(&mut f).unwrap(), ImageFormat::Vhd);
+fn build_config_to_file(layout: &LayoutConfig, output: &Path, format: ImageFormat) {
+    let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(layout) * 512;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output)
+        .unwrap();
+    let mut file_io = FileRimIO::new(file);
 
-    let mut f = File::open(&qcow2_path).unwrap();
-    assert_eq!(ImageFormat::from_file(&mut f).unwrap(), ImageFormat::Qcow2);
+    if format == ImageFormat::Raw {
+        file_io.set_len(raw_len).unwrap();
+        rimgen::build_config_on_io(layout, &mut file_io).unwrap();
+    } else {
+        let mut image = rimimg::create_image_io(
+            &mut file_io,
+            raw_len,
+            format,
+            rimimg::ImageOptions::deterministic(1),
+        )
+        .unwrap();
+        rimgen::build_config_on_io(layout, &mut image).unwrap();
+        image.finish().unwrap();
+    }
+}
 
-    let mut f = File::open(&vdi_path).unwrap();
-    assert_eq!(ImageFormat::from_file(&mut f).unwrap(), ImageFormat::Vdi);
+fn detect_format(path: &Path) -> ImageFormat {
+    let file = File::open(path).unwrap();
+    let mut io = FileRimIO::new(file);
+    ImageFormat::from_io(&mut io).unwrap()
+}
 
-    let mut f = File::open(&vmdk_path).unwrap();
-    assert_eq!(ImageFormat::from_file(&mut f).unwrap(), ImageFormat::Vmdk);
+fn assert_partition_layout(path: &Path) {
+    let file = File::open(path).unwrap();
+    let mut file_io = FileRimIO::new(file);
+    let mut disk = rimimg::open_image_io(&mut file_io).unwrap();
+    let scan = rimpart::scan_disk_with_sector(&mut disk, 512).unwrap();
+
+    assert_eq!(scan.partitions.len(), 3);
+    assert_eq!(scan.partitions[0].name, "ESP");
+    assert_eq!(scan.partitions[1].name, "DATA_EXT4");
+    assert_eq!(scan.partitions[2].name, "DATA_EXFAT");
 }

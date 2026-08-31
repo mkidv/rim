@@ -18,10 +18,6 @@ use crate::types::ExtBlockGroupDesc;
 #[derive(Default)]
 pub struct BlockGroupFeature {
     bgdt_data: Option<Vec<u8>>,
-    // Removed large cached bitmaps
-    // We keep layouts to avoiding recomputing them in write phase,
-    // though recomputing is cheap (math only).
-    // Let's keep them for consistency with previous code structure.
     group_layouts: Vec<GroupLayout>,
 
     block_size: u32,
@@ -57,14 +53,14 @@ impl BlockGroupFeature {
 
         // Mark reserved blocks (Superblock, GDT, Bitmaps, Inode Table)
         let reserved_count = layout.first_data_block - layout.group_start;
-        view.set_bits_range(io, 0, reserved_count as u64, true)?;
+        view.set_bits_range(io, 0, reserved_count, true)?;
 
         // Group 0: Mark Root (1st data block) and Lost+Found (2nd data block)
         // These are statically allocated by RootDirFeature and LostFoundFeature
         // but not tracked by the allocator during formatting.
         if group == 0 {
             // Bit indices for these blocks are reserved_count and reserved_count + 1
-            view.set_bits_range(io, reserved_count as u64, 2, true)?;
+            view.set_bits_range(io, reserved_count, 2, true)?;
         }
 
         view.flush(io)?;
@@ -208,8 +204,17 @@ impl<'p, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, ExtAllocator<'p>, IO> for 
             // Sparse BGDT copies logic
             let is_backup = layout.reserved_blocks > 0 && layout.group_id != 0;
             if is_backup {
-                let sb_copy_offset = (layout.group_start * self.block_size) as u64;
-                let bgdt_copy_offset = sb_copy_offset + self.block_size as u64;
+                let sb_copy_offset = layout
+                    .group_start
+                    .checked_mul(self.block_size as u64)
+                    .ok_or(crate::core::errors::FsFeatureError::InvalidConfiguration(
+                        "EXT backup BGDT offset overflow",
+                    ))?;
+                let bgdt_copy_offset = sb_copy_offset.checked_add(self.block_size as u64).ok_or(
+                    crate::core::errors::FsFeatureError::InvalidConfiguration(
+                        "EXT backup BGDT offset overflow",
+                    ),
+                )?;
                 io.write_at(bgdt_copy_offset, &bgdt_buf)?;
             }
         }

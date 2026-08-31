@@ -68,3 +68,13 @@ impl FsMeta<u64> for TarMeta {
         self.label.clone()
     }
 }
+
+impl TarMeta {
+    pub fn new(total_size: u64, label: Option<&str>) -> rimfs_core::FsResult<Self> {
+        Ok(Self {
+            block_size: TAR_BLOCK_SIZE,
+            total_size,
+            label: String::from(label.unwrap_or("TARFS")),
+        })
+    }
+}

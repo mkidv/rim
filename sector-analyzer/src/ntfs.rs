@@ -1,5 +1,5 @@
+use rimfs::ntfs::apply_usa_fixup;
 use rimfs::ntfs::types::NtfsBootSector;
-use rimfs::ntfs::utils::apply_usa_fixup;
 use rimfs::ntfs::view::attr_view::{AttrRef, AttrView};
 use rimfs::ntfs::view::mft_view::MftRecordView;
 use rimio::prelude::*;

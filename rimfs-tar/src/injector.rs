@@ -10,6 +10,7 @@ use crate::meta::TarMeta;
 use crate::types::*;
 use rimfs_core::errors::FsInjectorResult;
 use rimfs_core::injector::FsTreeInjector;
+use rimfs_core::normalize_fs_path;
 use rimfs_core::resolver::{attr::FileAttributes, node::FsNode};
 use rimio::{RimIO, RimRead};
 
@@ -72,7 +73,7 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
-        let mut dir_name = String::from(name.trim_start_matches('/'));
+        let mut dir_name = String::from(normalize_fs_path(name));
         if !dir_name.ends_with('/') {
             dir_name.push('/');
         }
@@ -93,7 +94,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let file_name = name.trim_start_matches('/');
+        let file_name = normalize_fs_path(name);
         let mtime = attr
             .modified
             .map(|t| t.unix_timestamp() as u64)
@@ -134,7 +135,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         target: &str,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let link_name = name.trim_start_matches('/');
+        let link_name = normalize_fs_path(name);
         let mtime = attr
             .modified
             .map(|t| t.unix_timestamp() as u64)

@@ -13,7 +13,7 @@ mod walker;
 
 // --- check options (identical or light) ---
 #[derive(Clone, Debug)]
-pub struct FatCheckOptions {
+pub struct FatCheckerOptions {
     pub phases: VerifyPhases,
     pub fail_fast: bool,
     pub fat_sample: u32,
@@ -27,7 +27,7 @@ pub struct FatCheckOptions {
     pub orphan_sample_limit: usize,
     pub fsinfo_tolerance_percent: u8,
 }
-impl Default for FatCheckOptions {
+impl Default for FatCheckerOptions {
     fn default() -> Self {
         Self {
             phases: VerifyPhases::ALL,
@@ -46,7 +46,7 @@ impl Default for FatCheckOptions {
     }
 }
 
-impl VerifierOptionsLike for FatCheckOptions {
+impl VerifierOptionsLike for FatCheckerOptions {
     fn phases(&self) -> VerifyPhases {
         self.phases.clone()
     }
@@ -66,7 +66,7 @@ impl<'a, IO: RimIO + ?Sized> FatChecker<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsChecker for FatChecker<'a, IO> {
-    type Options = FatCheckOptions;
+    type Options = FatCheckerOptions;
 
     fn check_boot(&mut self, opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
         boot::check_boot(self.io, self.meta, rep)?;
@@ -138,11 +138,11 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for FatChecker<'a, IO> {
     }
 
     fn fast_check(&mut self) -> FsCheckerResult {
-        let opt = FatCheckOptions {
+        let opt = FatCheckerOptions {
             phases: VerifyPhases::BOOT | VerifyPhases::CHAIN | VerifyPhases::ROOT,
             fail_fast: true,
             fat_sample: 0,
-            deep_fat_walk: true,
+            deep_fat_walk: false,
             compare_fat_copies: true,
             check_fsinfo_consistency: false,
             check_lfn_sets: true,

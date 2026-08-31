@@ -24,7 +24,6 @@ use crate::{
     },
 };
 use rimio::prelude::*;
-use rimio::{RimIO, RimIOExt};
 
 /// EXT-specific directory context with child subdirectory tracking for link counts
 struct ExtContext {
@@ -79,7 +78,7 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
     }
 
     fn write_block(&mut self, block: u32, data: &[u8]) -> FsInjectorResult {
-        let offset = self.allocator.blocks.block_offset(block);
+        let offset = self.allocator.blocks.block_offset(block as u64);
         self.io
             .write_block_best_effort(offset, data, self.meta.block_size as usize)?;
         Ok(())
@@ -111,7 +110,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
         // Read existing directory content
         let mut existing = vec![0u8; self.meta.block_size as usize];
-        let offset = root_block as u64 * self.meta.block_size as u64;
+        let offset = root_block * self.meta.block_size as u64;
         self.io.read_at(offset, &mut existing)?;
 
         // Find end of existing entries (look for first rec_len that would exceed block size or inode=0)
@@ -157,9 +156,14 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
         // Create handle for root (using existing block, inode 2)
         let mut root_blocks = RunList::new();
-        root_blocks.push(Run::new(root_block as u64, 1));
+        root_blocks.push(Run::new(root_block, 1));
         let handle = ExtHandle::new(root_inode, root_blocks);
-        let extent = ExtExtent::new(0, root_block, 1);
+        let extent = ExtExtent::new(
+            0,
+            u32::try_from(root_block)
+                .map_err(|_| FsInjectorError::Invalid("EXT root block exceeds extent range"))?,
+            1,
+        );
 
         let mut ctx = ExtContext::new(handle, existing, extent, root.attr().clone());
         ctx.child_dir_count = child_dir_count;
@@ -452,24 +456,23 @@ mod tests {
     use crate::meta::ExtFeatureSet;
     use crate::prelude::*;
     use crate::resolver::ExtResolver;
+    use rimfs_core::testing::{
+        ExpectedFile, ExpectedLink, assert_files, assert_no_errors, assert_symlinks, file_with_attr,
+    };
 
     const SIZE_MB: u64 = 32;
     const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
 
-    fn test_injector_scenario(meta: ExtMeta, name: &str) {
-        println!("--- Running Scenario: {name} ---");
+    fn test_injector_scenario(meta: ExtMeta, _name: &str) {
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // Format
         ExtFormatter::new(&mut io, &meta)
             .format(false)
             .expect("Format failed");
 
         let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
-        // Complex Tree with Large File (triggers Indirection/Extents)
-        // Block size 4096. 15 blocks = 60KB.
         let large_content = vec![0xEEu8; 15 * 4096];
 
         let mut tree = FsNode::Container {
@@ -487,51 +490,31 @@ mod tests {
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
-        // Check consistency
         let mut checker = ExtChecker::new(&mut io, &meta);
         checker.fast_check().expect("check failed");
 
-        // Verify content
         let mut resolver = ExtResolver::new(&mut io, &meta);
-
-        // Check simple file
-        let content = resolver
-            .read_file("/subdir/hello.txt")
-            .expect("read_file hello failed");
-        assert_eq!(
-            content, b"Hello World!",
-            "{name}: Simple file content mismatch"
+        assert_files(
+            &mut resolver,
+            &[
+                ExpectedFile {
+                    path: "/subdir/hello.txt",
+                    bytes: b"Hello World!",
+                },
+                ExpectedFile {
+                    path: "/large.bin",
+                    bytes: &large_content,
+                },
+            ],
         );
-
-        // Check large file (Exercises BlockMap vs Extents)
-        let read_large = resolver
-            .read_file("/large.bin")
-            .expect("read_file large failed");
-        assert_eq!(
-            read_large.len(),
-            large_content.len(),
-            "{name}: Large file size mismatch"
-        );
-        assert_eq!(
-            read_large, large_content,
-            "{name}: Large file content mismatch"
-        );
-
-        println!("✓ Scenario {name} Passed");
     }
 
     #[test]
     fn test_ext_variants() {
-        // Ext2 (Block Map, no features)
         test_injector_scenario(ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2")).unwrap(), "Ext2");
-
-        // Ext3 (Block Map, has compat)
         test_injector_scenario(ExtMeta::new_ext3(SIZE_BYTES, Some("EXT3")).unwrap(), "Ext3");
-
-        // Ext (Extents, has all features)
         test_injector_scenario(ExtMeta::new(SIZE_BYTES, Some("EXT")).unwrap(), "Ext");
 
-        // Exotic: Extents disabled but 64bit enabled (Manual construction)
         let mut features = ExtFeatureSet::EXT;
         features.has_extents = false;
         features.has_64bit = true;
@@ -662,19 +645,27 @@ mod tests {
 
         injector.inject_tree(&mut tree).unwrap();
 
-        // 1. Check with ExtChecker
         let mut checker = ExtChecker::new(&mut io, &meta);
         let report = checker.check_all().unwrap();
-        assert!(!report.has_error(), "Checker errors: {:?}", report.findings);
+        assert_no_errors(&report);
 
-        // 2. Read back with ExtResolver
         let mut resolver = ExtResolver::new(&mut io, &meta);
-
-        assert_eq!(resolver.read_link("/short-link").unwrap(), short_target);
-        assert_eq!(resolver.read_link("/long-link").unwrap(), long_target);
-        assert_eq!(
-            resolver.read_link("/dangling-link").unwrap(),
-            dangling_target
+        assert_symlinks(
+            &mut resolver,
+            &[
+                ExpectedLink {
+                    path: "/short-link",
+                    target: short_target,
+                },
+                ExpectedLink {
+                    path: "/long-link",
+                    target: long_target,
+                },
+                ExpectedLink {
+                    path: "/dangling-link",
+                    target: dangling_target,
+                },
+            ],
         );
 
         let setuid_read = resolver.read_attributes("/setuid-demo").unwrap();
@@ -714,11 +705,7 @@ mod tests {
         let mut tree = FsNode::Container {
             attr: FileAttributes::new_dir(),
             children: vec![
-                FsNode::new_file_from_source(
-                    "app.bin",
-                    alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(b"app binary".to_vec())),
-                    high_id_attr,
-                ),
+                file_with_attr("app.bin", b"app binary", high_id_attr),
                 FsNode::Symlink {
                     name: "app.link".to_string(),
                     target: "app.bin".to_string(),
@@ -739,12 +726,18 @@ mod tests {
         let link_attr = resolver.read_attributes("/app.link").unwrap();
         assert_eq!(link_attr.uid, Some(90000));
         assert_eq!(link_attr.gid, Some(95000));
-        assert_eq!(resolver.read_link("/app.link").unwrap(), "app.bin");
+        assert_symlinks(
+            &mut resolver,
+            &[ExpectedLink {
+                path: "/app.link",
+                target: "app.bin",
+            }],
+        );
     }
 
     #[test]
     fn test_ext2_ext3_symlinks() {
-        for (meta, name) in [
+        for (meta, _name) in [
             (
                 ExtMeta::new_ext2(SIZE_BYTES, Some("EXT2_SYM")).unwrap(),
                 "Ext2",
@@ -787,22 +780,21 @@ mod tests {
 
             let mut checker = ExtChecker::new(&mut io, &meta);
             let report = checker.check_all().unwrap();
-            assert!(
-                !report.has_error(),
-                "{name} Checker errors: {:?}",
-                report.findings
-            );
+            assert_no_errors(&report);
 
             let mut resolver = ExtResolver::new(&mut io, &meta);
-            assert_eq!(
-                resolver.read_link("/sh").unwrap(),
-                short_target,
-                "{name} fast symlink"
-            );
-            assert_eq!(
-                resolver.read_link("/docker").unwrap(),
-                long_target,
-                "{name} slow symlink"
+            assert_symlinks(
+                &mut resolver,
+                &[
+                    ExpectedLink {
+                        path: "/sh",
+                        target: short_target,
+                    },
+                    ExpectedLink {
+                        path: "/docker",
+                        target: long_target,
+                    },
+                ],
             );
         }
     }

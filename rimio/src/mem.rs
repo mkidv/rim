@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite};
+use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite, checked_add_offset};
 
 /// Read-only in-memory slice implementation of `RimRead`.
 #[derive(Debug, Clone, Copy)]
@@ -18,7 +18,7 @@ impl<'a> SliceRimIO<'a> {
 impl<'a> RimRead for SliceRimIO<'a> {
     #[inline]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let start = offset as usize;
+        let start = usize::try_from(offset).map_err(|_| RimIOError::OutOfBounds)?;
         let end = start
             .checked_add(buf.len())
             .ok_or(RimIOError::OutOfBounds)?;
@@ -59,7 +59,7 @@ impl VecRimIO {
 impl RimRead for VecRimIO {
     #[inline]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let start = offset as usize;
+        let start = usize::try_from(offset).map_err(|_| RimIOError::OutOfBounds)?;
         let end = start
             .checked_add(buf.len())
             .ok_or(RimIOError::OutOfBounds)?;
@@ -238,7 +238,7 @@ impl<'a> MemRimIO<'a> {
 impl<'a> RimRead for MemRimIO<'a> {
     #[inline(always)]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_offset, buf.len())?;
         let src = &self.buffer[abs_offset as usize..abs_offset as usize + buf.len()];
         buf.copy_from_slice(src);
@@ -254,7 +254,7 @@ impl<'a> RimRead for MemRimIO<'a> {
 impl<'a> RimWrite for MemRimIO<'a> {
     #[inline(always)]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_offset, data.len())?;
         let dst = &mut self.buffer[abs_offset as usize..abs_offset as usize + data.len()];
         dst.copy_from_slice(data);
@@ -320,6 +320,16 @@ mod test {
         // Invariant 4: bounds checking within the resized view (0..500)
         assert!(io.write_at(499, &[0xBB]).is_ok());
         assert!(io.write_at(500, &[0xBB]).is_err());
+    }
+
+    #[test]
+    fn test_mem_rimio_rejects_offset_overflow() {
+        let mut buf = [0u8; 16];
+        let mut io = MemRimIO::new_with_offset(&mut buf, u64::MAX);
+        let mut out = [0u8; 1];
+
+        assert!(io.read_at(1, &mut out).is_err());
+        assert!(io.write_at(1, &[0xAA]).is_err());
     }
 
     #[test]

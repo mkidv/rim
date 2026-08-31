@@ -4,19 +4,20 @@ use crate::meta::ExtMeta;
 #[derive(Debug, Clone, Copy)]
 pub struct GroupLayout {
     pub group_id: u32,
-    pub group_start: u32,        // Start of the group in the storage space
-    pub block_bitmap_block: u32, // Block where the block bitmap is located
-    pub inode_bitmap_block: u32, // Block where the inode bitmap is located
-    pub inode_table_block: u32,  // Block where the inode table starts
+    pub group_start: u64,        // Start of the group in the storage space
+    pub block_bitmap_block: u64, // Block where the block bitmap is located
+    pub inode_bitmap_block: u64, // Block where the inode bitmap is located
+    pub inode_table_block: u64,  // Block where the inode table starts
     pub inode_table_blocks: u32, // Number of blocks needed for the inode table
-    pub first_data_block: u32,   // First data block for this group
+    pub first_data_block: u64,   // First data block for this group
     pub reserved_blocks: u32,    // Number of reserved blocks (e.g., for the superblock, BGDT)
 }
 
 impl GroupLayout {
     /// Calculate and initialize a `GroupLayout` for a given group
     pub fn compute(params: &ExtMeta, group_id: u32) -> Self {
-        let group_start = params.first_data_block + group_id * params.blocks_per_group;
+        let group_start =
+            params.first_data_block as u64 + group_id as u64 * params.blocks_per_group as u64;
 
         // Utility function: reserved for each group
         let reserved_blocks = Self::reserved_blocks_in_group(group_id, params);
@@ -45,7 +46,7 @@ impl GroupLayout {
 
     /// Total blocks used for metadata (reserved + bitmaps + inode table) in this group
     pub fn metadata_blocks(&self) -> u32 {
-        self.first_data_block - self.group_start
+        (self.first_data_block - self.group_start) as u32
     }
 
     // Utility functions moved into GroupLayout
@@ -59,8 +60,9 @@ impl GroupLayout {
         let has_super = !params.features.has_sparse_super || is_sparse_super_group(group_id);
 
         if has_super {
-            let bgdt_size = params.group_count * params.bgdt_entry_size as u32;
-            let bgdt_blocks = bgdt_size.div_ceil(params.block_size);
+            let bgdt_size = params.group_count as u64 * params.bgdt_entry_size as u64;
+            let bgdt_blocks = bgdt_size.div_ceil(params.block_size as u64);
+            let bgdt_blocks = u32::try_from(bgdt_blocks).unwrap_or(u32::MAX);
             1 + bgdt_blocks // SB (1 block) + BGDT blocks
         } else {
             0
@@ -68,26 +70,27 @@ impl GroupLayout {
     }
 
     // Returns the block where the block bitmap is stored for this group
-    fn block_bitmap_block(group_id: u32, params: &ExtMeta) -> u32 {
-        let group_start = params.first_data_block + group_id * params.blocks_per_group;
-        group_start + Self::reserved_blocks_in_group(group_id, params)
+    fn block_bitmap_block(group_id: u32, params: &ExtMeta) -> u64 {
+        let group_start =
+            params.first_data_block as u64 + group_id as u64 * params.blocks_per_group as u64;
+        group_start + Self::reserved_blocks_in_group(group_id, params) as u64
     }
 
     // Returns the block where the inode bitmap is stored for this group
-    fn inode_bitmap_block(group_id: u32, params: &ExtMeta) -> u32 {
+    fn inode_bitmap_block(group_id: u32, params: &ExtMeta) -> u64 {
         Self::block_bitmap_block(group_id, params) + 1
     }
 
     // Returns the block where the inode table starts for this group
-    fn inode_table_block(group_id: u32, params: &ExtMeta) -> u32 {
+    fn inode_table_block(group_id: u32, params: &ExtMeta) -> u64 {
         Self::inode_bitmap_block(group_id, params) + 1
     }
 
     // Returns the first data block in the group
-    fn first_data_block_in_group(params: &ExtMeta, group_id: u32) -> u32 {
+    fn first_data_block_in_group(params: &ExtMeta, group_id: u32) -> u64 {
         let inode_table_blocks =
             (params.inodes_per_group * params.inode_size / params.block_size).div_ceil(1);
-        Self::inode_table_block(group_id, params) + inode_table_blocks
+        Self::inode_table_block(group_id, params) + inode_table_blocks as u64
     }
 }
 
@@ -104,7 +107,8 @@ mod tests {
             let layout = GroupLayout::compute(&meta, group_id);
 
             // Verify group start
-            let expected_start = meta.first_data_block + group_id * meta.blocks_per_group;
+            let expected_start =
+                meta.first_data_block as u64 + group_id as u64 * meta.blocks_per_group as u64;
             assert_eq!(
                 layout.group_start, expected_start,
                 "Group {group_id}: group_start mismatch"

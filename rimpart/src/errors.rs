@@ -339,3 +339,21 @@ impl core::fmt::Display for MbrError {
         }
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for PartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PartError::IO(e) => Some(e),
+            PartError::Gpt(e) => Some(e),
+            PartError::Mbr(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for GptError {}
+
+#[cfg(feature = "std")]
+impl std::error::Error for MbrError {}

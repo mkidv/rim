@@ -53,3 +53,7 @@ gpt.add_partition(
 // Write to disk
 gpt.write(&mut disk)?;
 ```
+
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

@@ -9,12 +9,14 @@ It provides an ergonomic, feature-gated API while implementations are cleanly se
 - `rimfs-ext`: Ext2, Ext3, and Ext4 implementations.
 - `rimfs-ntfs`: Pure-Rust NTFS 3.1 implementation.
 - `rimfs-tar`: POSIX UStar TAR archive implementation.
+- `rimfs-zip`: Streaming ZIP archive implementation with ZIP64 & POSIX extensions.
+- `rimfs-iso`: ISO 9660 / Joliet / Rock Ridge / El Torito optical & hybrid disk implementation.
 
 ## Installation
 
 ```toml
 [dependencies]
-rimfs = "0.7.0"
+rimfs = "0.8.0"
 ```
 
 ## Cargo Features
@@ -24,6 +26,8 @@ rimfs = "0.7.0"
 - `ext`: Enables EXT (Ext2/3/4) support.
 - `ntfs`: Enables NTFS 3.1 support.
 - `tar`: Enables TAR archive support.
+- `zip`: Enables ZIP archive support.
+- `iso`: Enables ISO 9660 / Joliet / Rock Ridge / El Torito support.
 - `std`: Enables standard library integration (`StdResolver`, File I/O).
 - `alloc`: Enables dynamic allocation support in `no_std` environments.
 - `uefi`: Enables UEFI pre-boot environment integration.
@@ -32,7 +36,7 @@ rimfs = "0.7.0"
 
 `rimfs` re-exports:
 - Shared abstractions from `rimfs-core`.
-- Specialized filesystem modules based on enabled features (`rimfs::fat`, `rimfs::exfat`, `rimfs::ext`, `rimfs::ntfs`, `rimfs::tar`).
+- Specialized filesystem modules based on enabled features (`rimfs::fat`, `rimfs::exfat`, `rimfs::ext`, `rimfs::ntfs`, `rimfs::tar`, `rimfs::zip`, `rimfs::iso`).
 
 Each filesystem follows a standard composable pipeline:
 - `Formatter`: Low-level volume structure initialization.
@@ -70,3 +74,6 @@ injector.flush()?;
 - Benchmarks are maintained within this facade crate.
 - See `RIMFAT_SPEC.md` for the technical specification of the RimFAT 64-bit extension.
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

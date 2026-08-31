@@ -36,3 +36,7 @@ sector-analyzer find disk.img "0xEB5890"
 # Compare two disk images sector by sector
 sector-analyzer diff disk_v1.img disk_v2.img
 ```
+
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

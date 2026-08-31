@@ -6,7 +6,7 @@ use crate::core::allocator::FsAllocator;
 
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::{allocator::ExtAllocator, meta::ExtMeta, types::BlockMapArray};
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 
 /// Process a list of allocated blocks and map them into the Ext2/3 BlockMap structure,
 /// allocating Indirect/Double/Triple blocks as needed.

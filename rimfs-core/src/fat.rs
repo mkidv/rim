@@ -36,6 +36,7 @@ pub struct FatDriver<'a, M: FatFsMeta> {
     pub meta: &'a M,
     pub buffer: [u8; 1024],
     pub sector_idx: u64, // Start sector of the buffer
+    pub fat_index: u8,
     pub valid_len: usize,
     pub valid: bool,
     pub dirty: bool,
@@ -47,6 +48,7 @@ impl<'a, M: FatFsMeta> FatDriver<'a, M> {
             meta,
             buffer: [0u8; 1024],
             sector_idx: 0,
+            fat_index: 0,
             valid_len: 0,
             valid: false,
             dirty: false,
@@ -68,6 +70,81 @@ impl<'a, M: FatFsMeta> FatDriver<'a, M> {
         Ok(())
     }
 
+    /// Ensure the required range is in the buffer using a read-only stream.
+    fn ensure_loaded_ro<IO: RimRead + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        byte_offset: u64,
+        len: usize,
+    ) -> RimIOResult {
+        self.ensure_loaded_ro_from_table(io, 0, byte_offset, len)
+    }
+
+    /// Ensure the required range is in the buffer from a specific FAT copy.
+    fn ensure_loaded_ro_from_table<IO: RimRead + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        fat_index: u8,
+        byte_offset: u64,
+        len: usize,
+    ) -> RimIOResult {
+        let sector_idx = byte_offset / 512;
+        let end_sector = (byte_offset + len as u64 - 1) / 512;
+
+        if self.valid
+            && self.fat_index == fat_index
+            && sector_idx >= self.sector_idx
+            && end_sector < self.sector_idx + 2
+        {
+            return Ok(());
+        }
+
+        let table_off = self.meta.fat_table_offset(fat_index);
+        let fat_size = self.meta.fat_size_bytes();
+        let disk_offset = sector_idx * 512;
+
+        let remaining = fat_size.saturating_sub(disk_offset);
+        let to_read = core::cmp::min(1024, remaining as usize);
+
+        io.read_at(table_off + disk_offset, &mut self.buffer[..to_read])?;
+        self.sector_idx = sector_idx;
+        self.fat_index = fat_index;
+        self.valid_len = to_read;
+        self.valid = true;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Read an entry from the FAT using a read-only stream.
+    pub fn get_ro<IO: RimRead + ?Sized>(&mut self, io: &mut IO, cluster: u32) -> RimIOResult<u32> {
+        self.get_ro_from_table(io, 0, cluster)
+    }
+
+    /// Read an entry from a specific FAT copy using a read-only stream.
+    pub fn get_ro_from_table<IO: RimRead + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        fat_index: u8,
+        cluster: u32,
+    ) -> RimIOResult<u32> {
+        let bits = self.meta.bits_per_entry();
+        let bit_offset = cluster as u64 * bits as u64;
+        let byte_offset_in_fat = bit_offset / 8;
+        let bit_shift = (bit_offset % 8) as u8;
+        let bytes_needed = (bits + bit_shift as u32).div_ceil(8) as usize;
+
+        self.ensure_loaded_ro_from_table(io, fat_index, byte_offset_in_fat, bytes_needed)?;
+
+        let off_in_buf = (byte_offset_in_fat - self.sector_idx * 512) as usize;
+        let val = extract_entry_from_buf(
+            &self.buffer[off_in_buf..],
+            bits,
+            bit_shift,
+            self.meta.entry_mask(),
+        );
+        Ok(val)
+    }
+
     /// Ensure the required range is in the buffer (always loads from FAT 0).
     fn ensure_loaded<IO: RimIO + ?Sized>(
         &mut self,
@@ -83,39 +160,15 @@ impl<'a, M: FatFsMeta> FatDriver<'a, M> {
         }
 
         self.flush(io)?;
-
-        let table_off = self.meta.fat_table_offset(0);
-        let fat_size = self.meta.fat_size_bytes();
-        let disk_offset = sector_idx * 512;
-
-        let remaining = fat_size.saturating_sub(disk_offset);
-        let to_read = core::cmp::min(1024, remaining as usize);
-
-        io.read_at(table_off + disk_offset, &mut self.buffer[..to_read])?;
-        self.sector_idx = sector_idx;
-        self.valid_len = to_read;
-        self.valid = true;
-        Ok(())
+        self.ensure_loaded_ro(io, byte_offset, len)
     }
 
     /// Read an entry from the FAT.
     pub fn get<IO: RimIO + ?Sized>(&mut self, io: &mut IO, cluster: u32) -> RimIOResult<u32> {
-        let bits = self.meta.bits_per_entry();
-        let bit_offset = cluster as u64 * bits as u64;
-        let byte_offset_in_fat = bit_offset / 8;
-        let bit_shift = (bit_offset % 8) as u8;
-        let bytes_needed = (bits + bit_shift as u32).div_ceil(8) as usize;
-
-        self.ensure_loaded(io, byte_offset_in_fat, bytes_needed)?;
-
-        let off_in_buf = (byte_offset_in_fat - self.sector_idx * 512) as usize;
-        let val = extract_entry_from_buf(
-            &self.buffer[off_in_buf..],
-            bits,
-            bit_shift,
-            self.meta.entry_mask(),
-        );
-        Ok(val)
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+        self.get_ro(io, cluster)
     }
 
     /// Write an entry to the FAT. Mirroring is handled on flush.
@@ -152,6 +205,19 @@ impl<'a, M: FatFsMeta> FatDriver<'a, M> {
         cluster: u32,
     ) -> RimIOResult<u32> {
         self.get(io, cluster)
+    }
+
+    /// Read an entry from a specific FAT copy without mirroring.
+    pub fn read_entry_from_table<IO: RimIO + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        fat_index: u8,
+        cluster: u32,
+    ) -> RimIOResult<u32> {
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+        self.get_ro_from_table(io, fat_index, cluster)
     }
 
     /// Write an entry to the FAT. Mirroring is handled on flush.

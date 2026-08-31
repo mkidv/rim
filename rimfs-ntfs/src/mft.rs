@@ -13,7 +13,7 @@ use crate::core::allocator::{FsAllocator, FsAllocatorResult, FsHandle};
 use crate::meta::NtfsMeta;
 use crate::types::MftRecordHeader;
 use crate::utils::decode_usa_fixup;
-use rimio::RimIO;
+use rimio::{RimIO, RimRead};
 
 /// Handle for an MFT record
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,7 +22,7 @@ pub struct MftHandle(pub u64);
 impl FsHandle for MftHandle {}
 
 /// Read an MFT record by its record number
-pub fn read_record<IO: RimIO + ?Sized>(
+pub fn read_record<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &NtfsMeta,
     record_number: u64,

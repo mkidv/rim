@@ -4,7 +4,7 @@
 use alloc::string::{String, ToString};
 
 use rimio::errors::RimIOError;
-use rimio::{RimIO, RimIOStructExt};
+use rimio::prelude::*;
 use zerocopy::FromBytes;
 
 pub use crate::core::meta::*;
@@ -154,7 +154,7 @@ impl ExFatMeta {
         })
     }
 
-    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
+    pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let vbr: ExFatBootSector = io.read_struct(EXFAT_VBR_SECTOR)?;
 
         if &vbr.fs_name != EXFAT_FS_NAME {

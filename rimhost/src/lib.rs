@@ -49,7 +49,7 @@ pub fn format_inject_host(
                 (img_path.to_path_buf(), false)
             } else {
                 let temp_path = temp_root.path().join("temp.vhd");
-                rimimg::vhd::wrap_raw_as_vhd_to(img_path, &temp_path)?;
+                wrap_raw_as_vhd_file(img_path, &temp_path)?;
                 (temp_path, true)
             };
 
@@ -57,7 +57,7 @@ pub fn format_inject_host(
             script.run(temp_root.path())?;
 
             if temp {
-                rimimg::vhd::unwrap_vhd_to_raw(&vhd_path, img_path)?;
+                unwrap_vhd_to_raw_file(&vhd_path, img_path)?;
             }
             return Ok(());
         }
@@ -94,5 +94,37 @@ pub fn format_inject_host(
         script.dry_mode()?;
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn wrap_raw_as_vhd_file(input: &Path, output: &Path) -> anyhow::Result<()> {
+    use rimio::prelude::FileRimIO;
+
+    let input_file = std::fs::File::open(input)?;
+    let input_len = input_file.metadata()?.len();
+    let output_file = std::fs::File::create(output)?;
+    let mut src = FileRimIO::new(input_file);
+    let mut dst = FileRimIO::new(output_file);
+
+    rimimg::vhd::wrap_raw_as_vhd_io(
+        &mut src,
+        &mut dst,
+        input_len,
+        rimimg::ImageOptions::default(),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn unwrap_vhd_to_raw_file(input: &Path, output: &Path) -> anyhow::Result<()> {
+    use rimio::prelude::FileRimIO;
+
+    let input_file = std::fs::File::open(input)?;
+    let output_file = std::fs::File::create(output)?;
+    let mut src = FileRimIO::new(input_file);
+    let mut dst = FileRimIO::new(output_file);
+
+    rimimg::vhd::unwrap_vhd_io(&mut src, &mut dst)?;
     Ok(())
 }

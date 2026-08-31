@@ -9,15 +9,15 @@ Designed from the ground up for high reliability, streaming I/O, rootless usersp
 
 ---
 
-## 📦 Modular Ecosystem (13 Crates)
+## 📦 Modular Ecosystem (15 Crates)
 
 The project is structured into modular, decoupled crates:
 
 | Crate | Role & Capabilities |
 |---|---|
 | **[`rimcli`](rimcli)** | Unified modern CLI producing the **`rim`** binary (`generate`, `convert`, `check`, `partition`, `inspect`). |
-| **[`rimgen`](rimgen)** | Pure library-first declarative storage synthesis engine (`DiskLayout`, `ImageBuilder`, `build_on_io`). |
-| **[`rimimg`](rimimg)** | Virtual machine disk containers (**RAW**, **VHD**, **VMDK**, **QCOW2**, **VDI**), detection, wrap/unwrap, and conversions. |
+| **[`rimgen`](rimgen)** | Pure library-first declarative storage synthesis engine (`Layout`, `LayoutConfig`, `build_on_io`). |
+| **[`rimimg`](rimimg)** | `no_std`-capable virtual machine disk containers (**RAW**, **VHD**, **VMDK**, **QCOW2**, **VDI**), detection, logical image I/O adapters, wrap/unwrap, and conversions. |
 | **[`rimhost`](rimhost)** | OS-native tooling integration (Windows PowerShell/Storage, Linux `losetup`/`mkfs`, macOS `diskutil`). |
 | **[`rimfs`](rimfs)** | Unified public facade crate for filesystems. |
 | **[`rimfs-core`](rimfs-core)** | Core traits (`FsFormatter`, `FsAllocator`, `FsInjector`, `FsResolver`, `FsChecker`), bitmaps, and resolvers. |
@@ -26,6 +26,8 @@ The project is structured into modular, decoupled crates:
 | **[`rimfs-ext`](rimfs-ext)** | Ext2, Ext3, and Ext4 with 48-bit physical extent trees, indirect block maps, 32-bit UID/GID, and fast/slow symlinks. |
 | **[`rimfs-ntfs`](rimfs-ntfs)** | Pure-Rust NTFS 3.1 ($Boot, $MFT, non-resident $UpCase, $Secure, B-tree directory indexing, data runs). |
 | **[`rimfs-tar`](rimfs-tar)** | POSIX UStar archive filesystem driver (`no_std + alloc`) with full injector/resolver/checker support. |
+| **[`rimfs-zip`](rimfs-zip)** | ZIP archive filesystem driver (`no_std + alloc`) with Central Directory, ZIP64, and POSIX metadata. |
+| **[`rimfs-iso`](rimfs-iso)** | ISO 9660 optical and hybrid disk driver with Joliet (Unicode), Rock Ridge (POSIX), and El Torito (UEFI/BIOS). |
 | **[`rimpart`](rimpart)** | Partition table management for GPT, streaming GPT (`gpt_stream` on-the-fly CRC32), and MBR. |
 | **[`rimio`](rimio)** | Low-level I/O abstraction (`StdRimIO`, `FileRimIO` positioned I/O, `MemRimIO`, `MmapRimIO`, `UefiRimIO`). |
 | **[`sector-analyzer`](sector-analyzer)** | Forensic analysis tool (signatures, entropy, MFT/$Secure dumping, sector diffing). |
@@ -35,16 +37,18 @@ The project is structured into modular, decoupled crates:
 ## ⚡ Key Features
 
 - **Rootless & Zero-Dependency**:
-  - Operates 100% in userspace: no `sudo`, no `losetup`, no kernel `mount`, no external C toolchains (`e2fsprogs`, `ntfs-3g`).
+  - Operates 100% in userspace: no `sudo`, no `losetup`, no kernel `mount`, no external C toolchains (`e2fsprogs`, `ntfs-3g`, `mkisofs`, `xorriso`).
   - Completely safe to run inside non-privileged Docker containers and CI/CD pipelines (GitHub Actions, GitLab CI).
 - **Universal Portability**:
   - Identical behavior and deterministic output on **Linux**, **macOS** (Apple Silicon & Intel), and **Windows**.
-- **Supported Filesystems**:
+- **Supported Filesystems & Archives**:
   - **FAT**: FAT12, FAT16, FAT32, and RimFAT.
   - **ExFAT**: Full formatting, directory injection, and consistency verification.
   - **EXT**: Ext2, Ext3, Ext4 (48-bit extent trees, block group descriptors, POSIX permissions & symlinks).
   - **NTFS**: Pure-Rust NTFS 3.1 ($MFT records, non-resident $UpCase, `$Secure` security descriptors, INDX B-tree directories).
   - **TAR**: POSIX UStar streaming archive creation, injection, extraction, and validation.
+  - **ZIP**: Streaming creation, Central Directory parsing, ZIP64, Store/Deflate, and POSIX Unix extensions.
+  - **ISO 9660**: Optical and hybrid disk creation with Joliet (UTF-16), Rock Ridge (POSIX permissions & symlinks), and El Torito UEFI/BIOS booting.
 - **Supported Disk & Container Formats**:
   - Raw images: `.img`, `.raw`
   - Microsoft VHD: `.vhd` (fixed VHD)
@@ -146,18 +150,33 @@ rim check disk.img
 `rimgen` can be embedded directly into any Rust application to synthesize storage layouts in memory or over custom `RimIO` streams without writing temporary files to disk:
 
 ```rust
-use rimgen::{DiskLayout, ImageBuilder, Partition, Size, Filesystem};
+use rimgen::{build_config_on_io, LayoutConfig};
 use rimio::prelude::MemRimIO;
 
-// 1. Define layout in code or parse from TOML
-let layout = DiskLayout::from_file(std::path::Path::new("layout.toml"))?;
+let layout = LayoutConfig::from_file(std::path::Path::new("layout.toml"))?;
+let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(&layout) * 512;
 
-// 2. Build directly onto an in-memory buffer or block stream
-let mut memory_disk = MemRimIO::new();
-let report = rimgen::build_on_io(&layout, &mut memory_disk)?;
+let mut buffer = vec![0u8; raw_len as usize];
+let mut memory_disk = MemRimIO::new(&mut buffer);
+let report = build_config_on_io(&layout, &mut memory_disk)?;
 
 println!("Synthesized {} bytes in {:?}", report.total_bytes, report.total_duration);
 ```
+
+---
+
+## Support Matrix
+
+| Format | Format | Inject | Resolve/read | Fast check | Deep check | `no_std + alloc` | Known limitations |
+|---|---:|---:|---:|---:|---:|---:|---|
+| FAT12/16/32 | Yes | Yes | Yes | Yes | Yes | Yes | FAT32 file sizes are bounded by the on-disk 32-bit file size field. |
+| RimFAT | Yes | Yes | Yes | Yes | Yes | Yes | RIM integrity extensions are RIM-specific and not a portable FAT extension. |
+| exFAT | Yes | Yes | Yes | Yes | Yes | Yes | Advanced vendor extensions are outside the current scope. |
+| EXT2/3/4 | Yes | Yes | Yes | Yes | Yes | Yes | Focuses on generated images, common extents/block maps, POSIX metadata and symlinks; not a complete kernel-grade EXT implementation. |
+| NTFS 3.1 | Yes | Yes | Yes | Yes | Yes | Yes | Supports generated NTFS images with resident/non-resident data, runlists, indexes and core system files; not every Windows NTFS feature is implemented. |
+| TAR UStar | Yes | Yes | Yes | Yes | Yes | Yes | POSIX UStar-oriented; non-UStar vendor extensions are limited. |
+| ZIP | Yes | Yes | Yes | Yes | Yes | Yes | Store/Deflate plumbing and ZIP64 structures are present; encrypted archives are not supported. |
+| ISO 9660 | Yes | Yes | Yes | Yes | Yes | Yes | Joliet/Rock Ridge/El Torito coverage targets generated images, not arbitrary mastering edge cases. |
 
 ---
 

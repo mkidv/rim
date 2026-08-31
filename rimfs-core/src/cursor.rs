@@ -65,7 +65,7 @@ where
     /// One iteration step (uses integrated read_fat_entry)
     pub fn next_with<IO>(&mut self, io: &mut IO) -> Option<FsCursorResult<u32>>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
     {
         let c = self.current?;
         self.seen += 1;
@@ -74,7 +74,7 @@ where
             return Some(Err(FsCursorError::LoopDetected));
         }
 
-        let next = match self.driver.get(io, c) {
+        let next = match self.driver.get_ro(io, c) {
             Ok(n) => n,
             Err(e) => {
                 self.current = None;
@@ -102,7 +102,7 @@ where
     /// Iterate cluster by cluster via callback
     pub fn for_each_cluster<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
         F: FnMut(&mut IO, u32) -> FsCursorResult<()>,
     {
         while let Some(res) = self.next_with(io) {
@@ -115,7 +115,7 @@ where
     /// Iterate by contiguous runs (start, len) via callback
     pub fn for_each_run<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
         F: FnMut(&mut IO, u32, u32) -> FsCursorResult<()>,
     {
         let mut start: Option<u32> = None;
@@ -156,7 +156,7 @@ where
     /// Creates a cluster-by-cluster iterator
     pub fn iter<'b, IO>(&'b mut self, io: &'b mut IO) -> ClusterIter<'a, 'b, M, IO>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
     {
         ClusterIter { cursor: self, io }
     }
@@ -164,7 +164,7 @@ where
     /// Creates an iterator over contiguous **runs**
     pub fn runs<'b, IO>(&'b mut self, io: &'b mut IO) -> RunIter<'a, 'b, M, IO>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
     {
         RunIter {
             cursor: self,
@@ -179,7 +179,10 @@ where
     /// Collects the entire cluster chain into a `RunList`.
     /// This is the preferred way to bridge cluster-based storage to `MappedRimIO`.
     #[cfg(feature = "alloc")]
-    pub fn collect_run_list<IO: RimIO + ?Sized>(&mut self, io: &mut IO) -> FsCursorResult<RunList> {
+    pub fn collect_run_list<IO: RimRead + ?Sized>(
+        &mut self,
+        io: &mut IO,
+    ) -> FsCursorResult<RunList> {
         let mut list = RunList::new();
         while let Some(res) = self.next_with(io) {
             let c = res?;
@@ -201,7 +204,7 @@ where
 impl<'a, 'b, M, IO: ?Sized> Iterator for ClusterIter<'a, 'b, M, IO>
 where
     M: FatFsMeta,
-    IO: RimIO,
+    IO: RimRead,
 {
     type Item = FsCursorResult<u32>;
 
@@ -226,7 +229,7 @@ where
 impl<'a, 'b, M, IO: ?Sized> Iterator for RunIter<'a, 'b, M, IO>
 where
     M: FatFsMeta,
-    IO: RimIO,
+    IO: RimRead,
 {
     type Item = FsCursorResult<(u32, u32)>;
 

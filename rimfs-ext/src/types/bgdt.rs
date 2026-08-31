@@ -62,20 +62,23 @@ pub struct ExtBlockGroupDesc {
 impl ExtBlockGroupDesc {
     /// Create a new block group descriptor
     pub fn new(
-        block_bitmap: u32,
-        inode_bitmap: u32,
-        inode_table: u32,
+        block_bitmap: u64,
+        inode_bitmap: u64,
+        inode_table: u64,
         free_blocks: u16,
         free_inodes: u16,
         used_dirs: u16,
     ) -> Self {
         Self {
-            bg_block_bitmap_lo: block_bitmap,
-            bg_inode_bitmap_lo: inode_bitmap,
-            bg_inode_table_lo: inode_table,
+            bg_block_bitmap_lo: block_bitmap as u32,
+            bg_inode_bitmap_lo: inode_bitmap as u32,
+            bg_inode_table_lo: inode_table as u32,
             bg_free_blocks_count_lo: free_blocks,
             bg_free_inodes_count_lo: free_inodes,
             bg_used_dirs_count_lo: used_dirs,
+            bg_block_bitmap_hi: (block_bitmap >> 32) as u32,
+            bg_inode_bitmap_hi: (inode_bitmap >> 32) as u32,
+            bg_inode_table_hi: (inode_table >> 32) as u32,
             ..Default::default()
         }
     }

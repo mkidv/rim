@@ -7,7 +7,7 @@ use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::group_layout::GroupLayout;
 use crate::meta::ExtMeta;
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 
 struct InodeTableRegion {
     offset: u64,
@@ -37,7 +37,7 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for InodeTableFeatur
         for group in 0..meta.group_count {
             let layout = GroupLayout::compute(meta, group);
             let inode_table_block = layout.inode_table_block;
-            let offset = inode_table_block as u64 * meta.block_size as u64;
+            let offset = inode_table_block * meta.block_size as u64;
 
             self.regions.push(InodeTableRegion {
                 offset,

@@ -34,3 +34,6 @@ let meta = ExFatMeta::new(disk.len(), Some("FLASH_DRIVE"));
 ExFatFormatter::new(&mut disk, &meta).format()?;
 ```
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

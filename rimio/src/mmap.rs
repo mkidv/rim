@@ -1,4 +1,4 @@
-use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite};
+use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite, checked_add_offset};
 use memmap2::MmapMut;
 use std::fs::File;
 use std::io;
@@ -22,13 +22,6 @@ impl MmapRimIO {
     /// Creates a new memory mapped IO from a standard file.
     pub fn new(file: File) -> io::Result<Self> {
         let len = file.metadata()?.len();
-        // Handle empty files which cannot be mmapped
-        if len == 0 {
-            // We return same error as before or handle empty?
-            // For now, allow len=0 but mmap might be None or dummy?
-            // memmap2 with len=0 fails usually.
-        }
-
         let mmap = if len > 0 {
             // SAFETY: We own the file so we can safely map it.
             Some(unsafe { MmapMut::map_mut(&file)? })
@@ -66,7 +59,7 @@ impl MmapRimIO {
 impl RimRead for MmapRimIO {
     #[inline(always)]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
+        let abs_off = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_off, buf.len())?;
 
         let mmap = self.mmap.as_ref().ok_or(RimIOError::Other("Empty mmap"))?;
@@ -84,7 +77,7 @@ impl RimRead for MmapRimIO {
 impl RimWrite for MmapRimIO {
     #[inline(always)]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
+        let abs_off = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_off, data.len())?;
 
         let mmap = self.mmap.as_mut().ok_or(RimIOError::Other("Empty mmap"))?;
@@ -118,18 +111,14 @@ impl RimIO for MmapRimIO {
 
 impl RimIOSetLen for MmapRimIO {
     fn set_len(&mut self, new_len: u64) -> RimIOResult {
-        // 1. Drop existing map to allow resize (esp on Windows)
-        // We use .take() to ensure it is dropped before file operation.
         self.flush()?;
         self.mmap = None;
 
-        // 2. Resize underlying file
-        let abs_new_len = self.partition_offset + new_len;
+        let abs_new_len = checked_add_offset(self.partition_offset, new_len)?;
         self.file
             .set_len(abs_new_len)
             .map_err(|_| RimIOError::Other("Failed to set file length"))?;
 
-        // 3. Remap
         if abs_new_len > 0 {
             let mmap = unsafe {
                 MmapMut::map_mut(&self.file)

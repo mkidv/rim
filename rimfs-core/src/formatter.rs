@@ -25,7 +25,7 @@ pub trait FsFormatter {
 }
 
 use crate::meta::FsMeta;
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 
 /// Helper to zero out the data region (cluster heap) of a filesystem.
 pub fn zero_cluster_heap<M: FsMeta<u32>, IO: RimIO + ?Sized>(

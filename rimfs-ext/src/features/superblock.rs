@@ -55,8 +55,13 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for ExtSuperblockFea
             let has_super = !meta.features.has_sparse_super || is_sparse_super_group(group_id);
 
             if has_super && group_id != 0 {
-                let group_start_block = meta.first_data_block + group_id * meta.blocks_per_group;
-                let sb_copy_offset = (group_start_block * meta.block_size) as u64;
+                let group_start_block =
+                    meta.first_data_block as u64 + group_id as u64 * meta.blocks_per_group as u64;
+                let sb_copy_offset = group_start_block
+                    .checked_mul(meta.block_size as u64)
+                    .ok_or(crate::core::errors::FsFeatureError::InvalidConfiguration(
+                        "EXT sparse superblock offset overflow",
+                    ))?;
                 self.sparse_offsets.push(sb_copy_offset);
             }
         }

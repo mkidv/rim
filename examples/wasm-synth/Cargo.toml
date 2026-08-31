@@ -1,18 +1,22 @@
 [package]
 name = "wasm-synth"
+description = "WASM disk synthesis example for rim"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rimio = { path = "../../rimio", default-features = false, features = ["alloc"] }
-rimpart = { path = "../../rimpart", default-features = false, features = ["alloc"] }
-rimfs = { path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs", "tar"] }
-rimgen = { path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs"] }
+rimio = { version = "0.8.0", path = "../../rimio", default-features = false, features = ["alloc"] }
+rimpart = { version = "0.8.0", path = "../../rimpart", default-features = false, features = ["alloc"] }
+rimfs = { version = "0.8.0", path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs", "tar"] }
+rimgen = { version = "0.8.0", path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "exfat", "ntfs"] }
 dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
 
 [features]
@@ -25,5 +29,5 @@ path = "src/bin/build_alpine_host.rs"
 required-features = ["host"]
 
 [dev-dependencies]
-rimfs-fat = { path = "../../rimfs-fat", default-features = false, features = ["alloc"] }
-rimfs-ext = { path = "../../rimfs-ext", default-features = false, features = ["alloc"] }
+rimfs-fat = { version = "0.8.0", path = "../../rimfs-fat", default-features = false, features = ["alloc"] }
+rimfs-ext = { version = "0.8.0", path = "../../rimfs-ext", default-features = false, features = ["alloc"] }

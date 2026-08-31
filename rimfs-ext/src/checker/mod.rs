@@ -13,7 +13,7 @@ use rimio::RimIO;
 use core::convert::TryInto;
 
 #[derive(Clone, Debug)]
-pub struct ExtCheckOptions {
+pub struct ExtCheckerOptions {
     pub phases: VerifyPhases,
     pub fail_fast: bool,
     /// Check block bitmaps consistency
@@ -26,7 +26,7 @@ pub struct ExtCheckOptions {
     pub verify_sb_backups: bool,
 }
 
-impl Default for ExtCheckOptions {
+impl Default for ExtCheckerOptions {
     fn default() -> Self {
         Self {
             phases: VerifyPhases::ALL,
@@ -39,7 +39,7 @@ impl Default for ExtCheckOptions {
     }
 }
 
-impl VerifierOptionsLike for ExtCheckOptions {
+impl VerifierOptionsLike for ExtCheckerOptions {
     fn phases(&self) -> VerifyPhases {
         self.phases.clone()
     }
@@ -60,7 +60,7 @@ impl<'a, IO: RimIO + ?Sized> ExtChecker<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
-    type Options = ExtCheckOptions;
+    type Options = ExtCheckerOptions;
 
     fn check_boot(&mut self, opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
         // 1. Check main superblock
@@ -134,7 +134,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
     }
 
     fn fast_check(&mut self) -> FsCheckerResult {
-        let opt = ExtCheckOptions {
+        let opt = ExtCheckerOptions {
             phases: VerifyPhases::BOOT | VerifyPhases::GEOMETRY | VerifyPhases::ROOT,
             fail_fast: true,
             check_block_bitmaps: false,
@@ -179,8 +179,10 @@ fn check_superblock<IO: RimIO + ?Sized>(
     rep.push(Finding::info("SB.MAGIC", "Superblock magic OK"));
 
     // Check block count
-    let block_count = u32::from_le_bytes(sb_buf[0x04..0x08].try_into().unwrap());
-    if block_count as u64 != meta.block_count {
+    let block_count_lo = u32::from_le_bytes(sb_buf[0x04..0x08].try_into().unwrap());
+    let block_count_hi = u32::from_le_bytes(sb_buf[0x150..0x154].try_into().unwrap());
+    let block_count = block_count_lo as u64 | ((block_count_hi as u64) << 32);
+    if block_count != meta.block_count {
         rep.push(Finding::warn(
             "SB.BLOCKS",
             format!(
@@ -293,8 +295,9 @@ fn check_superblock_backup<IO: RimIO + ?Sized>(
     group: u32,
     rep: &mut VerifyReport,
 ) -> FsCheckerResult<()> {
-    let group_start_block = meta.first_data_block + group * meta.blocks_per_group;
-    let sb_offset = group_start_block as u64 * meta.block_size as u64;
+    let group_start_block =
+        meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
+    let sb_offset = group_start_block * meta.block_size as u64;
 
     let mut sb_buf = [0u8; EXT_SUPERBLOCK_SIZE];
     io.read_at(sb_offset, &mut sb_buf)
@@ -330,19 +333,28 @@ fn check_bgdt<IO: RimIO + ?Sized>(
     for group in 0..meta.group_count {
         let entry_offset = bgdt_offset + (group as u64 * meta.bgdt_entry_size as u64);
 
-        let mut entry = [0u8; 32];
+        let mut entry = [0u8; 64];
         io.read_at(entry_offset, &mut entry)
             .map_err(FsCheckerError::IO)?;
 
-        let block_bitmap = u32::from_le_bytes(entry[0..4].try_into().unwrap());
-        let inode_bitmap = u32::from_le_bytes(entry[4..8].try_into().unwrap());
-        let inode_table = u32::from_le_bytes(entry[8..12].try_into().unwrap());
+        let block_bitmap_lo = u32::from_le_bytes(entry[0..4].try_into().unwrap());
+        let inode_bitmap_lo = u32::from_le_bytes(entry[4..8].try_into().unwrap());
+        let inode_table_lo = u32::from_le_bytes(entry[8..12].try_into().unwrap());
         let free_blocks = u16::from_le_bytes(entry[12..14].try_into().unwrap());
         let free_inodes = u16::from_le_bytes(entry[14..16].try_into().unwrap());
         let used_dirs = u16::from_le_bytes(entry[16..18].try_into().unwrap());
 
-        let group_start = meta.first_data_block + group * meta.blocks_per_group;
-        let group_end = group_start + meta.blocks_per_group;
+        let block_bitmap_hi = u32::from_le_bytes(entry[32..36].try_into().unwrap());
+        let inode_bitmap_hi = u32::from_le_bytes(entry[36..40].try_into().unwrap());
+        let inode_table_hi = u32::from_le_bytes(entry[40..44].try_into().unwrap());
+
+        let block_bitmap = block_bitmap_lo as u64 | ((block_bitmap_hi as u64) << 32);
+        let inode_bitmap = inode_bitmap_lo as u64 | ((inode_bitmap_hi as u64) << 32);
+        let inode_table = inode_table_lo as u64 | ((inode_table_hi as u64) << 32);
+
+        let group_start =
+            meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
+        let group_end = group_start + meta.blocks_per_group as u64;
 
         let mut errors = Vec::new();
 
@@ -359,7 +371,7 @@ fn check_bgdt<IO: RimIO + ?Sized>(
         // Validate inode_table location
         let inode_table_blocks =
             (meta.inodes_per_group * meta.inode_size).div_ceil(meta.block_size);
-        if inode_table < group_start || inode_table + inode_table_blocks > group_end {
+        if inode_table < group_start || inode_table + inode_table_blocks as u64 > group_end {
             errors.push(format!("inode_table {inode_table} out of range"));
         }
 
@@ -402,7 +414,7 @@ fn check_root_inode<IO: RimIO + ?Sized>(
 
     let layout = GroupLayout::compute(meta, group);
     let inode_table_block = layout.inode_table_block;
-    let inode_offset = (inode_table_block as u64 * meta.block_size as u64)
+    let inode_offset = (inode_table_block * meta.block_size as u64)
         + (index_in_group as u64 * meta.inode_size as u64);
 
     let mut inode_buf = vec![0u8; meta.inode_size as usize];
@@ -525,7 +537,7 @@ fn check_block_bitmap<IO: RimIO + ?Sized>(
     rep: &mut VerifyReport,
 ) -> FsCheckerResult<()> {
     let layout = GroupLayout::compute(meta, group);
-    let block_bitmap_offset = layout.block_bitmap_block as u64 * meta.block_size as u64;
+    let block_bitmap_offset = layout.block_bitmap_block * meta.block_size as u64;
 
     let bitmap_size = (meta.blocks_per_group / 8) as usize;
     let mut bitmap = vec![0u8; bitmap_size.min(meta.block_size as usize)];
@@ -537,17 +549,17 @@ fn check_block_bitmap<IO: RimIO + ?Sized>(
 
     // Reserved blocks (superblock, BGDT)
     for i in 0..layout.reserved_blocks {
-        expected_used.push(i);
+        expected_used.push(i as u64);
     }
 
     // Bitmaps
-    let _group_start = meta.first_data_block + group * meta.blocks_per_group;
+    let _group_start = meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
     expected_used.push(layout.block_bitmap_block - _group_start);
     expected_used.push(layout.inode_bitmap_block - _group_start);
 
     // Inode table
     for i in 0..layout.inode_table_blocks {
-        expected_used.push(layout.inode_table_block - _group_start + i);
+        expected_used.push(layout.inode_table_block - _group_start + i as u64);
     }
 
     // Count set bits
@@ -600,7 +612,7 @@ fn check_inode_bitmap<IO: RimIO + ?Sized>(
     rep: &mut VerifyReport,
 ) -> FsCheckerResult<()> {
     let layout = GroupLayout::compute(meta, group);
-    let inode_bitmap_offset = layout.inode_bitmap_block as u64 * meta.block_size as u64;
+    let inode_bitmap_offset = layout.inode_bitmap_block * meta.block_size as u64;
 
     let bitmap_size = (meta.inodes_per_group / 8) as usize;
     let mut bitmap = vec![0u8; bitmap_size.min(meta.block_size as usize)];

@@ -21,3 +21,7 @@ cargo install --path .
 ## License
 
 MIT License.
+
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "rimfs"
 description = "Filesystem implementations for rim"
 version.workspace = true
@@ -11,30 +11,32 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["std", "fat", "exfat", "ext", "ntfs", "tar"]
-alloc = ["rimfs-core/alloc", "rimfs-fat?/alloc", "rimfs-exfat?/alloc", "rimfs-ext?/alloc", "rimfs-ntfs?/alloc", "rimfs-tar?/alloc"]
+default = ["std", "fat", "exfat", "ext", "ntfs", "tar", "zip", "iso"]
+alloc = ["rimfs-core/alloc", "rimfs-fat?/alloc", "rimfs-exfat?/alloc", "rimfs-ext?/alloc", "rimfs-ntfs?/alloc", "rimfs-tar?/alloc", "rimfs-zip?/alloc", "rimfs-iso?/alloc"]
 mem = ["alloc"]
-std = ["alloc", "rimfs-core/std", "rimfs-fat?/std", "rimfs-exfat?/std", "rimfs-ext?/std", "rimfs-ntfs?/std", "rimfs-tar?/std"]
+std = ["alloc", "rimfs-core/std", "rimfs-fat?/std", "rimfs-exfat?/std", "rimfs-ext?/std", "rimfs-ntfs?/std", "rimfs-tar?/std", "rimfs-zip?/std", "rimfs-iso?/std"]
 fat = ["alloc", "dep:rimfs-fat"]
 exfat = ["alloc", "dep:rimfs-exfat"]
 ext = ["alloc", "dep:rimfs-ext"]
 ntfs = ["alloc", "dep:rimfs-ntfs"]
 tar = ["alloc", "dep:rimfs-tar"]
+zip = ["alloc", "dep:rimfs-zip"]
+iso = ["alloc", "dep:rimfs-iso"]
 
 [dependencies]
-rimfs-core = { path = "../rimfs-core", version = "0.7.0", default-features = false }
-rimfs-fat = { path = "../rimfs-fat", version = "0.7.0", default-features = false, optional = true }
-rimfs-exfat = { path = "../rimfs-exfat", version = "0.7.0", default-features = false, optional = true }
-rimfs-ext = { path = "../rimfs-ext", version = "0.7.0", default-features = false, optional = true }
-rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.7.0", default-features = false, optional = true }
-rimfs-tar = { path = "../rimfs-tar", version = "0.7.0", default-features = false, optional = true }
+rimfs-core = { path = "../rimfs-core", version = "0.8.0", default-features = false }
+rimfs-fat = { path = "../rimfs-fat", version = "0.8.0", default-features = false, optional = true }
+rimfs-exfat = { path = "../rimfs-exfat", version = "0.8.0", default-features = false, optional = true }
+rimfs-ext = { path = "../rimfs-ext", version = "0.8.0", default-features = false, optional = true }
+rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.8.0", default-features = false, optional = true }
+rimfs-tar = { path = "../rimfs-tar", version = "0.8.0", default-features = false, optional = true }
+rimfs-zip = { path = "../rimfs-zip", version = "0.8.0", default-features = false, optional = true }
+rimfs-iso = { path = "../rimfs-iso", version = "0.8.0", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3.20.0"
-fatfs = "0.3"
-fscommon = "0.1"
-rimio = { path = "../rimio", version = "0.7.0", features = ["mmap", "std"] }
+rimio = { path = "../rimio", version = "0.8.0", features = ["mmap", "std"] }
 
 [package.metadata.docs.rs]
 features = ["std"]
@@ -43,21 +45,5 @@ features = ["std"]
 workspace = true
 
 [[bench]]
-name = "exfat_bench"
-harness = false
-
-[[bench]]
-name = "fat32_bench"
-harness = false
-
-[[bench]]
-name = "ext4_bench"
-harness = false
-
-[[bench]]
-name = "fat32_compare_bench"
-harness = false
-
-[[bench]]
-name = "ntfs_bench"
+name = "all_engines_compare_bench"
 harness = false

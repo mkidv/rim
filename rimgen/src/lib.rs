@@ -16,14 +16,9 @@ pub mod guid;
 pub mod layout;
 pub mod macros;
 
-pub use builder::{
-    BuildEvent, BuildReport, DryRunMode, PartitionReport, build_on_io, build_on_io_simple,
-};
+pub use builder::{BuildEvent, BuildReport, PartitionReport, build_on_io, build_on_io_with_events};
 #[cfg(feature = "std")]
-pub use builder::{
-    ImageBuilder, build_image, build_image_with_events, build_layout_on_io, build_raw,
-    build_raw_with_events,
-};
+pub use builder::{build_config_on_io, build_config_on_io_with_events};
 pub use errors::{GenError, GenResult, LayoutError, LayoutResult};
 #[cfg(feature = "std")]
 pub use guid::RandomGuidGenerator;

@@ -29,3 +29,6 @@ rimfs-core = { version = "0.6.3", default-features = false }
 - `mem`: Enables in-memory buffer utilities.
 - `uefi`: Enables UEFI firmware environment abstractions.
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

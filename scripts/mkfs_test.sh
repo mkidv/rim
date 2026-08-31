@@ -3,7 +3,7 @@ set -euo pipefail
 
 # --- Params ---
 FS="${1:-fat32}"                     # fat32 | exfat
-SRC="${2:-./rimfs/test_data}"        # répertoire source
+SRC="${2:-./scratch/rimfs_test_data}" # source directory
 IMG="${3:-test.img}"
 MNT="${4:-./mnt_test}"
 

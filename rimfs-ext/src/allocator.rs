@@ -30,12 +30,12 @@ impl ExtHandle {
 /// Adapter for Block Bitmap in a Group
 pub struct ExtBlockBitmap<'a> {
     pub meta: &'a ExtMeta,
-    pub bitmap_block: u32,
+    pub bitmap_block: u64,
 }
 
 impl<'a> BitmapFsMeta for ExtBlockBitmap<'a> {
     fn bitmap_offset(&self) -> u64 {
-        self.bitmap_block as u64 * self.meta.block_size as u64
+        self.bitmap_block * self.meta.block_size as u64
     }
     fn bitmap_size(&self) -> u64 {
         self.meta.block_size as u64
@@ -66,8 +66,8 @@ impl<'p> Ext4BlockAllocator<'p> {
         self.params.block_size as usize
     }
 
-    pub fn block_offset(&self, block: u32) -> u64 {
-        block as u64 * self.params.block_size as u64
+    pub fn block_offset(&self, block: u64) -> u64 {
+        block * self.params.block_size as u64
     }
 
     pub fn allocate_blocks_list<IO: RimIO + ?Sized>(
@@ -117,8 +117,8 @@ impl<'p> Ext4BlockAllocator<'p> {
                     view.set_bit(io, bit, true)?;
 
                     // Add to runlist
-                    let abs_block = layout.group_start + bit as u32;
-                    list.push(Run::new(abs_block as u64, 1));
+                    let abs_block = layout.group_start + bit;
+                    list.push(Run::new(abs_block, 1));
 
                     if group_idx < self.allocated_per_group.len() {
                         self.allocated_per_group[group_idx] += 1;
@@ -165,12 +165,12 @@ impl<'p> Ext4BlockAllocator<'p> {
 /// Adapter for Inode Bitmap in a Group
 pub struct ExtInodeBitmap<'a> {
     pub meta: &'a ExtMeta,
-    pub bitmap_block: u32,
+    pub bitmap_block: u64,
 }
 
 impl<'a> BitmapFsMeta for ExtInodeBitmap<'a> {
     fn bitmap_offset(&self) -> u64 {
-        self.bitmap_block as u64 * self.meta.block_size as u64
+        self.bitmap_block * self.meta.block_size as u64
     }
     fn bitmap_size(&self) -> u64 {
         self.meta.block_size as u64

@@ -39,14 +39,14 @@ pub struct NtfsInjector<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
     /// Create a new NTFS injector
     pub fn new(io: &'a mut IO, meta: &'a NtfsMeta) -> FsInjectorResult<Self> {
-        let mft_allocator = mft::MftAllocator::new(meta, meta.reserved_mft_records);
-        let allocator = NtfsAllocator::new(meta)?;
+        let mft_allocator = mft::MftAllocator::new(meta, crate::constant::MFT_RECORD_USNJRNL + 1);
+        let allocator = NtfsAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
         Ok(Self {
             io,
             allocator,
-            meta,
-            stack: vec![],
             mft_allocator,
+            meta,
+            stack: Vec::new(),
         })
     }
 
@@ -464,6 +464,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checker::NtfsChecker;
+    use crate::resolver::NtfsResolver;
+    use rimfs_core::checker::FsChecker;
+    use rimfs_core::testing::{ExpectedFile, assert_files, assert_no_errors, nested_files_tree};
     use rimio::prelude::MemRimIO;
 
     #[test]
@@ -472,27 +476,33 @@ mod tests {
         let mut buffer = vec![0u8; 5 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut buffer);
 
-        // Full format (VBR + system MFT records)
         crate::formatter::NtfsFormatter::new(&mut io, &meta)
             .format(true)
             .unwrap();
 
-        // Inject
         let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
-
-        let mut tree = FsNode::Container {
-            attr: FileAttributes::new_dir(),
-            children: vec![
-                FsNode::Dir {
-                    name: "subdir".to_string(),
-                    attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
-                },
-                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
-            ],
-        };
+        let mut tree = nested_files_tree();
 
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
+
+        let mut checker = NtfsChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert_no_errors(&report);
+
+        let mut resolver = NtfsResolver::new(&mut io, &meta);
+        assert_files(
+            &mut resolver,
+            &[
+                ExpectedFile {
+                    path: "/subdir/hello.txt",
+                    bytes: b"Hello World!",
+                },
+                ExpectedFile {
+                    path: "/readme.md",
+                    bytes: b"Test Readme",
+                },
+            ],
+        );
     }
 }

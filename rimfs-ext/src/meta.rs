@@ -4,15 +4,16 @@
 use alloc::string::{String, ToString};
 
 use crate::{
+    constant::*,
     core::{
         FsError, FsResult,
         ext::{BlockMapMeta, ExtFsMeta, ExtentMeta},
         traits::FsMeta,
         utils::volume::generate_volume_id_128,
     },
-    {constant::*, types::ExtSuperblock},
+    types::ExtSuperblock,
 };
-use rimio::{RimIO, RimIOStructExt};
+use rimio::prelude::*;
 
 /// Feature configuration for the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,35 +105,59 @@ pub struct ExtMeta {
 
 impl ExtMeta {
     pub fn new(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
+        let block_size = EXT_DEFAULT_BLOCK_SIZE;
+
+        let blocks_per_group = block_size
+            .checked_mul(8)
+            .ok_or(FsError::Invalid("blocks_per_group overflow"))?;
+
+        let inodes_per_group = default_inodes_per_group(block_size, blocks_per_group)?;
+
         Self::new_custom(
             ExtFeatureSet::EXT,
             size_bytes,
             volume_label,
             None,
-            EXT_DEFAULT_BLOCK_SIZE,
-            EXT_DEFAULT_INODES_PER_GROUP,
+            block_size,
+            inodes_per_group,
         )
     }
 
     pub fn new_ext2(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
+        let block_size = EXT_DEFAULT_BLOCK_SIZE;
+
+        let blocks_per_group = block_size
+            .checked_mul(8)
+            .ok_or(FsError::Invalid("blocks_per_group overflow"))?;
+
+        let inodes_per_group = default_inodes_per_group(block_size, blocks_per_group)?;
+
         Self::new_custom(
             ExtFeatureSet::EXT2,
             size_bytes,
             volume_label,
             None,
-            EXT_DEFAULT_BLOCK_SIZE,
-            EXT_DEFAULT_INODES_PER_GROUP,
+            block_size,
+            inodes_per_group,
         )
     }
 
     pub fn new_ext3(size_bytes: u64, volume_label: Option<&str>) -> FsResult<Self> {
+        let block_size = EXT_DEFAULT_BLOCK_SIZE;
+
+        let blocks_per_group = block_size
+            .checked_mul(8)
+            .ok_or(FsError::Invalid("blocks_per_group overflow"))?;
+
+        let inodes_per_group = default_inodes_per_group(block_size, blocks_per_group)?;
+
         Self::new_custom(
             ExtFeatureSet::EXT3,
             size_bytes,
             volume_label,
             None,
-            EXT_DEFAULT_BLOCK_SIZE,
-            EXT_DEFAULT_INODES_PER_GROUP,
+            block_size,
+            inodes_per_group,
         )
     }
 
@@ -152,7 +177,7 @@ impl ExtMeta {
             block_size.is_power_of_two() && (1024..=65536).contains(&block_size),
             FsError::Invalid("Block size must be power of 2 between 1024 and 65536")
         );
-        let block_count = (volume_size_bytes / block_size as u64) as u32;
+        let block_count = volume_size_bytes / block_size as u64;
         crate::ensure!(
             block_count >= 16,
             FsError::Invalid("Volume too small for EXT filesystem")
@@ -163,11 +188,26 @@ impl ExtMeta {
         );
 
         let volume_id = volume_id.unwrap_or_else(|| generate_volume_id_128().to_le_bytes());
-        let blocks_per_group = EXT_DEFAULT_BLOCKS_PER_GROUP;
 
-        let group_count = (block_count as u64).div_ceil(blocks_per_group as u64) as u32;
+        let blocks_per_group = block_size
+            .checked_mul(8)
+            .ok_or(FsError::Invalid("blocks_per_group overflow"))?;
 
-        let inode_count = group_count * inodes_per_group;
+        let group_count_u64 = block_count.div_ceil(blocks_per_group as u64);
+        let group_count = u32::try_from(group_count_u64)
+            .map_err(|_| FsError::Invalid("EXT group count exceeds supported u32 range"))?;
+
+        crate::ensure!(
+            inodes_per_group > 0,
+            FsError::Invalid("inodes_per_group must be > 0")
+        );
+
+        crate::ensure!(
+            inodes_per_group <= block_size * 8,
+            FsError::Invalid("inodes_per_group exceeds inode bitmap capacity")
+        );
+
+        let inode_count = group_count as u64 * inodes_per_group as u64;
 
         let first_data_block = if block_size > 1024 { 0 } else { 1 };
 
@@ -196,10 +236,10 @@ impl ExtMeta {
             volume_label: volume_label_bytes,
             volume_size_bytes,
             block_size,
-            block_count: block_count as u64,
+            block_count,
             blocks_per_group,
             group_count,
-            inode_count: inode_count as u64,
+            inode_count,
             inodes_per_group,
             first_data_block,
             inode_size,
@@ -210,7 +250,7 @@ impl ExtMeta {
         })
     }
 
-    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
+    pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let sb: ExtSuperblock = io.read_struct(EXT_SUPERBLOCK_OFFSET)?;
 
         if !sb.is_valid() {
@@ -350,6 +390,17 @@ impl ExtentMeta for ExtMeta {}
 
 impl BlockMapMeta for ExtMeta {}
 
+fn default_inodes_per_group(block_size: u32, blocks_per_group: u32) -> FsResult<u32> {
+    let group_bytes = block_size as u64 * blocks_per_group as u64;
+
+    let desired = group_bytes.div_ceil(EXT_DEFAULT_BYTES_PER_INODE);
+
+    let bitmap_capacity = block_size as u64 * 8;
+
+    u32::try_from(desired.min(bitmap_capacity))
+        .map_err(|_| FsError::Invalid("inodes_per_group overflow"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +513,23 @@ mod tests {
             "✓ EXT inode allocation: {} inodes, {} per group",
             meta.inode_count, meta.inodes_per_group
         );
+    }
+
+    #[test]
+    fn test_ext4_block_count_boundary_uses_64bit_counts() {
+        let max_supported = u32::MAX as u64 * EXT_DEFAULT_BLOCK_SIZE as u64;
+        let meta = ExtMeta::new(max_supported, Some("MAXEXT")).unwrap();
+        assert_eq!(meta.block_count, u32::MAX as u64);
+
+        let over = ExtMeta::new(max_supported + EXT_DEFAULT_BLOCK_SIZE as u64, Some("EXT64"))
+            .expect("EXT4 metadata should represent block counts above u32::MAX");
+        assert_eq!(over.block_count, u32::MAX as u64 + 1);
+
+        let sb = ExtSuperblock::from_meta(&over, 0, 0);
+        let blocks_count_lo = sb.s_blocks_count_lo;
+        let blocks_count_hi = sb.s_blocks_count_hi;
+        assert_eq!(blocks_count_lo, 0);
+        assert_eq!(blocks_count_hi, 1);
     }
 
     #[test]

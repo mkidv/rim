@@ -9,13 +9,15 @@ use rimio::prelude::StdRimIO;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+use crate::commands::convert::{format_from_path, unwrap_file_with_progress};
+
 pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
     println!(
         "{}",
         format!("🔍 Checking disk image: {}", image.display()).bold()
     );
 
-    let format = ImageFormat::from_path(&image).unwrap_or(ImageFormat::Raw);
+    let format = format_from_path(&image).unwrap_or(ImageFormat::Raw);
 
     let (_tmp_file, check_path) = if format == ImageFormat::Raw {
         (None, image.clone())
@@ -24,7 +26,7 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
         let tmp = NamedTempFile::new().context("Failed to create temp file for unwrapping")?;
         let tmp_path = tmp.path().to_path_buf();
 
-        rimimg::unwrap(&image, &tmp_path, format)?;
+        unwrap_file_with_progress(&image, &tmp_path, format, |_, _| {})?;
 
         (Some(tmp), tmp_path)
     };

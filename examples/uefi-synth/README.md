@@ -13,3 +13,10 @@
 ```bash
 cargo build -p uefi-synth --target x86_64-unknown-uefi
 ```
+
+The default build scans BlockIO devices but does not write to physical disks.
+To build the provisioning demo that writes the generated layout to a selected target, enable the explicit safety gate:
+
+```bash
+cargo build -p uefi-synth --target x86_64-unknown-uefi --features dangerous-uefi-write
+```

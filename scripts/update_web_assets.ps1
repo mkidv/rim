@@ -23,28 +23,41 @@ try {
 
 # 2. Verify targets
 $WasmSrc = Join-Path $RimRoot "target\wasm32-unknown-unknown\release\wasm_synth.wasm"
-$PayloadSrc = Join-Path $RimRoot "examples\wasm-synth\payload\alpine_payload.tar"
+$AlpinePayloadSrc = Join-Path $RimRoot "examples\wasm-synth\payload\alpine_payload.tar"
+$UefiPayloadSrc = Join-Path $RimRoot "examples\wasm-synth\payload\uefi_payload.tar"
 $WasmDest = Join-Path $WebRepo "public\rim\wasm_synth.wasm"
-$PayloadDest = Join-Path $WebRepo "public\rim\payload\alpine_payload.tar"
+$AlpinePayloadDest = Join-Path $WebRepo "public\rim\payload\alpine_payload.tar"
+$UefiPayloadDest = Join-Path $WebRepo "public\rim\payload\uefi_payload.tar"
 
 if (-not (Test-Path $WasmSrc)) {
     throw "WASM artifact not found at $WasmSrc"
 }
-if (-not (Test-Path $PayloadSrc)) {
-    throw "Alpine payload TAR not found at $PayloadSrc"
+if (-not (Test-Path $AlpinePayloadSrc)) {
+    throw "Alpine payload TAR not found at $AlpinePayloadSrc"
+}
+$HasUefiPayload = Test-Path $UefiPayloadSrc
+if (-not $HasUefiPayload) {
+    Write-Warning "UEFI payload TAR not found at $UefiPayloadSrc; keeping existing web payload if present."
 }
 
 # 3. Copy to mki.dev
 Write-Host "`n[2/3] Copying artifacts to mki.dev/public/rim/..." -ForegroundColor Yellow
-$PayloadDestDir = Split-Path -Parent $PayloadDest
+$PayloadDestDir = Split-Path -Parent $AlpinePayloadDest
 if (-not (Test-Path $PayloadDestDir)) {
     New-Item -ItemType Directory -Force -Path $PayloadDestDir | Out-Null
 }
 
 Copy-Item $WasmSrc $WasmDest -Force
-Copy-Item $PayloadSrc $PayloadDest -Force
+Copy-Item $AlpinePayloadSrc $AlpinePayloadDest -Force
+if ($HasUefiPayload) {
+    Copy-Item $UefiPayloadSrc $UefiPayloadDest -Force
+}
 
 Write-Host "`n[3/3] Verifying copied artifacts:" -ForegroundColor Green
-Get-Item $WasmDest, $PayloadDest | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+$Artifacts = @($WasmDest, $AlpinePayloadDest)
+if (Test-Path $UefiPayloadDest) {
+    $Artifacts += $UefiPayloadDest
+}
+Get-Item $Artifacts | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
 
 Write-Host "=== Web assets successfully updated! ===" -ForegroundColor Green

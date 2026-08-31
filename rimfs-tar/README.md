@@ -17,7 +17,7 @@
 
 ```toml
 [dependencies]
-rimfs-tar = { version = "0.7.0", default-features = false, features = ["alloc"] }
+rimfs-tar = { version = "0.8.0", default-features = false, features = ["alloc"] }
 ```
 
 ```rust
@@ -37,3 +37,7 @@ let mut tree = FsNode::new_dir("/");
 injector.inject_tree(&mut tree)?;
 injector.flush()?;
 ```
+
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

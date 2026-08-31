@@ -4,9 +4,11 @@
 //! Responsible for reading and traversing an existing NTFS volume.
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
 
-use rimio::RimIO;
+use rimio::prelude::*;
 use zerocopy::FromBytes;
 
 use crate::constant::*;
@@ -21,19 +23,33 @@ use crate::upcase::UpcaseHandle;
 use crate::view::attr_view::{AttrRef, AttrView};
 use crate::view::mft_view::MftRecordView;
 
-pub struct NtfsResolver<'a, IO: RimIO + ?Sized> {
-    io: &'a mut IO,
-    meta: &'a NtfsMeta,
+pub struct NtfsResolver<'a, IO: RimRead + ?Sized> {
+    pub io: &'a mut IO,
+    pub meta: &'a NtfsMeta,
+    upcase: UpcaseHandle,
+    dir_cache: BTreeMap<u64, Vec<(String, u64, FileAttributes)>>,
+    mft_cache: BTreeMap<u64, Vec<u8>>,
 }
 
-impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a NtfsMeta) -> Self {
-        Self { io, meta }
+        let upcase = UpcaseHandle::from_flavor(&meta.upcase_flavor);
+        Self {
+            io,
+            meta,
+            upcase,
+            dir_cache: BTreeMap::new(),
+            mft_cache: BTreeMap::new(),
+        }
     }
 
     /// Read an MFT record by its record number
     pub fn read_mft_record(&mut self, record_number: u64) -> FsResolverResult<Vec<u8>> {
+        if let Some(cached) = self.mft_cache.get(&record_number) {
+            return Ok(cached.clone());
+        }
         let record = mft::read_record(self.io, self.meta, record_number)?;
+        self.mft_cache.insert(record_number, record.clone());
         Ok(record)
     }
 
@@ -114,20 +130,37 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
             }
         };
 
-        let mut content = Vec::with_capacity(data_size as usize);
-        let cluster_size = self.meta.bytes_per_cluster as usize;
+        let data_len = usize::try_from(data_size)
+            .map_err(|_| FsResolverError::Invalid("Non-resident attribute is too large"))?;
+        let mut content = Vec::with_capacity(data_len);
+        let cluster_size = self.meta.bytes_per_cluster as u64;
+        let total_len = self.io.total_size().ok();
 
         for run in runlist.iter() {
             if content.len() as u64 >= data_size {
                 break;
             }
 
+            let run_bytes = run
+                .len
+                .checked_mul(cluster_size)
+                .ok_or(FsResolverError::Invalid("Run length overflow"))?;
+            let remaining = data_size - content.len() as u64;
+            let read_bytes = run_bytes.min(remaining);
+            let read_len = usize::try_from(read_bytes)
+                .map_err(|_| FsResolverError::Invalid("Run is too large"))?;
+
             match run.lcn {
                 Some(lcn) => {
                     let offset = self.meta.lcn_to_offset(lcn);
-                    let size = (run.len as usize) * cluster_size;
+                    let end = offset
+                        .checked_add(read_bytes)
+                        .ok_or(FsResolverError::Invalid("Run offset overflow"))?;
+                    if total_len.is_some_and(|total| end > total) {
+                        return Err(FsResolverError::Invalid("Run exceeds volume bounds"));
+                    }
 
-                    let mut buf = vec![0u8; size];
+                    let mut buf = vec![0u8; read_len];
                     self.io
                         .read_at(offset, &mut buf)
                         .map_err(FsResolverError::IO)?;
@@ -135,14 +168,16 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
                     content.extend_from_slice(&buf);
                 }
                 None => {
-                    // Sparse run
-                    let size = (run.len as usize) * cluster_size;
-                    content.resize(content.len() + size, 0);
+                    let new_len = content
+                        .len()
+                        .checked_add(read_len)
+                        .ok_or(FsResolverError::Invalid("Sparse run length overflow"))?;
+                    content.resize(new_len, 0);
                 }
             }
         }
 
-        content.truncate(data_size as usize);
+        content.truncate(data_len);
         Ok(content)
     }
 
@@ -163,6 +198,10 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
         &mut self,
         record_number: u64,
     ) -> FsResolverResult<Vec<(String, u64, FileAttributes)>> {
+        if let Some(cached) = self.dir_cache.get(&record_number) {
+            return Ok(cached.clone());
+        }
+
         let record = self.read_mft_record(record_number)?;
 
         let header = MftRecordHeader::read_from_prefix(&record)
@@ -241,6 +280,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
             }
         }
 
+        self.dir_cache.insert(record_number, entries.clone());
         Ok(entries)
     }
 
@@ -293,7 +333,6 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
                 })?
                 .0;
 
-            // Read name
             let name_len = fn_attr.filename_length as usize;
             let name_offset = content_offset + core::mem::size_of::<FileNameAttribute>();
             let name_end = name_offset + name_len * 2; // UTF-16
@@ -345,11 +384,10 @@ impl<'a, IO: RimIO + ?Sized> NtfsResolver<'a, IO> {
             // Read directory entries of current
             let entries = self.read_directory_entries(current_mft)?;
 
-            let upcase = UpcaseHandle::from_flavor(&self.meta.upcase_flavor);
             let mut found = false;
             for (name, mft_num, _) in entries {
                 let name_u16: Vec<u16> = name.encode_utf16().collect();
-                if crate::utils::eq_names_upcase_str(&name_u16, component, &upcase) {
+                if crate::utils::eq_names_upcase_str(&name_u16, component, &self.upcase) {
                     current_mft = mft_num;
                     found = true;
                     break;
@@ -375,7 +413,7 @@ impl EmptyOrRoot for &str {
     }
 }
 
-impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for NtfsResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (found, mft_num, _) = self.resolve_path_internal(path)?;
         crate::ensure!(found, FsResolverError::NotFound);
@@ -384,19 +422,65 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for NtfsResolver<'a, IO> {
         Ok(entries.into_iter().map(|(name, _, _)| name).collect())
     }
 
-    fn open_file(
-        &mut self,
+    fn open_file<'c>(
+        &'c mut self,
         path: &str,
-    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'c>> {
         let (found, mft_num, _) = self.resolve_path_internal(path)?;
         crate::ensure!(found, FsResolverError::NotFound);
 
         let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
+        let header = MftRecordHeader::read_from_prefix(&record)
+            .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
+            .0;
         crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
 
-        let data = self.read_file(path)?;
-        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+        let attr = self
+            .find_attribute(&record, ATTR_DATA)?
+            .ok_or(FsResolverError::NotFound)?;
+
+        let view = attr
+            .as_view()
+            .map_err(|_| FsResolverError::Invalid("Malformed attribute"))?;
+
+        match view {
+            AttrView::Resident { value, .. } => {
+                Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(value.to_vec())))
+            }
+            AttrView::NonResident {
+                runlist, data_size, ..
+            } => {
+                let cluster_size = self.meta.bytes_per_cluster as u64;
+                let mut extents = Vec::new();
+                let mut logical_offset = 0u64;
+
+                for run in runlist.iter() {
+                    if logical_offset >= data_size {
+                        break;
+                    }
+                    let run_bytes = run
+                        .len
+                        .checked_mul(cluster_size)
+                        .ok_or(FsResolverError::Invalid("Run length overflow"))?;
+                    let extent_len = core::cmp::min(run_bytes, data_size - logical_offset);
+                    let source_offset = run.lcn.map(|lcn| self.meta.lcn_to_offset(lcn));
+                    extents.push(rimio::extent::IoExtent {
+                        logical_offset,
+                        source_offset,
+                        len: extent_len,
+                    });
+                    logical_offset = logical_offset
+                        .checked_add(extent_len)
+                        .ok_or(FsResolverError::Invalid("Extent offset overflow"))?;
+                }
+
+                Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
+                    &mut *self.io,
+                    extents,
+                    data_size,
+                )))
+            }
+        }
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
@@ -404,7 +488,9 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for NtfsResolver<'a, IO> {
         crate::ensure!(found, FsResolverError::NotFound);
 
         let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record).unwrap().0;
+        let header = MftRecordHeader::read_from_prefix(&record)
+            .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
+            .0;
         crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
 
         if let Some(attr) = self.find_attribute(&record, ATTR_DATA)? {
@@ -461,6 +547,7 @@ mod tests {
     use crate::builder::{MftRecordBuilder, NtfsAttribute};
     use crate::types::MftRecordHeader;
     use rimfs_core::injector::FsTreeInjector;
+    use rimfs_core::testing::file_with_attr;
     use rimio::prelude::MemRimIO;
 
     #[test]
@@ -490,17 +577,14 @@ mod tests {
 
         let mut resolver = NtfsResolver::new(&mut io, &meta);
 
-        // Read unnamed default stream
         let default_data = resolver.read_file_stream(16, None).unwrap();
         assert_eq!(default_data, b"DEFAULT_STREAM_DATA");
 
-        // Read named stream
         let named_data = resolver
             .read_file_stream(16, Some("custom_stream"))
             .unwrap();
         assert_eq!(named_data, b"ALTERNATE_STREAM_DATA");
 
-        // Non-existent stream should return NotFound
         let res = resolver.read_file_stream(16, Some("non_existent"));
         assert!(res.is_err());
     }
@@ -523,11 +607,7 @@ mod tests {
 
         let mut tree = crate::core::resolver::FsNode::Container {
             attr: FileAttributes::new_dir(),
-            children: vec![crate::core::resolver::FsNode::new_file_from_source(
-                "secret.txt",
-                alloc::boxed::Box::new(rimio::prelude::VecRimIO::new(b"TopSecret".to_vec())),
-                custom_attr,
-            )],
+            children: vec![file_with_attr("secret.txt", b"TopSecret", custom_attr)],
         };
 
         injector.inject_tree(&mut tree).unwrap();

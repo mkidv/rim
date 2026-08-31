@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 
 //! Path utilities for portable filesystem parsing and injection.
-//!
-//! This module provides helpers to normalize, split, join, and process filesystem paths.
-//! All functions are no_std + alloc safe.
-//!
-//! Paths are always converted to `/`-separated form internally.
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec;
@@ -46,6 +41,13 @@ pub fn path_to_unified_str(path_str: &str) -> String {
         }
     }
     out
+}
+
+/// Normalize a virtual filesystem path to a relative lookup key.
+///
+/// The root path is represented as an empty string.
+pub fn normalize_fs_path(path: &str) -> &str {
+    path.trim_matches('/')
 }
 
 /// Join two path components with `/`, ensuring no duplicate slash
@@ -139,6 +141,9 @@ mod tests {
 
         let split = split_path("path/to/dir/file.txt");
         assert_eq!(split.as_slice(), ["path", "to", "dir", "file.txt"]);
+
+        assert_eq!(normalize_fs_path("/path/to/dir/"), "path/to/dir");
+        assert_eq!(normalize_fs_path("/"), "");
 
         let clean = clean_and_normalize_path(r"\\?\C:\my\path\file.txt");
         assert_eq!(clean.as_str(), "C:/my/path/file.txt");

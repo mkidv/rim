@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-use rimgen::{Filesystem, ImageBuilder, LayoutConfig, PartitionConfig, Size};
+use rimgen::{Filesystem, LayoutConfig, PartitionConfig, Size};
 use rimimg::ImageFormat;
+use rimio::prelude::*;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -46,13 +48,34 @@ fn test_cli_builder_and_check() {
         disk: None,
     };
 
-    let mut builder = ImageBuilder::new(layout);
-    builder.build_to_file(&img_path).unwrap();
+    let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(&layout) * 512;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&img_path)
+        .unwrap();
+    let mut io = FileRimIO::new(file);
+    io.set_len(raw_len).unwrap();
+    rimgen::build_config_on_io(&layout, &mut io).unwrap();
 
     // 2. Test check on RAW
     // Call the check logic
-    rimimg::convert(&img_path, &vhd_path).unwrap();
+    let input = File::open(&img_path).unwrap();
+    let input_len = input.metadata().unwrap().len();
+    let output = File::create(&vhd_path).unwrap();
+    let mut src = FileRimIO::new(input);
+    let mut dst = FileRimIO::new(output);
+    rimimg::vhd::wrap_raw_as_vhd_io(
+        &mut src,
+        &mut dst,
+        input_len,
+        rimimg::ImageOptions::deterministic(1),
+    )
+    .unwrap();
 
-    let mut f = File::open(&vhd_path).unwrap();
-    assert_eq!(ImageFormat::from_file(&mut f).unwrap(), ImageFormat::Vhd);
+    let f = File::open(&vhd_path).unwrap();
+    let mut io = FileRimIO::new(f);
+    assert_eq!(ImageFormat::from_io(&mut io).unwrap(), ImageFormat::Vhd);
 }

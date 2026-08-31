@@ -41,7 +41,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for TarChecker<'a, IO> {
             let actual_chksum = calculate_checksum(&header);
             if expected_chksum != actual_chksum {
                 rep.push(rimfs_core::checker::Finding::err(
-                    "TAR_CHKSUM",
+                    "TAR.CHECKSUM",
                     "Invalid TAR header checksum",
                 ));
                 return Ok(());

@@ -2,7 +2,7 @@
 //! NTFS Security-related structures
 //!
 //! Reference: [MS-DTYP]: Windows Data Types
-//! https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f993ad91-88f2-4bd5-a131-7e8c0db1683d
+//! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f993ad91-88f2-4bd5-a131-7e8c0db1683d>
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 

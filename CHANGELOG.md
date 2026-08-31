@@ -4,6 +4,100 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-31
+### Added
+*   **ZIP Archive Engine (`rimfs-zip`)**:
+    *   New dedicated `no_std + alloc` ZIP filesystem driver implementing the complete `rimfs` pipeline (`Zip`, `ZipFormatter`, `ZipAllocator`, `ZipInjector`, `ZipResolver`, `ZipChecker`).
+    *   Supports Local File Headers, Central Directory, EOCD/ZIP64 structures, Store/Deflate plumbing, CRC-32 verification, and Info-ZIP POSIX metadata.
+    *   Integrated into the `rimfs` facade and `rimgen` feature matrix via the `zip` cargo feature.
+*   **ISO 9660 / Joliet / Rock Ridge / El Torito Engine (`rimfs-iso`)**:
+    *   New pure-Rust optical and hybrid disk driver with precomputed layout planning, 2048-byte sector serialization, descriptor/checker support, and lazy file resolution.
+    *   Added Joliet UTF-16 names, Rock Ridge POSIX metadata and symlink records, plus El Torito BIOS/UEFI boot catalog support.
+    *   UEFI ISO images can synthesize an embedded FAT EFI boot image in memory through `rimfs-fat`.
+*   **Lazy Extent-Based File Streaming (`rimio`, `rimfs-*`)**:
+    *   Added `IoExtent` and `ExtentRimRead` for sparse/contiguous file views backed by existing `RimRead` sources.
+    *   FAT, ExFAT, EXT, NTFS, TAR, ISO, and ZIP resolvers now expose lazy `open_file` readers instead of eagerly copying file payloads into memory.
+    *   Added nested archive/disk smoke coverage demonstrating ISO-in-ISO traversal without full payload materialization.
+*   **Cross-Engine Benchmarks & Examples**:
+    *   Added dedicated TAR, ZIP, ISO, RimFAT, and all-engines comparison Criterion benchmarks.
+    *   Added executable examples for TAR, ZIP, and ISO alongside refreshed existing filesystem examples.
+*   **`rimimg` `no_std` Core**:
+    *   Added a `no_std` container-format core with explicit `alloc`/`std` features, typed `RimImgError`, deterministic image options, and direct `RimRead`/`RimWrite` APIs.
+    *   Added logical image I/O adapters (`create_image_io`, `open_image_io`) so callers can read or write a raw disk view directly over RAW, VHD, VMDK, QCOW2, and VDI containers.
+    *   Moved host file/path orchestration out to CLI/native callers so `rimimg` remains focused on container I/O primitives.
+*   **Sparse Release Torture Coverage**:
+    *   Added `SparseRimIO` / `PagedSparseRimIO` for multi-TiB logical storage tests and dry-run image generation without materializing zero-filled regions.
+    *   Added a multi-filesystem sparse torture layout crossing 2 TiB / 4 TiB boundaries and validating far-offset GPT/filesystem synthesis in dry-run mode.
+*   **Support Matrix Documentation**:
+    *   Added a concise repository-level support matrix covering format, inject, resolve/read, fast check, deep check, `no_std + alloc`, and known limitations per filesystem/archive driver.
+
+### Changed
+*   **Read/Write API Split (`rimio`)**:
+    *   Split `RimIOExt` helpers into `RimReadExt` and `RimWriteExt`, with matching primitive and zerocopy struct helper traits.
+    *   Re-exported the expanded prelude so read-only resolvers can use primitive/struct helpers without requiring writable I/O.
+*   **Resolver Trait Lifetimes (`rimfs-core`)**:
+    *   Removed the lifetime parameter from `FsTreeResolver` and made `open_file` borrow from the resolver call site.
+    *   `resolve_node`, `resolve_tree`, and `resolve_entry` now return owned node trees with buffered `VecRimIO` sources when a generic tree snapshot is required.
+*   **Read-Only Metadata & Resolver Paths (`rimfs-*`)**:
+    *   `from_io` metadata constructors and filesystem resolvers now accept `RimRead` where mutation is not required.
+    *   FAT chain walking gained read-only `get_ro` support to avoid unnecessary dirty-buffer flushes during resolution.
+*   **Workspace Expansion**:
+    *   Workspace expanded from 13 to 15 decoupled crates and default filesystem features now include `tar`, `zip`, and `iso`.
+*   **Filesystem Examples & Benches Layout**:
+    *   Moved filesystem-specific examples and Criterion benches into their owning `rimfs-*` crates.
+    *   Kept per-example timing and `IOCounter` statistics for format, inject, check, and resolve phases.
+    *   Kept only the all-engines comparison benchmark in the `rimfs` facade crate.
+*   **Public API Surface**:
+    *   Reduced filesystem crates to root/prelude exports for high-level APIs while keeping low-level on-disk `types` modules available for inspection.
+    *   Kept NTFS `view` helpers public as the dedicated advanced inspection API.
+    *   Added `std::error::Error` implementations for partition error types under `std`.
+*   **Direct Container Generation (`rimgen`)**:
+    *   `rimgen` now builds non-raw image outputs through `rimimg` container-backed I/O instead of creating a temporary raw image and wrapping it afterwards.
+*   **Sparse Dry-Run Generation (`rimcli`, `rimgen`, `rimio`)**:
+    *   `rim generate --dry-run` now executes the normal layout/build pipeline over sparse in-memory storage, reporting logical size, allocated bytes, and allocated pages when verbose.
+    *   Large declarative layouts now exercise GPT, partition offsets, filesystem formatters, injectors, and checkers without requiring temporary multi-TiB host files.
+*   **EXT4 Large Geometry Handling (`rimfs-ext`)**:
+    *   `GroupLayout` now carries physical block numbers as `u64`, matching `ExtMeta::block_count` and EXT4 64-bit superblock/BGDT fields.
+    *   Default block groups now derive from the block bitmap capacity (`block_size * 8`) while preserving the existing 16 KiB-per-inode policy.
+
+### Fixed
+*   **Pre-Release Safety Audit**:
+    *   Hardened `rimio` partition-offset arithmetic across memory, file, mmap, and UEFI backends to reject overflow instead of wrapping in release builds.
+    *   Routed `zero_fill()` through `RimWrite::zero_at()` so sparse-capable backends can reclaim or skip zero pages instead of materializing large zero buffers.
+    *   Guarded ZIP, ISO, and NTFS resolvers/checkers against malformed on-disk sizes and offsets before allocating buffers or exposing file extents.
+    *   Disabled physical UEFI disk writes by default in `uefi-synth`; provisioning now requires the explicit `dangerous-uefi-write` feature.
+    *   Fixed default `uefi-synth` compilation by gating the physical provisioning and chainloading path behind `dangerous-uefi-write`.
+    *   Fixed packaged `rimgen` builds by importing `RimWriteExt` where `zero_fill` is used outside the local workspace context.
+    *   Restored `rimfs-zip` `no_std + alloc` builds and removed module-level `no_std` attributes that only belong at crate root.
+    *   Kept NTFS spec-compliance tests private to the crate instead of exporting them through the public API.
+    *   Fixed `rimio --no-default-features` by exposing sparse storage only when `alloc` is enabled.
+*   **FAT Mirror Verification (`rimfs-fat`, `rimfs-core`)**:
+    *   Fixed `compare_fat_copies` to compare FAT0 against FAT1 instead of reading FAT0 twice through the shared driver cache.
+    *   Added explicit per-FAT table reads to `FatDriver`, preserving mirrored writes while allowing checkers to validate individual FAT copies.
+    *   Added a corruption tripwire that formats a two-FAT volume, corrupts only FAT1, and verifies that `FAT.MIRROR` is reported.
+*   **EXT4 Multi-TiB Geometry (`rimfs-ext`)**:
+    *   Fixed overflow panics in sparse superblock and backup BGDT offset calculations on multi-TiB layouts.
+    *   Serialized 64-bit BGDT block pointers using low/high fields for block bitmaps, inode bitmaps, and inode tables.
+    *   Updated EXT checks to read 64-bit block counts and BGDT block pointers instead of validating only the low 32 bits.
+    *   Added a block-count boundary test proving that `u32::MAX + 1` EXT4 blocks are represented through `s_blocks_count_hi`.
+    *   Switched the standard inode scan to inode bitmaps, leaving the full inode-table scan as an explicit deep path.
+*   **FAT Checker Modes (`rimfs-fat`)**:
+    *   Fixed `deep_walk` to include the last valid data cluster and reuse a single FAT driver cache during sequential scans.
+    *   Kept `fast_check()` bounded by disabling the full FAT chain walk while retaining boot, root, and mirror checks.
+*   **Injection Finalization in Examples**:
+    *   Existing filesystem examples now explicitly call `injector.flush()` before validation/resolution.
+    *   NTFS example persists a raw test image under `target/ntfs_test.img` for native-tool verification.
+*   **Rustdoc Readiness**:
+    *   Fixed rustdoc warnings under `RUSTDOCFLAGS="-D warnings"`, including bare URL handling in NTFS security type documentation.
+*   **Development Artifacts**:
+    *   Removed the external FAT32 comparison benchmark and its `fatfs`/`fscommon` dev-dependencies.
+    *   Moved generated example fixtures and their generator out of packaged crates into `scratch/`.
+*   **NTFS Resolver Hot Paths (`rimfs-ntfs`)**:
+    *   Added MFT record and directory-entry caches plus persistent upcase handling to reduce repeated parsing during path traversal.
+    *   `NtfsInjector::new` now initializes allocation state from the existing volume and reserves system records through `$UsnJrnl`.
+*   **TAR Ergonomics (`rimfs-tar`)**:
+    *   Added `TarMeta::new(...)` and switched TAR file opening to contiguous extent-backed readers.
+
 ## [0.7.0] - 2026-08-29
 ### Added
 *   **POSIX UStar TAR Archive Engine (`rimfs-tar`)**:
@@ -110,7 +204,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
         *   `rim inspect <image>`: Deep container, partition, and filesystem detection with colored visual badges.
     *   `rimimg`: Standalone virtual machine container management crate supporting RAW (`.img`, `.raw`), Microsoft VHD Fixed (`.vhd`), VMware VMDK monolithicFlat (`.vmdk`), QEMU QCOW2 v2 (`.qcow2`), and VirtualBox VDI Fixed 1.1 (`.vdi`), format detection via magic bytes, wrap/unwrap, and direct conversions.
     *   `rimhost`: Isolated OS-native storage tools integration (Windows PowerShell Storage module, Linux `losetup`/`kpartx`/`mkfs.*`, macOS `hdiutil`/`diskutil`), accessible via the optional `--host` flag.
-    *   `rimgen`: Refactored into a pure library-first declarative engine with `ImageBuilder`, direct stream synthesis (`build_on_io`), and typed event notifications (`BuildEvent`).
+    *   `rimgen`: Refactored into a pure library-first declarative engine with direct stream synthesis (`build_on_io`) and typed event notifications (`BuildEvent`).
 *   **Modular Multi-Crate Filesystem Engine (`rimfs`)**:
     *   `rimfs-core`: Shared core traits (`FsFormatter`, `FsAllocator`, `FsInjector`, `FsResolver`, `FsChecker`), common error types, macros (`bail!`, `ensure!`), bitmap utils, volume helpers, and `StdResolver`.
     *   `rimfs-fat`: Dedicated FAT12, FAT16, and FAT32 implementation, including the 64-bit optimized **RimFAT** extension specification (`RIMFAT_SPEC.md`).

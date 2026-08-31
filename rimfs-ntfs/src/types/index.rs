@@ -179,7 +179,6 @@ impl NtfsIndexEntry {
         }
         entry_len = (entry_len + 7) & !7;
 
-        // Write Header
         let header = IndexEntryHeader {
             mft_reference: self.file_ref,
             entry_length: entry_len as u16,
@@ -189,7 +188,6 @@ impl NtfsIndexEntry {
         };
         io.write_struct(offset, &header)?;
 
-        // Write Content (FileName)
         if !is_last {
             let fn_attr = FileNameAttribute {
                 parent_directory: self.parent_ref,
@@ -208,7 +206,6 @@ impl NtfsIndexEntry {
 
             io.write_struct(offset + 16, &fn_attr)?;
 
-            // Write Name
             let mut name_buf = vec![0u8; name_bytes];
             for (i, &c) in self.name.iter().enumerate() {
                 name_buf[i * 2] = c as u8;

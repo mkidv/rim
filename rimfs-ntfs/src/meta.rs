@@ -8,7 +8,6 @@ use alloc::string::String;
 
 pub use crate::core::meta::*;
 
-use rimio::RimIO;
 use zerocopy::FromBytes;
 
 use crate::constant::*;
@@ -84,7 +83,7 @@ impl BitmapFsMeta for NtfsMeta {
 
 impl NtfsMeta {
     /// Read NTFS metadata from volume boot sector
-    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
+    pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let mut boot_buf = [0u8; 512];
         io.read_at(0, &mut boot_buf).map_err(FsError::IO)?;
 
@@ -179,7 +178,6 @@ impl NtfsMeta {
         hidden_sectors: u32,
         upcase_flavor: UpcaseFlavor,
     ) -> FsResult<Self> {
-        // Validate parameters
         crate::ensure!(
             bytes_per_cluster >= bytes_per_sector as u32,
             FsError::Invalid("cluster size must be >= sector size")

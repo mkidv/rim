@@ -56,7 +56,6 @@ pub fn write_bitmap<IO: RimIO + ?Sized>(
         }
     }
 
-    // Write back
     for i in 0..clusters_count {
         let off = meta.unit_offset(meta.bitmap_cluster + i as u32);
         io.write_block_best_effort(off, &bitmap[i * cs..(i + 1) * cs], cs)?;

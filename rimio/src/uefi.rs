@@ -1,4 +1,4 @@
-use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
+use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite, checked_add_offset};
 
 use uefi::boot::ScopedProtocol;
 use uefi::proto::media::block::{BlockIO as UefiBlockIo, BlockIOMedia, Lba};
@@ -57,7 +57,10 @@ impl UefiRimIO {
     #[inline]
     fn media_len(&self) -> u64 {
         // last_block is inclusive → total bytes = (last_block + 1) * block_size
-        (self.media().last_block() + 1) * self.block_size() as u64
+        self.media()
+            .last_block()
+            .saturating_add(1)
+            .saturating_mul(self.block_size() as u64)
     }
 
     #[inline]
@@ -164,7 +167,7 @@ impl TempBlockBuf {
 
 impl RimRead for UefiRimIO {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
+        let abs_off = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_off, buf.len())?;
 
         let bs = self.block_size();
@@ -223,7 +226,7 @@ impl RimRead for UefiRimIO {
 
 impl RimWrite for UefiRimIO {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_off = self.partition_offset + offset;
+        let abs_off = checked_add_offset(self.partition_offset, offset)?;
         self.check_bounds(abs_off, data.len())?;
 
         let bs = self.block_size();

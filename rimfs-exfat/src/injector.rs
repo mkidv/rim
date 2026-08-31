@@ -6,7 +6,7 @@ use ::alloc::{
     vec::Vec,
 };
 
-use rimio::{RimIO, RimIOExt, RimRead};
+use rimio::prelude::*;
 
 use crate::core::{fat::*, injector::*, resolver::*};
 
@@ -261,6 +261,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use rimfs_core::testing::{assert_structural_tree_eq, nested_files_tree};
 
     #[test]
     fn test_exfat_injector() {
@@ -279,59 +280,17 @@ mod tests {
 
         let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
-        let mut tree = FsNode::Container {
-            attr: FileAttributes::new_dir(),
-            children: vec![
-                FsNode::Dir {
-                    name: "subdir".to_string(),
-                    attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
-                },
-                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
-            ],
-        };
+        let mut tree = nested_files_tree();
 
         injector.inject_tree(&mut tree).unwrap();
-
-        // Debug: hexdump the root directory
-        let mut root_data = vec![0u8; meta.unit_size()];
-        io.read_at(meta.unit_offset(meta.root_unit()), &mut root_data)
-            .unwrap();
-        println!("Root directory after injection:");
-        for (i, chunk) in root_data[..512].chunks(16).enumerate() {
-            print!("{:04X}: ", i * 16);
-            for b in chunk {
-                print!("{b:02X} ");
-            }
-            print!(" | ");
-            for &b in chunk {
-                let c = if b.is_ascii_graphic() || b == b' ' {
-                    b as char
-                } else {
-                    '.'
-                };
-                print!("{c}");
-            }
-            println!();
-        }
 
         let mut checker = ExFatChecker::new(&mut io, &meta);
         checker.fast_check().expect("check failed");
 
-        // Debug: Test read_dir directly on root
-        let mut parser = ExFatResolver::new(&mut io, &meta);
-        let root_entries = parser.read_dir("/").expect("read_dir failed");
-        println!("Root entries found by read_dir: {root_entries:?}");
-
         let mut parser_back = ExFatResolver::new(&mut io, &meta);
         let mut parsed_tree = parser_back.resolve_tree("/*").expect("resolve_tree failed");
 
-        tree.sort_children_recursively();
-        parsed_tree.sort_children_recursively();
-
-        println!("{tree}");
-        println!("{parsed_tree}");
-        assert!(tree.structural_eq(&parsed_tree), "Tree structure mismatch");
+        assert_structural_tree_eq(&mut tree, &mut parsed_tree, "exFAT");
     }
 
     #[test]
@@ -347,14 +306,12 @@ mod tests {
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // Format
         ExFatFormatter::new(&mut io, &meta)
             .format(false)
             .expect("Format failed");
 
         let mut injector = ExFatInjector::new(&mut io, &meta).expect("injector new failed");
 
-        // Initialize root context
         injector
             .set_root_context(&FsNode::Dir {
                 name: "".to_string(),
@@ -363,7 +320,6 @@ mod tests {
             })
             .expect("set_root_context failed");
 
-        // Inject file
         // 3 clusters roughly
         let file_size = 4096 * 3;
         let mut file_content = vec![0xAAu8; file_size];
@@ -393,7 +349,6 @@ mod tests {
             if chunk[0] == EXFAT_ENTRY_STREAM {
                 let entry = ExFatStreamEntry::read_from_bytes(chunk).unwrap();
                 first_cluster = entry.first_cluster;
-                println!("Found file, first cluster: {first_cluster}");
                 found = true;
                 break;
             }
@@ -409,10 +364,7 @@ mod tests {
             .read_chain(&mut io, first_cluster)
             .expect("read_chain failed");
         assert!(!entries.is_empty(), "Chain should not be empty");
-        println!("File chain: {entries:?}");
 
-        // 3. Check Bitmap
-        // Re-read bitmap from disk
         let mut bitmap_data = vec![0u8; meta.bitmap_size_bytes as usize];
         io.read_at(meta.unit_offset(meta.bitmap_cluster), &mut bitmap_data)
             .expect("read bitmap failed");

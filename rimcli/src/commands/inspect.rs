@@ -4,18 +4,22 @@ use crate::ui::badge::fs_name_badge;
 use crate::ui::format::pretty_bytes;
 use anyhow::Context;
 use colored::Colorize;
-use rimimg::ImageFormat;
 use rimio::RimIO;
 use rimio::prelude::StdRimIO;
 use std::fs::File;
 use std::path::Path;
+
+use crate::commands::convert::detect_format_from_file;
 
 pub fn run(image: &Path) -> anyhow::Result<()> {
     let mut file = File::open(image)
         .with_context(|| format!("Failed to open image file: {}", image.display()))?;
 
     let file_size = file.metadata()?.len();
-    let format = ImageFormat::from_file(&mut file)?;
+    let format = {
+        let detect_file = file.try_clone()?;
+        detect_format_from_file(detect_file)?
+    };
 
     println!(
         "{}",

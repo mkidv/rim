@@ -4,16 +4,20 @@ use crate::ui::format::pretty_bytes;
 use crate::ui::table::print_scan_table;
 use anyhow::Context;
 use colored::Colorize;
-use rimimg::ImageFormat;
 use rimio::prelude::StdRimIO;
 use std::fs::File;
 use std::path::Path;
+
+use crate::commands::convert::detect_format_from_file;
 
 pub fn run(image: &Path) -> anyhow::Result<()> {
     let mut file = File::open(image)
         .with_context(|| format!("Failed to open image file: {}", image.display()))?;
 
-    let format = ImageFormat::from_file(&mut file)?;
+    let format = {
+        let detect_file = file.try_clone()?;
+        detect_format_from_file(detect_file)?
+    };
 
     let mut io = StdRimIO::new(&mut file);
     let scan = rimpart::scan_disk_with_sector(&mut io, 512)

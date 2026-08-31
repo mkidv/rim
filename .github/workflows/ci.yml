@@ -52,7 +52,7 @@ jobs:
       - name: Check pure no_std (rimio, rimpart)
         run: cargo check -p rimio -p rimpart --no-default-features --target wasm32-unknown-unknown
       - name: Check portable core (alloc + fs engines on wasm32)
-        run: cargo check -p rimio -p rimpart -p rimfs-core -p rimfs-fat -p rimfs-exfat -p rimfs-ext -p rimfs-ntfs -p rimfs -p rimgen --no-default-features --features "alloc,fat,exfat,ext,ntfs" --target wasm32-unknown-unknown
+        run: cargo check -p rimio -p rimpart -p rimfs-core -p rimfs-fat -p rimfs-exfat -p rimfs-ext -p rimfs-ntfs -p rimfs-tar -p rimfs-zip -p rimfs-iso -p rimfs -p rimgen --no-default-features --features "alloc,fat,exfat,ext,ntfs,tar,zip,iso" --target wasm32-unknown-unknown
       - name: Check UEFI full-stack integration
         run: cargo check -p uefi-synth --target x86_64-unknown-uefi
       - name: Check WASM browser synthesis

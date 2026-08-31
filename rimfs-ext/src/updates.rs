@@ -5,7 +5,7 @@ use alloc::string::ToString;
 
 use crate::core::FsInjectorResult;
 use crate::{allocator::ExtAllocator, constant::*, group_layout::GroupLayout, meta::ExtMeta};
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 use zerocopy::IntoBytes;
 
 pub fn flush_superblock<IO: RimIO + ?Sized>(
@@ -40,8 +40,8 @@ pub fn flush_superblock<IO: RimIO + ?Sized>(
             !meta.features.has_sparse_super || crate::utils::is_sparse_super_group(group_id as u32);
         if has_super {
             let group_start_block =
-                meta.first_data_block + (group_id as u32) * meta.blocks_per_group;
-            let sb_copy_offset = (group_start_block as u64) * (meta.block_size as u64);
+                meta.first_data_block as u64 + group_id as u64 * meta.blocks_per_group as u64;
+            let sb_copy_offset = group_start_block * meta.block_size as u64;
             io.write_u32_at(sb_copy_offset + 0x0C, free_blocks as u32)?;
             io.write_u32_at(sb_copy_offset + 0x10, free_inodes as u32)?;
         }
@@ -102,8 +102,10 @@ pub fn flush_bgdt<IO: RimIO + ?Sized>(
     for group_id in 1..count {
         let layout = GroupLayout::compute(meta, group_id as u32);
         if layout.reserved_blocks > 0 {
-            let sb_copy_offset = (layout.group_start as u64) * (meta.block_size as u64);
-            let bgdt_copy_offset = sb_copy_offset + (meta.block_size as u64);
+            let sb_copy_offset = layout.group_start * (meta.block_size as u64);
+            let bgdt_copy_offset = sb_copy_offset.checked_add(meta.block_size as u64).ok_or(
+                crate::core::FsInjectorError::Invalid("EXT backup BGDT offset overflow"),
+            )?;
             io.write_at(bgdt_copy_offset, &bgdt_buf)?;
         }
     }

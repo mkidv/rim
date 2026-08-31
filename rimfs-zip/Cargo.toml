@@ -1,0 +1,37 @@
+[package]
+name = "rimfs-zip"
+description = "ZIP archive filesystem driver for rim (formatter, injector, resolver, checker)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["std"]
+alloc = ["rimfs-core/alloc", "rimio/alloc"]
+std = ["alloc", "rimfs-core/std", "rimio/std"]
+deflate = ["dep:miniz_oxide"]
+
+[dependencies]
+rimfs-core = { path = "../rimfs-core", version = "0.8.0", default-features = false }
+rimio = { path = "../rimio", version = "0.8.0", default-features = false }
+crc32fast = { version = "1.4.2", default-features = false }
+time = { version = "0.3", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.1", features = ["html_reports"] }
+rimfs-core = { path = "../rimfs-core", version = "0.8.0", default-features = false, features = ["test-utils"] }
+rimio = { path = "../rimio", version = "0.8.0", features = ["mmap", "std"] }
+tempfile = "3.20.0"
+
+[[bench]]
+name = "zip_bench"
+harness = false
+
+[lints]
+workspace = true

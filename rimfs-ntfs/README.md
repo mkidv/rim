@@ -40,3 +40,6 @@ let meta = NtfsMeta::new(disk.len(), Some("WINDOWS"));
 NtfsFormatter::new(&mut disk, &meta).format()?;
 ```
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

@@ -4,7 +4,7 @@
 
 use rimfs::core::resolver::{FileAttributes, FsNode};
 use rimfs::core::time::OffsetDateTime;
-use rimgen::builder::build_on_io;
+use rimgen::builder::build_on_io_with_events;
 use rimgen::guid::{GuidGenerator, SeededGuidGenerator};
 use rimgen::layout::{Filesystem, Layout, Partition, PartitionKind};
 use rimio::MemRimIO;
@@ -82,12 +82,12 @@ fn test_identical_engine_equivalence() {
     let (mut layout1, _) = make_layout(0x4242_4242);
     let mut buf1 = vec![0u8; total_size];
     let mut io1 = MemRimIO::new(&mut buf1);
-    build_on_io(&mut layout1, &mut io1, |_| {}).expect("build 1 failed");
+    build_on_io_with_events(&mut layout1, &mut io1, |_| {}).expect("build 1 failed");
 
     let (mut layout2, _) = make_layout(0x4242_4242);
     let mut buf2 = vec![0u8; total_size];
     let mut io2 = MemRimIO::new(&mut buf2);
-    build_on_io(&mut layout2, &mut io2, |_| {}).expect("build 2 failed");
+    build_on_io_with_events(&mut layout2, &mut io2, |_| {}).expect("build 2 failed");
 
     // Byte-for-byte comparison with compact error output
     if buf1 != buf2 {

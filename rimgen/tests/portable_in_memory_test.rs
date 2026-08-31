@@ -2,7 +2,7 @@
 //! Pure in-memory disk synthesis test using portable RimIO and ResolvedLayout.
 
 use rimfs::core::resolver::{FileAttributes, FsNode};
-use rimgen::builder::build_on_io;
+use rimgen::builder::build_on_io_with_events;
 use rimgen::guid::{GuidGenerator, SeededGuidGenerator};
 use rimgen::layout::{Filesystem, Layout, Partition, PartitionKind};
 use rimio::MemRimIO;
@@ -89,7 +89,7 @@ fn test_portable_in_memory_multi_fs() {
         .add_partition(linux_part)
         .add_partition(ntfs_part);
 
-    let report = build_on_io(&mut layout, &mut io, |_| {}).expect("build_on_io failed");
+    let report = build_on_io_with_events(&mut layout, &mut io, |_| {}).expect("build_on_io failed");
 
     assert_eq!(report.partitions.len(), 3);
     assert_eq!(report.partitions[0].name, "ESP");

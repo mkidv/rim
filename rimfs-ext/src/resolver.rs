@@ -13,15 +13,15 @@ use crate::core::traits::FsMeta;
 use crate::core::utils::path_utils::*;
 use crate::types::{BlockMapArray, ExtExtent, ExtExtentHeader, ExtExtentIndex};
 use crate::{group_layout::GroupLayout, meta::ExtMeta};
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 use zerocopy::FromBytes;
 
-pub struct ExtResolver<'a, IO: RimIO + ?Sized> {
+pub struct ExtResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     meta: &'a ExtMeta,
 }
 
-impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExtMeta) -> Self {
         Self { io, meta }
     }
@@ -29,7 +29,7 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
 
 use crate::core::resolver::walker::WalkerDataSource;
 
-impl<'a, IO: RimIO + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
     type Entry = ExtDirEntry;
 
     fn root_cluster(&self) -> u32 {
@@ -49,7 +49,7 @@ impl<'a, IO: RimIO + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     /// Read inode raw bytes from inode table
     pub(crate) fn read_inode(&mut self, inode_num: u32) -> FsResolverResult<Vec<u8>> {
         if inode_num == 0 || inode_num as u64 > self.meta.inode_count {
@@ -64,7 +64,7 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
         let inode_table_block = layout.inode_table_block;
 
         let inode_size = self.meta.inode_size as u64;
-        let offset = (inode_table_block as u64 * self.meta.block_size as u64)
+        let offset = (inode_table_block * self.meta.block_size as u64)
             + (index_in_group as u64 * inode_size);
 
         let mut buf = vec![0u8; inode_size as usize];
@@ -273,7 +273,6 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
             .read_at(offset, &mut buf)
             .map_err(FsResolverError::IO)?;
 
-        // Parse u32s
         for chunk in buf.chunks(4) {
             if blocks.len() >= limit {
                 break;
@@ -501,7 +500,7 @@ impl ExtDirEntry {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     pub fn resolve_entry_info(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
         match crate::core::resolver::walker::walk_path(self, path)? {
             Some(entry) => {
@@ -513,9 +512,67 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
             None => Ok((true, EXT_ROOT_INODE, 0)),
         }
     }
+    pub(crate) fn inode_extents(
+        &mut self,
+        inode_buf: &[u8],
+        total_size: u64,
+    ) -> FsResolverResult<Vec<rimio::extent::IoExtent>> {
+        let block_size = self.meta.block_size as u64;
+        let mut fs_extents = Vec::new();
+
+        let i_flags = inode_buf
+            .get(32..36)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
+
+        if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
+            let extents = self.read_extents(inode_buf)?;
+            for ext in extents {
+                let logical_offset = ext.ee_block as u64 * block_size;
+                if logical_offset >= total_size {
+                    break;
+                }
+                let byte_len = ext.len() as u64 * block_size;
+                let actual_len = core::cmp::min(byte_len, total_size - logical_offset);
+                let source_offset = if ext.is_uninit() {
+                    None
+                } else {
+                    Some(ext.physical_start() * block_size)
+                };
+                fs_extents.push(rimio::extent::IoExtent {
+                    logical_offset,
+                    source_offset,
+                    len: actual_len,
+                });
+            }
+        } else {
+            let blocks = self.read_block_map(inode_buf, total_size as usize)?;
+            let mut logical_offset = 0u64;
+            for blk in blocks {
+                if logical_offset >= total_size {
+                    break;
+                }
+                let extent_len = core::cmp::min(block_size, total_size - logical_offset);
+                let source_offset = if blk == 0 {
+                    None
+                } else {
+                    Some(blk as u64 * block_size)
+                };
+                fs_extents.push(rimio::extent::IoExtent {
+                    logical_offset,
+                    source_offset,
+                    len: extent_len,
+                });
+                logical_offset += extent_len;
+            }
+        }
+
+        Ok(fs_extents)
+    }
 }
 
-impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, inode, _) = self.resolve_entry_info(path)?;
         crate::ensure!(is_dir, FsResolverError::Invalid("Not a directory"));
@@ -524,18 +581,25 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExtResolver<'a, IO> {
         Ok(entries.into_iter().map(|e| e.name).collect())
     }
 
-    fn open_file(
-        &mut self,
+    fn open_file<'c>(
+        &'c mut self,
         path: &str,
-    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'c>> {
         let (is_dir, inode, size) = self.resolve_entry_info(path)?;
         crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
         if size == 0 {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
 
-        let data = self.read_file_content(inode)?;
-        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+        let inode_buf = self.read_inode(inode)?;
+        let total_size = size as u64;
+        let extents = self.inode_extents(&inode_buf, total_size)?;
+
+        Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
+            &mut *self.io,
+            extents,
+            total_size,
+        )))
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
@@ -639,7 +703,7 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for ExtResolver<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     /// Parse file attributes from inode buffer
     fn parse_attributes(&self, inode_buf: &[u8], is_dir: bool) -> FileAttributes {
         let i_mode = inode_buf
@@ -726,7 +790,6 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
         attr.uid = Some(uid);
         attr.gid = Some(gid);
 
-        // Try to convert timestamps
         if let Ok(atime) = time::OffsetDateTime::from_unix_timestamp(i_atime as i64) {
             attr.accessed = Some(atime);
         }
@@ -744,7 +807,6 @@ impl<'a, IO: RimIO + ?Sized> ExtResolver<'a, IO> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rimio::prelude::*;
     use zerocopy::IntoBytes;
 
     #[test]
@@ -867,7 +929,7 @@ mod tests {
 
         // Write inode into group 0 inode table (inode 12)
         let layout = GroupLayout::compute(&meta, 0);
-        let inode_offset = (layout.inode_table_block as u64 * 4096) + (11 * 256);
+        let inode_offset = (layout.inode_table_block * 4096) + (11 * 256);
         io.write_at(inode_offset, &inode).unwrap();
 
         let mut resolver = ExtResolver::new(&mut io, &meta);

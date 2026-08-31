@@ -13,6 +13,7 @@ use alloc::{
 use crate::meta::TarMeta;
 use crate::types::*;
 use rimfs_core::errors::{FsResolverError, FsResolverResult};
+use rimfs_core::normalize_fs_path;
 use rimfs_core::resolver::{FsTreeResolver, attr::FileAttributes, attr::NodeKind};
 use rimio::RimRead;
 use rimio::prelude::*;
@@ -60,7 +61,7 @@ impl<'a, IO: RimRead + ?Sized> TarResolver<'a, IO> {
         let link_str = core::str::from_utf8(&header[157..157 + link_end]).unwrap_or("");
 
         let data_offset = offset + TAR_BLOCK_SIZE as u64;
-        let entry_name = name_str.trim_start_matches('/');
+        let entry_name = normalize_fs_path(name_str);
 
         Ok(Some(TarEntry {
             name: entry_name.to_string(),
@@ -78,11 +79,11 @@ impl<'a, IO: RimRead + ?Sized> TarResolver<'a, IO> {
 
     /// Resolves an entry by searching TAR headers sequentially.
     pub fn resolve_entry(&mut self, path: &str) -> FsResolverResult<(TarEntry<'static>, u64)> {
-        let norm_path = path.trim_matches('/');
+        let norm_path = normalize_fs_path(path);
         let mut offset = 0u64;
 
         while let Some(entry) = self.read_header_at(offset)? {
-            let entry_name = entry.name.trim_matches('/');
+            let entry_name = normalize_fs_path(&entry.name);
             if entry_name == norm_path {
                 return Ok((entry, offset));
             }
@@ -95,14 +96,14 @@ impl<'a, IO: RimRead + ?Sized> TarResolver<'a, IO> {
     }
 }
 
-impl<'a, 'b, IO: RimRead + ?Sized> FsTreeResolver<'b> for TarResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FsTreeResolver for TarResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
-        let norm_path = path.trim_matches('/');
+        let norm_path = normalize_fs_path(path);
         let mut entries = Vec::new();
         let mut offset = 0u64;
 
         while let Some(entry) = self.read_header_at(offset)? {
-            let entry_name = entry.name.trim_matches('/');
+            let entry_name = normalize_fs_path(&entry.name);
             let (matches, remainder) = if norm_path.is_empty() {
                 (true, entry_name)
             } else if let Some(stripped) = entry_name.strip_prefix(norm_path) {
@@ -130,15 +131,17 @@ impl<'a, 'b, IO: RimRead + ?Sized> FsTreeResolver<'b> for TarResolver<'a, IO> {
         Ok(entries)
     }
 
-    fn open_file(&mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'b>> {
+    fn open_file<'c>(&'c mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'c>> {
         let (entry, _) = self.resolve_entry(path)?;
         crate::ensure!(
             !entry.is_dir(),
             FsResolverError::Invalid("Path is a directory")
         );
-        let mut data = alloc::vec![0u8; entry.size as usize];
-        self.io.read_at(entry.data_offset, &mut data)?;
-        Ok(Box::new(VecRimIO::new(data)))
+        Ok(Box::new(ExtentRimRead::from_contiguous(
+            &mut *self.io,
+            entry.data_offset,
+            entry.size,
+        )))
     }
 
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
@@ -151,7 +154,7 @@ impl<'a, 'b, IO: RimRead + ?Sized> FsTreeResolver<'b> for TarResolver<'a, IO> {
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
-        let norm_path = path.trim_matches('/');
+        let norm_path = normalize_fs_path(path);
         if norm_path.is_empty() {
             return Ok(FileAttributes::new_dir());
         }

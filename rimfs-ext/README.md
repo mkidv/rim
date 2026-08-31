@@ -34,3 +34,6 @@ let meta = ExtMeta::new(disk.len(), Some("ROOTFS"));
 ExtFormatter::new(&mut disk, &meta).format()?;
 ```
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

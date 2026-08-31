@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 use rimio::prelude::*;
-use std::fs::File;
-use std::path::Path;
+
+use crate::errors::{RimImgError, RimImgResult};
 
 /// Supported disk image and container formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -20,30 +20,29 @@ pub enum ImageFormat {
 }
 
 impl ImageFormat {
-    /// Detect format from file path extension.
-    pub fn from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let ext = path
-            .as_ref()
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        Self::from_extension(&ext)
-    }
-
     /// Detect format from file extension string.
-    pub fn from_extension(ext: &str) -> anyhow::Result<Self> {
-        let clean = ext.trim_start_matches('.').to_ascii_lowercase();
-        match clean.as_str() {
-            "img" | "raw" => Ok(ImageFormat::Raw),
-            "vhd" => Ok(ImageFormat::Vhd),
-            "vmdk" => Ok(ImageFormat::Vmdk),
-            "qcow2" => Ok(ImageFormat::Qcow2),
-            "vdi" => Ok(ImageFormat::Vdi),
-            "" => Ok(ImageFormat::Raw), // Default to RAW if no extension
-            _ => anyhow::bail!("Unknown image format extension: .{}", ext),
+    pub fn from_extension(ext: &str) -> RimImgResult<Self> {
+        let clean = ext.trim_start_matches('.');
+        if clean.is_empty() {
+            return Ok(ImageFormat::Raw);
         }
+        if clean.eq_ignore_ascii_case("img") || clean.eq_ignore_ascii_case("raw") {
+            return Ok(ImageFormat::Raw);
+        }
+        if clean.eq_ignore_ascii_case("vhd") {
+            return Ok(ImageFormat::Vhd);
+        }
+        if clean.eq_ignore_ascii_case("vmdk") {
+            return Ok(ImageFormat::Vmdk);
+        }
+        if clean.eq_ignore_ascii_case("qcow2") {
+            return Ok(ImageFormat::Qcow2);
+        }
+        if clean.eq_ignore_ascii_case("vdi") {
+            return Ok(ImageFormat::Vdi);
+        }
+
+        Err(RimImgError::UnknownFormat)
     }
 
     /// Default file extension for this format.
@@ -57,14 +56,8 @@ impl ImageFormat {
         }
     }
 
-    /// Detect format from a `std::fs::File` by checking size and magic bytes.
-    pub fn from_file(file: &mut File) -> anyhow::Result<Self> {
-        let mut io = StdRimIO::new(file);
-        Self::from_io(&mut io)
-    }
-
     /// Detect format by inspecting magic signatures from a `RimIO` stream.
-    pub fn from_io(io: &mut dyn RimIO) -> anyhow::Result<Self> {
+    pub fn from_io(io: &mut dyn RimIO) -> RimImgResult<Self> {
         let total_size = io.total_size().unwrap_or(0);
 
         // 1. Check QCOW2 magic at offset 0 (0x514649fb)

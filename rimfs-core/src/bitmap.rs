@@ -408,39 +408,13 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
             self.ensure_loaded(io, byte_offset)?;
 
             let local_bit_start = (current_search % 8) + (byte_offset - self.window_start) * 8;
-            // The max we can search in this window
             let window_total_bits = self.valid_len as u64 * 8;
             let _window_limit_bits = window_total_bits.min(total_bits - (self.window_start * 8));
 
-            // Try to find a zero
+            // This search only returns runs fully contained in the current window.
             if let Some(local_found) = self.buffer[..self.valid_len]
                 .find_next_zero_range(local_bit_start as usize, count as usize)
             {
-                // Verify if the range fits entirely in the valid part of buffer?
-                // `find_next_zero_range` on slice returns result bounded by slice len.
-                // We need to check if the found range + count <= slice len.
-                // But wait, if the range crosses the window boundary, `find_next_zero_range` on slice will FAIL
-                // or return partial match? `BitmapOps::find_next_zero_range` checks `current_start + len <= limit`.
-                // So it only finds ranges FULLY inside the slice.
-
-                // If the range crosses the buffer boundary, we need more logic.
-                // Simple approach: standard loop across windows.
-                // Complex approach: partial match.
-
-                // Let's use the provided `find_next_zero_range` which requires contiguous zeros IN THE SLICE.
-                // If our window breaks a run of zeros, we might miss it.
-                // However, our window is 4KB (32k bits). It's likely fine for small allocations.
-                // For large allocations crossing 4KB boundaries, this simple view might fail to find them.
-
-                // FIX: If we need strictly contiguous run crossing window, we need custom logic.
-                // For ExFAT (cluster allocation), usually we want contiguous but fragments are fine.
-                // `ExFatAllocator` returns a RunList.
-                // But `find_next_zero_range` specifically asks for contiguous.
-
-                // Let's rely on the buffer size being reasonably large.
-                // If we really need cross-boundary runs, we'd manually iterate 0s.
-                // For now, only return if it fits.
-
                 let found_abs = self.window_start * 8 + local_found as u64;
                 return Ok(Some(found_abs));
             }
@@ -550,29 +524,9 @@ mod tests {
         bitmap[0] = 0b11111111;
         bitmap[1] = 0b11111110;
 
-        // First byte is full, first zero is bit 8
         assert_eq!(bitmap.find_first_zero(0), Some(8));
 
-        // Start from bit 9, should find bit 9? No bit 8 is the last bit of byte 1 is 0?
-        // 0b11111110 means bit 7 is 0? No:
-        // 0b11111110:
-        // Bit 0: 0
-        // But wait, little endian bits?
-        // "Bit 0 is the LSB".
-        // 0b11111110 has LSB 0.
-        // So bit 0 would be 0.
-        // My tests in original code:
-        // bitmap.find_first_zero(0) -> Some(8)?
-        // Wait, review original tests.
-        // Original: `let bitmap = [0b11111111u8, 0b11111110, 0b00000000];`
-        // `assert_eq!(bitmap.find_first_zero(0), Some(8));`
-        // Byte 1 (index 1) is 0b11111110.
-        // LSB is 0. So bit 0 of byte 1 (absolute bit 8) is 0.
-        // Correct.
-
         let bitmap2 = [0b11111111u8, 0b11111101, 0b00000000];
-        // Byte 1: 11111101. LSB=1, bit 1=0.
-        // Absolute bit 9.
         assert_eq!(bitmap2.find_first_zero(0), Some(9));
 
         // All ones

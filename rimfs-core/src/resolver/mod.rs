@@ -39,7 +39,7 @@ pub trait FsResolver<Handle: FsHandle> {
 /// High-level resolver for filesystem trees (files and directories).
 ///
 /// Symmetric counterpart to `FsTreeInjector`.
-pub trait FsTreeResolver<'a> {
+pub trait FsTreeResolver {
     /// Returns the attributes of the entry at the given path.
     ///
     /// The path may refer to a file, directory, or symlink.
@@ -51,7 +51,7 @@ pub trait FsTreeResolver<'a> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>>;
 
     /// Opens a file at the given path for streaming read without heap buffer allocation.
-    fn open_file(&mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'a>>;
+    fn open_file<'b>(&'b mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'b>>;
 
     /// Returns the full content of the file at the given path.
     ///
@@ -81,7 +81,11 @@ pub trait FsTreeResolver<'a> {
     ///
     /// If `path` ends with `/*`, a `FsNode::Container` is created with all children.
     /// If `recurse` is true, subdirectories are traversed recursively.
-    fn resolve_node(&mut self, path: &str, recurse: bool) -> FsResolverResult<FsNode<'a>> {
+    fn resolve_node<'node>(
+        &mut self,
+        path: &str,
+        recurse: bool,
+    ) -> FsResolverResult<FsNode<'node>> {
         if is_wildcard(path) {
             let base_path = strip_wildcard(path);
             let mut children = vec![];
@@ -123,10 +127,10 @@ pub trait FsTreeResolver<'a> {
                     })
                 }
                 _ => {
-                    let source = self.open_file(path)?;
+                    let bytes = self.read_file(path)?;
                     Ok(FsNode::File {
                         name: extract_name_from_path(path).to_string(),
-                        source,
+                        source: Box::new(rimio::prelude::VecRimIO::new(bytes)),
                         attr,
                     })
                 }
@@ -136,13 +140,13 @@ pub trait FsTreeResolver<'a> {
 
     /// Resolves an entire directory tree starting from `path`.
     #[inline]
-    fn resolve_tree(&mut self, path: &str) -> FsResolverResult<FsNode<'a>> {
+    fn resolve_tree<'node>(&mut self, path: &str) -> FsResolverResult<FsNode<'node>> {
         self.resolve_node(path, true)
     }
 
     /// Resolves a single path (file or directory) without recursing into subdirectories.
     #[inline]
-    fn resolve_entry(&mut self, path: &str) -> FsResolverResult<FsNode<'a>> {
+    fn resolve_entry<'node>(&mut self, path: &str) -> FsResolverResult<FsNode<'node>> {
         self.resolve_node(path, false)
     }
 

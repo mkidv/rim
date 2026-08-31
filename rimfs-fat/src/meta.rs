@@ -1,5 +1,5 @@
 use alloc::string::{String, ToString};
-use rimio::{RimIO, RimIOStructExt};
+use rimio::prelude::*;
 
 use crate::core::errors::{FsError, FsResult};
 use crate::core::fat::FatFsMeta;
@@ -162,7 +162,7 @@ impl FatMeta {
         )
     }
 
-    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO) -> FsResult<Self> {
+    pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let vbr: FatVbr = io.read_struct(0)?;
 
         let bytes_per_sector = vbr.bpb.bytes_per_sector;

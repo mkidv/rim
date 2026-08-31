@@ -77,3 +77,6 @@ println!("{}", monitored_disk.stats);
 *   **`mem`**: Enables in-memory backends.
 *   **`uefi`**: Enables UEFI firmware protocol integrations.
 
+## Release Notes
+
+Release notes are tracked in the workspace [CHANGELOG](https://github.com/mkidv/rim/blob/main/CHANGELOG.md).

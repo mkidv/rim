@@ -20,6 +20,9 @@ pub mod injector;
 pub mod meta;
 #[cfg(feature = "alloc")]
 pub mod resolver;
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub mod testing;
 pub mod utils;
 pub mod validate;
 

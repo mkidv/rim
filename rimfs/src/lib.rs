@@ -29,3 +29,9 @@ pub use rimfs_ntfs as ntfs;
 
 #[cfg(feature = "tar")]
 pub use rimfs_tar as tar;
+
+#[cfg(feature = "zip")]
+pub use rimfs_zip as zip;
+
+#[cfg(feature = "iso")]
+pub use rimfs_iso as iso;

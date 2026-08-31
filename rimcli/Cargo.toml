@@ -22,11 +22,10 @@ indicatif = "0.18.3"
 rimfs = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
 rimgen = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
 rimhost.workspace = true
-rimimg.workspace = true
+rimimg = { workspace = true, features = ["std"] }
 rimio = { workspace = true, features = ["std"] }
 rimpart = { workspace = true, features = ["std"] }
 tempfile = "3.20.0"
 
 [lints]
 workspace = true
-

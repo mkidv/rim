@@ -7,32 +7,41 @@ extern crate alloc;
 pub use rimfs_core as core;
 pub use rimfs_core::{bail, ensure};
 
-pub mod allocator;
-pub mod attr;
-pub mod attrdef;
-pub mod bitmap;
-pub mod builder;
-pub mod checker;
-pub mod constant;
-pub mod filesystem;
-pub mod flags;
-pub mod formatter;
-pub mod injector;
-pub mod meta;
-pub mod mft;
-pub mod resolver;
-pub mod system;
-pub mod tests;
+mod allocator;
+#[allow(dead_code)]
+mod attr;
+#[allow(dead_code)]
+pub(crate) mod attrdef;
+#[allow(dead_code)]
+pub(crate) mod bitmap;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod builder;
+mod checker;
+#[allow(dead_code)]
+pub(crate) mod constant;
+mod filesystem;
+mod flags;
+mod formatter;
+mod injector;
+mod meta;
+mod mft;
+mod resolver;
+#[allow(dead_code)]
+pub(crate) mod system;
+#[cfg(test)]
+mod tests;
 pub mod types;
-pub mod utils;
+#[allow(dead_code)]
+pub(crate) mod utils;
 pub mod view;
 
 pub use self::system::upcase;
+pub use utils::apply_usa_fixup;
 
 pub mod traits {
     pub use super::allocator::{NtfsAllocator, NtfsHandle};
     pub use super::attr::NtfsFileAttributesExt;
-    pub use super::checker::NtfsChecker;
+    pub use super::checker::{NtfsChecker, NtfsCheckerOptions};
     pub use super::formatter::NtfsFormatter;
     pub use super::injector::NtfsInjector;
     pub use super::meta::NtfsMeta;

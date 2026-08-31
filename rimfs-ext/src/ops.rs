@@ -10,7 +10,7 @@ use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::{
     allocator::ExtAllocator, group_layout::GroupLayout, meta::ExtMeta, types::ExtLostFound,
 };
-use rimio::{RimIO, RimIOExt};
+use rimio::prelude::*;
 use zerocopy::IntoBytes;
 
 use crate::core::utils::align::pad_to_size;
@@ -69,8 +69,7 @@ pub fn write_inode<IO: RimIO + ?Sized>(
     let table_block = layout.inode_table_block;
 
     let inode_size = meta.inode_size as u64;
-    let offset =
-        (table_block as u64 * meta.block_size as u64) + (index_in_group as u64 * inode_size);
+    let offset = (table_block * meta.block_size as u64) + (index_in_group as u64 * inode_size);
 
     let write_len = (meta.inode_size as usize).min(data.len());
     io.write_at(offset, &data[..write_len])?;
@@ -93,7 +92,7 @@ pub fn create_lost_found<IO: RimIO + ?Sized>(
 
     // 2. Write directory content
     let dir_buf = ExtLostFound::create_dir_block(meta.block_size as usize);
-    let offset = allocator.blocks.block_offset(block);
+    let offset = allocator.blocks.block_offset(block as u64);
     io.write_block_best_effort(offset, &dir_buf, meta.block_size as usize)?;
 
     // 3. Write Inode (Inode 11)

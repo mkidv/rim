@@ -37,11 +37,15 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for RootDirFeature {
         self.inode_size = meta.inode_size;
 
         let layout = GroupLayout::compute(meta, 0);
-        self.root_block = layout.first_data_block;
+        self.root_block = u32::try_from(layout.first_data_block).map_err(|_| {
+            crate::core::errors::FsFeatureError::InvalidConfiguration(
+                "EXT root block exceeds extent address range",
+            )
+        })?;
         self.block_offset = self.root_block as u64 * meta.block_size as u64;
 
         let inode_table_block = layout.inode_table_block;
-        let inode_table_offset = inode_table_block as u64 * meta.block_size as u64;
+        let inode_table_offset = inode_table_block * meta.block_size as u64;
         self.inode_offset =
             inode_table_offset + (EXT_ROOT_INODE as u64 - 1) * meta.inode_size as u64;
 

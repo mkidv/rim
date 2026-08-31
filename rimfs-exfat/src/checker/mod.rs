@@ -14,7 +14,7 @@ use crate::{constant::*, meta::*, types::*};
 mod walker;
 
 #[derive(Clone, Debug)]
-pub struct ExFatCheckOptions {
+pub struct ExFatCheckerOptions {
     pub phases: VerifyPhases,
     pub fail_fast: bool,
     /// FAT sampling (0 = off)
@@ -23,7 +23,7 @@ pub struct ExFatCheckOptions {
     pub deep_fat_walk: bool,
 }
 
-impl Default for ExFatCheckOptions {
+impl Default for ExFatCheckerOptions {
     fn default() -> Self {
         Self {
             phases: VerifyPhases::ALL,
@@ -33,7 +33,7 @@ impl Default for ExFatCheckOptions {
         }
     }
 }
-impl VerifierOptionsLike for ExFatCheckOptions {
+impl VerifierOptionsLike for ExFatCheckerOptions {
     fn phases(&self) -> VerifyPhases {
         self.phases.clone()
     }
@@ -54,7 +54,7 @@ impl<'a, IO: RimIO + ?Sized> ExFatChecker<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
-    type Options = ExFatCheckOptions;
+    type Options = ExFatCheckerOptions;
 
     fn check_boot(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
         let bps = self.meta.bytes_per_sector as usize;
@@ -182,7 +182,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
 
     fn fast_check(&mut self) -> FsCheckerResult {
         // Quick policy: key phases, deep FAT walk enabled, no sampling
-        let opt = ExFatCheckOptions {
+        let opt = ExFatCheckerOptions {
             phases: VerifyPhases::BOOT
                 | VerifyPhases::GEOMETRY
                 | VerifyPhases::CHAIN
@@ -814,6 +814,9 @@ fn check_file_entry_set(raw: &[u8]) -> (bool, usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::formatter::FsFormatter;
+    use crate::formatter::ExFatFormatter;
+    use rimfs_core::testing::assert_has_error;
     use rimio::prelude::MemRimIO;
 
     #[test]
@@ -849,5 +852,27 @@ mod tests {
             !unallocated,
             "Cluster with 0 bit in 2nd bitmap cluster should be reported as unallocated"
         );
+    }
+
+    #[test]
+    fn test_exfat_vbr_checksum_corruption_detection() {
+        let meta = ExFatMeta::new(32 * 1024 * 1024, Some("EXFAT_BAD")).unwrap();
+        let mut disk = vec![0u8; meta.volume_size_bytes as usize];
+        let mut io = MemRimIO::new(&mut disk);
+
+        ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let checksum_sector_offset = 11 * meta.bytes_per_sector as u64;
+        let mut byte = [0u8; 1];
+        io.read_at(checksum_sector_offset, &mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        io.write_at(checksum_sector_offset, &byte).unwrap();
+
+        let mut checker = ExFatChecker::new(&mut io, &meta);
+        let mut report = VerifyReport::default();
+        checker
+            .check_boot(&ExFatCheckerOptions::default(), &mut report)
+            .unwrap();
+        assert_has_error(&report, "VBR.CHK");
     }
 }

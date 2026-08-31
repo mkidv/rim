@@ -15,11 +15,12 @@ default = ["std"]
 alloc = ["rimio/alloc"]
 mem = ["alloc"]
 std = ["alloc", "rimio/std", "crc32fast/std", "time/std"]
+test-utils = ["alloc"]
 
 [dependencies]
 bitflags = "2.9.1"
 crc32fast = { version = "1.4.2", default-features = false }
-rimio = { path = "../rimio", version = "0.7.0", default-features = false }
+rimio = { path = "../rimio", version = "0.8.0", default-features = false }
 time = { version = "0.3.41", default-features = false }
 
 [package.metadata.docs.rs]
@@ -27,4 +28,3 @@ features = ["std"]
 
 [lints]
 workspace = true
-

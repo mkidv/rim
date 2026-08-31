@@ -5,13 +5,15 @@
 //! Implements VDI Fixed format (version 1.1) with pre-header, header, block map,
 //! and 1MB data blocks.
 
-use std::fs::File;
-use std::path::Path;
-
-use anyhow::Context;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 use rimio::prelude::*;
 use zerocopy::byteorder::{LittleEndian, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::errors::{RimImgError, RimImgResult};
+#[cfg(feature = "alloc")]
+use crate::options::ImageOptions;
 
 pub const VDI_SIGNATURE: u32 = 0xbeda107f;
 pub const VDI_VERSION: u32 = 0x00010001;
@@ -87,92 +89,96 @@ impl VdiHeader {
     }
 }
 
-/// Wrap a raw .img file as VDI (fixed) with progress callback.
-pub fn wrap_raw_as_vdi_with_progress<P1: AsRef<Path>, P2: AsRef<Path>, F: FnMut(u64, u64)>(
-    img_path: P1,
-    vdi_path: P2,
+#[cfg(feature = "alloc")]
+pub fn wrap_raw_as_vdi_io_with_progress<F: FnMut(u64, u64)>(
+    src: &mut dyn RimRead,
+    dst: &mut dyn RimIO,
+    img_len: u64,
+    options: ImageOptions,
     on_progress: F,
-) -> anyhow::Result<()> {
-    let mut img_file = File::open(img_path.as_ref())
-        .with_context(|| format!("Failed to open input image {}", img_path.as_ref().display()))?;
-    let img_len = img_file.metadata()?.len();
+) -> RimImgResult {
+    init_vdi_io(dst, img_len, options)?;
+    dst.copy_from_with_progress(src, 0, DATA_OFFSET, img_len, on_progress)?;
+    dst.flush()?;
 
-    let mut img_io = StdRimIO::new(&mut img_file);
+    Ok(())
+}
 
-    let num_blocks = img_len.div_ceil(BLOCK_SIZE as u64) as u32;
-
-    let mut vdi_file = File::create(vdi_path.as_ref())
-        .with_context(|| format!("Failed to create VDI file {}", vdi_path.as_ref().display()))?;
-    let mut vdi_io = StdRimIO::new(&mut vdi_file);
+#[cfg(feature = "alloc")]
+pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> RimImgResult {
+    let num_blocks = u32::try_from(img_len.div_ceil(BLOCK_SIZE as u64))
+        .map_err(|_| RimImgError::SizeOverflow)?;
 
     let mut pre_header = VdiPreHeader {
         file_info: [0u8; 64],
     };
     let info_text = b"<<< Oracle VM VirtualBox Disk Image >>>\n";
     pre_header.file_info[..info_text.len()].copy_from_slice(info_text);
-    vdi_io.write_struct(0, &pre_header)?;
+    dst.write_struct(0, &pre_header)?;
 
-    let uuid = uuid::Uuid::new_v4();
-    let header = VdiHeader::new_fixed(img_len, *uuid.as_bytes());
-    vdi_io.write_struct(64, &header)?;
+    let header = VdiHeader::new_fixed(img_len, options.unique_id);
+    dst.write_struct(64, &header)?;
 
     let header_total = 64 + 400;
-    vdi_io.zero_fill(header_total, (512 - header_total) as usize)?;
+    dst.zero_fill(header_total, 512 - header_total as usize)?;
 
-    let block_map_size = (num_blocks * 4) as usize;
+    let block_map_size = usize::try_from(num_blocks).map_err(|_| RimImgError::SizeOverflow)? * 4;
     let mut block_map = Vec::with_capacity(block_map_size);
     for i in 0..num_blocks {
         block_map.extend_from_slice(&i.to_le_bytes());
     }
-    vdi_io.write_at(512, &block_map)?;
+    dst.write_at(512, &block_map)?;
 
     let current_pos = 512 + block_map_size as u64;
     if current_pos < DATA_OFFSET {
-        vdi_io.zero_fill(current_pos, (DATA_OFFSET - current_pos) as usize)?;
+        let pad_size =
+            usize::try_from(DATA_OFFSET - current_pos).map_err(|_| RimImgError::SizeOverflow)?;
+        dst.zero_fill(current_pos, pad_size)?;
     }
-
-    vdi_io.copy_from_with_progress(&mut img_io, 0, DATA_OFFSET, img_len, on_progress)?;
-    vdi_io.flush()?;
 
     Ok(())
 }
 
-pub fn wrap_raw_as_vdi_to<P1: AsRef<Path>, P2: AsRef<Path>>(
-    img_path: P1,
-    vdi_path: P2,
-) -> anyhow::Result<()> {
-    wrap_raw_as_vdi_with_progress(img_path, vdi_path, |_, _| {})
+#[cfg(feature = "alloc")]
+pub fn wrap_raw_as_vdi_io(
+    src: &mut dyn RimRead,
+    dst: &mut dyn RimIO,
+    img_len: u64,
+    options: ImageOptions,
+) -> RimImgResult {
+    wrap_raw_as_vdi_io_with_progress(src, dst, img_len, options, |_, _| {})
 }
 
-/// Strip VDI header and restore raw .img with progress callback.
-pub fn unwrap_vdi_with_progress<P1: AsRef<Path>, P2: AsRef<Path>, F: FnMut(u64, u64)>(
-    vdi_path: P1,
-    img_path: P2,
+pub fn unwrap_vdi_io_with_progress<F: FnMut(u64, u64)>(
+    src: &mut dyn RimIO,
+    dst: &mut dyn RimWrite,
     on_progress: F,
-) -> anyhow::Result<()> {
-    let mut vdi_file = File::open(vdi_path.as_ref())
-        .with_context(|| format!("Failed to open VDI file {}", vdi_path.as_ref().display()))?;
-    let mut vdi_io = StdRimIO::new(&mut vdi_file);
+) -> RimImgResult {
+    let header: VdiHeader = src.read_struct(64)?;
+    validate_vdi_header(&header)?;
 
-    let header: VdiHeader = vdi_io
-        .read_struct(64)
-        .context("Failed to read VDI header")?;
     let disk_size = header.disk_size.get();
     let data_offset = header.offset_data.get() as u64;
 
-    let mut img_file = File::create(img_path.as_ref())
-        .with_context(|| format!("Failed to create raw image {}", img_path.as_ref().display()))?;
-    let mut img_io = StdRimIO::new(&mut img_file);
-
-    img_io.copy_from_with_progress(&mut vdi_io, data_offset, 0, disk_size, on_progress)?;
-    img_io.flush()?;
+    dst.copy_from_with_progress(src, data_offset, 0, disk_size, on_progress)?;
+    dst.flush()?;
 
     Ok(())
 }
 
-pub fn unwrap_vdi_to_raw<P1: AsRef<Path>, P2: AsRef<Path>>(
-    vdi_path: P1,
-    img_path: P2,
-) -> anyhow::Result<()> {
-    unwrap_vdi_with_progress(vdi_path, img_path, |_, _| {})
+pub fn unwrap_vdi_io(src: &mut dyn RimIO, dst: &mut dyn RimWrite) -> RimImgResult {
+    unwrap_vdi_io_with_progress(src, dst, |_, _| {})
+}
+
+pub fn validate_vdi_header(header: &VdiHeader) -> RimImgResult {
+    if header.signature.get() != VDI_SIGNATURE {
+        return Err(RimImgError::InvalidHeader("Invalid VDI signature"));
+    }
+    if header.version.get() != VDI_VERSION {
+        return Err(RimImgError::UnsupportedFormat);
+    }
+    if header.image_type.get() != VDI_TYPE_FIXED {
+        return Err(RimImgError::UnsupportedFormat);
+    }
+    Ok(())
 }

@@ -6,8 +6,7 @@ pub mod record;
 pub mod serializer;
 pub mod system_files;
 
-pub use record::*;
-pub use serializer::*;
+pub(crate) use record::*;
+pub(crate) use serializer::*;
 
-// Re-export logical types involved in building
-pub use crate::types::index::{NtfsIndexEntry, NtfsIndexRecord};
+pub(crate) use crate::types::index::NtfsIndexEntry;

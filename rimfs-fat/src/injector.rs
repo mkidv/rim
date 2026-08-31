@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{vec, vec::Vec};
 
-use rimio::{RimIO, RimIOExt, RimRead};
+use rimio::prelude::*;
 
 use crate::core::utils::stream_copy::write_stream_to_run_list;
 use crate::core::{injector::*, resolver::*};
@@ -281,24 +281,14 @@ mod tests {
     use crate::core::injector::FsTreeInjector;
     use crate::prelude::*;
     use crate::resolver::FatResolver;
+    use rimfs_core::testing::{assert_structural_tree_eq, nested_files_tree};
 
     fn test_injector_scenario(meta: FatMeta, name: &str) {
-        println!("--- Running Scenario: {name} ---");
         let mut buf = vec![0u8; meta.volume_size_bytes as usize];
         let mut io = MemRimIO::new(&mut buf);
         let mut injector = FatInjector::new(&mut io, &meta).unwrap();
 
-        let mut tree = FsNode::Container {
-            attr: FileAttributes::new_dir(),
-            children: vec![
-                FsNode::Dir {
-                    name: "subdir".to_string(),
-                    attr: FileAttributes::new_dir(),
-                    children: vec![FsNode::new_file("hello.txt", b"Hello World!".to_vec())],
-                },
-                FsNode::new_file("readme.md", b"Test Readme".to_vec()),
-            ],
-        };
+        let mut tree = nested_files_tree();
 
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
@@ -306,14 +296,7 @@ mod tests {
         let mut parser_back = FatResolver::new(&mut io, &meta);
         let mut parsed_tree = parser_back.resolve_tree("/*").expect("resolve_tree failed");
 
-        tree.sort_children_recursively();
-        parsed_tree.sort_children_recursively();
-
-        if !tree.structural_eq(&parsed_tree) {
-            println!("Expected:\n{tree}");
-            println!("Actual:\n{parsed_tree}");
-            panic!("Tree structure mismatch for {name}");
-        }
+        assert_structural_tree_eq(&mut tree, &mut parsed_tree, name);
     }
 
     #[test]

@@ -213,20 +213,8 @@ pub fn decode_data_runs(mut runs: &[u8]) -> Vec<DataRun> {
 
         current_lcn += offset;
 
-        // Sparse runs have offset 0 (actually no, offset exists but LCN might be unused?)
-        // Sparse run has offset size 0.
         if offset_size == 0 {
-            // Sparse: valid length but no LCN. mapped to 0? or specific sparse handling?
-            // For now treat as LCN 0 or skip?
-            // If offset is 0-sized, offset is 0.
-            // In NTFS, sparse block is encoded with offset_size=0. LCN is usually treated as 0 or valid?
-            // Actually sparse means VCNs are mapped to nothing (LCN 0 or special).
-            // Let's assume (0, length) for now?
-            // But current_lcn doesn't change.
-            // Wait, if offset size 0, offset=0. current_lcn not changed?
-            // Sparse runs don't change LCN? Or do they?
-            // Usually sparse runs have specific LCN=0 marker or are implicit.
-            // If offset size is 0, it is a sparse run. LCN is VCN-only.
+            // Sparse run: VCNs are not backed by physical clusters.
         }
 
         result.push(DataRun {

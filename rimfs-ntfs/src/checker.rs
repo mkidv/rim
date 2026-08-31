@@ -12,14 +12,13 @@ use crate::meta::NtfsMeta;
 use crate::mft;
 use crate::types::NtfsBootSector;
 
-/// NTFS verifier options
 #[derive(Debug, Clone)]
-pub struct NtfsVerifierOptions {
+pub struct NtfsCheckerOptions {
     phases: VerifyPhases,
     fail_fast: bool,
 }
 
-impl Default for NtfsVerifierOptions {
+impl Default for NtfsCheckerOptions {
     fn default() -> Self {
         Self {
             phases: VerifyPhases::ALL,
@@ -28,7 +27,7 @@ impl Default for NtfsVerifierOptions {
     }
 }
 
-impl VerifierOptionsLike for NtfsVerifierOptions {
+impl VerifierOptionsLike for NtfsCheckerOptions {
     fn phases(&self) -> VerifyPhases {
         self.phases.clone()
     }
@@ -519,7 +518,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
-    type Options = NtfsVerifierOptions;
+    type Options = NtfsCheckerOptions;
 
     fn check_boot(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
         let mut boot_buf = [0u8; 512];
@@ -994,6 +993,7 @@ mod tests {
     use crate::upcase::UpcaseFlavor;
     use rimfs_core::checker::Severity;
     use rimfs_core::injector::FsTreeInjector;
+    use rimfs_core::testing::assert_no_errors;
     use rimio::prelude::*;
 
     #[test]
@@ -1006,11 +1006,7 @@ mod tests {
 
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let report = checker.check_all().unwrap();
-        assert!(
-            !report.has_error(),
-            "Checker report had errors: {:?}",
-            report.findings
-        );
+        assert_no_errors(&report);
         assert!(report.findings.iter().any(|f| f.code == "BOOT.OEM"));
         assert!(report.findings.iter().any(|f| f.code == "GEOM.MFT"));
         assert!(
@@ -1133,14 +1129,9 @@ mod tests {
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
-        // Run checker
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let report = checker.check_all().unwrap();
-        assert!(
-            !report.has_error(),
-            "Checker report had errors: {:?}",
-            report.findings
-        );
+        assert_no_errors(&report);
 
         // Verify that diagnostics reflect tree validation
         assert!(report.findings.iter().any(|f| f.code == "IDX.ROOT"));
@@ -1236,14 +1227,9 @@ mod tests {
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
-        // Run checker
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let report = checker.check_all().unwrap();
-        assert!(
-            !report.has_error(),
-            "Checker report had errors: {:?}",
-            report.findings
-        );
+        assert_no_errors(&report);
 
         // Verify INDX record header VCNs are 0, 1, 2...
         let mut resolver = crate::resolver::NtfsResolver::new(&mut io, &meta);
@@ -1306,10 +1292,9 @@ mod tests {
         injector.inject_tree(&mut tree).unwrap();
         injector.flush().unwrap();
 
-        // 1. First confirm checker passes on uncorrupted image
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let rep = checker.check_all().unwrap();
-        assert!(!rep.has_error());
+        assert_no_errors(&rep);
 
         // 2. Corrupt a child VCN in $INDEX_ROOT on disk:
         let root_offset = meta.lcn_to_offset(meta.mft_lcn) + 5 * meta.mft_record_size as u64;
@@ -1397,10 +1382,9 @@ mod tests {
 
         NtfsFormatter::new(&mut io, &meta).format(true).unwrap();
 
-        // 1. Uncorrupted check must pass
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let rep = checker.check_all().unwrap();
-        assert!(!rep.has_error(), "Findings had error: {:?}", rep.findings);
+        assert_no_errors(&rep);
         assert!(rep.findings.iter().any(|f| f.code == "BOOT.PRIMARY"));
         assert!(rep.findings.iter().any(|f| f.code == "BOOT.BACKUP"));
         assert!(rep.findings.iter().any(|f| f.code == "BOOT.MIRROR"));
@@ -1525,26 +1509,20 @@ mod tests {
             "$LogFile $DATA must be non-resident"
         );
 
-        // Check Record 6 ($Bitmap)
         let bm_rec = resolver.read_mft_record(MFT_RECORD_BITMAP).unwrap();
-        let bm_view = crate::view::mft_view::MftRecordView::new(&bm_rec).unwrap();
-        let bm_data = bm_view.find(ATTR_DATA).unwrap().unwrap();
-        println!("Record 6 raw length: {}", bm_rec.len());
-        println!("Record 6 DATA attr raw: {:02X?}", bm_data.raw);
+        crate::view::mft_view::MftRecordView::new(&bm_rec)
+            .unwrap()
+            .find(ATTR_DATA)
+            .unwrap()
+            .unwrap();
 
-        // Check Record 5 ($Root) sequence number == 5
         let root_rec = resolver.read_mft_record(MFT_RECORD_ROOT).unwrap();
         let root_view = crate::view::mft_view::MftRecordView::new(&root_rec).unwrap();
         let seq5 = root_view.header().sequence_number;
         assert_eq!(seq5, 5);
 
-        // Run checker
         let mut checker = NtfsChecker::new(&mut io, &meta);
         let rep = checker.check_all().unwrap();
-        assert!(
-            !rep.has_error(),
-            "Checker report on clean volume must have no errors: {:?}",
-            rep.findings
-        );
+        assert_no_errors(&rep);
     }
 }

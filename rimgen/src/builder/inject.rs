@@ -18,10 +18,11 @@ use rimfs::fat::*;
 use rimfs::ntfs::NtfsChecker;
 #[cfg(feature = "ntfs")]
 use rimfs::ntfs::{NtfsFormatter, NtfsInjector, NtfsMeta};
-use rimio::{RimIO, RimIOExt};
+use rimio::{RimIO, RimWriteExt};
 use rimpart::gpt::GptEntry;
 #[cfg(feature = "std")]
 use std::time::Instant;
+#[cfg(any(feature = "exfat", feature = "ext", feature = "ntfs"))]
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -38,7 +39,7 @@ pub struct PartitionReport {
 }
 
 /// Format and inject files into all partitions described by a layout.
-pub fn format_inject_resolved_all<F: FnMut(BuildEvent)>(
+pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
     io: &mut dyn RimIO,
     layout: &mut Layout<'_>,
     entries: &[GptEntry],
@@ -356,7 +357,7 @@ pub fn format_inject_ntfs(
 }
 
 /// Format + write raw partition payload
-pub fn format_raw<F: FnMut(BuildEvent)>(
+pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
     io: &mut dyn RimIO,
     entry: GptEntry,
     part: &mut Partition<'_>,

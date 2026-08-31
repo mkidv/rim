@@ -31,11 +31,15 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for LostFoundFeature
 
         let layout = GroupLayout::compute(meta, 0);
         // lost+found is at first_data_block + 1 (root is at first_data_block)
-        self.lf_block = layout.first_data_block + 1;
+        self.lf_block = u32::try_from(layout.first_data_block + 1).map_err(|_| {
+            crate::core::errors::FsFeatureError::InvalidConfiguration(
+                "EXT lost+found block exceeds extent address range",
+            )
+        })?;
         self.block_offset = self.lf_block as u64 * meta.block_size as u64;
 
         let inode_table_block = layout.inode_table_block;
-        let inode_table_offset = inode_table_block as u64 * meta.block_size as u64;
+        let inode_table_offset = inode_table_block * meta.block_size as u64;
         self.inode_offset =
             inode_table_offset + (ExtLostFound::INODE as u64 - 1) * meta.inode_size as u64;
 

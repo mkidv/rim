@@ -73,20 +73,14 @@ impl<'a, IO: RimIO + ?Sized> ExtFormatter<'a, IO> {
     }
 }
 
-// Tests have been moved/need update.
-// Previously tests were inline. Since we drastically changed architecture,
-// inline tests in `formatter.rs` relying on internal methods (which are gone) will break.
-// However, the existing tests used `ExtFormatter::new(...).format(...)` which is the public API.
-// So they should arguably still work if I keep them!
-// Let's copy the tests back but ensure they work with new structure.
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checker::ExtChecker;
     use crate::constant::*;
     use crate::group_layout::GroupLayout;
-    // We need MemRimIO which is likely in rimio or tests utils.
-    // rimio::prelude usually exports it.
+    use rimfs_core::checker::{FsChecker, VerifyReport};
+    use rimfs_core::testing::assert_has_error;
 
     const SIZE_MB: u64 = 32;
     const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
@@ -101,32 +95,45 @@ mod tests {
         let mut buf = vec![0u8; SIZE_BYTES as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // Run the orchestrator
         ExtFormatter::new(&mut io, &meta)
             .format(false)
             .expect("EXT format failed");
 
-        // Verify Superblock
         let mut sb = [0u8; 1024];
         io.read_at(EXT_SUPERBLOCK_OFFSET, &mut sb).unwrap();
-        // Magic at 0x38 (56)
         let magic = u16::from_le_bytes(sb[56..58].try_into().unwrap());
         assert_eq!(magic, EXT_SUPERBLOCK_MAGIC, "Superblock magic mismatch");
 
-        // Verify Root Directory Inode (Inode 2)
-        // Group 0 Inode Table
         let layout = GroupLayout::compute(&meta, 0);
-        let inode_table_offset = layout.inode_table_block as u64 * meta.block_size as u64;
+        let inode_table_offset = layout.inode_table_block * meta.block_size as u64;
         let root_inode_offset =
             inode_table_offset + (EXT_ROOT_INODE as u64 - 1) * EXT_DEFAULT_INODE_SIZE as u64;
 
         let mut inode_buf = [0u8; EXT_DEFAULT_INODE_SIZE as usize];
         io.read_at(root_inode_offset, &mut inode_buf).unwrap();
 
-        // Mode is at offset 0, should be directory (0x4000)
         let mode = u16::from_le_bytes(inode_buf[0..2].try_into().unwrap());
         assert_eq!(mode & 0xF000, 0x4000, "Root inode is not a directory");
+    }
 
-        println!("✓ Feature-based formatter integration test passed");
+    #[test]
+    fn test_ext_superblock_corruption_detection() {
+        let meta = make_meta_32mb();
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+
+        ExtFormatter::new(&mut io, &meta)
+            .format(false)
+            .expect("EXT format failed");
+
+        io.write_at(EXT_SUPERBLOCK_OFFSET + 0x38, &[0x00, 0x00])
+            .unwrap();
+
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let mut report = VerifyReport::default();
+        checker
+            .check_boot(&Default::default(), &mut report)
+            .unwrap();
+        assert_has_error(&report, "SB.MAGIC");
     }
 }

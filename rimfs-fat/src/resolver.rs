@@ -4,7 +4,7 @@ use alloc::string::ToString;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
-use rimio::{RimIO, RimIOExt};
+use rimio::{RimRead, RimReadExt};
 
 use crate::core::cursor::ClusterCursor;
 pub use crate::core::resolver::*;
@@ -14,12 +14,12 @@ use crate::core::fat::{FatDriver, FatFsMeta};
 use crate::core::utils::path_utils::*;
 use crate::{attr::*, constant::*, meta::*, types::*};
 
-pub struct FatResolver<'a, IO: RimIO + ?Sized> {
+pub struct FatResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     meta: &'a FatMeta,
 }
 
-impl<'a, IO: RimIO + ?Sized> FatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FatResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a FatMeta) -> Self {
         Self { io, meta }
     }
@@ -34,7 +34,7 @@ impl<'a, IO: RimIO + ?Sized> FatResolver<'a, IO> {
 
 use crate::core::resolver::walker::WalkerDataSource;
 
-impl<'a, IO: RimIO + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
     type Entry = FatEntries;
 
     fn root_cluster(&self) -> u32 {
@@ -58,7 +58,7 @@ impl<'a, IO: RimIO + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
     }
 }
 
-impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for FatResolver<'a, IO> {
+impl<'a, IO: RimRead + ?Sized> FsTreeResolver for FatResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, cluster, _) = self.resolve_entry_info(path)?;
         crate::ensure!(is_dir, FsResolverError::Invalid("Root path is not a dir"));
@@ -71,18 +71,43 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for FatResolver<'a, IO> {
         Ok(entries_string)
     }
 
-    fn open_file(
-        &mut self,
+    fn open_file<'c>(
+        &'c mut self,
         path: &str,
-    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'b>> {
-        let (is_dir, _first_cluster, size) = self.resolve_entry_info(path)?;
+    ) -> FsResolverResult<alloc::boxed::Box<dyn rimio::RimRead + 'c>> {
+        let (is_dir, first_cluster, size) = self.resolve_entry_info(path)?;
         crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
         if size == 0 {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
 
-        let data = self.read_file(path)?;
-        Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(data)))
+        let cs = self.meta.unit_size() as u64;
+        let mut extents = Vec::new();
+        let mut logical_offset = 0u64;
+        let total_size = size as u64;
+
+        let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
+        cur.for_each_run(self.io, |_io, start, len| {
+            if logical_offset >= total_size {
+                return Ok(());
+            }
+            let phys_offset = self.meta.unit_offset(start);
+            let run_bytes = (len as u64) * cs;
+            let extent_len = core::cmp::min(run_bytes, total_size - logical_offset);
+            extents.push(rimio::extent::IoExtent {
+                logical_offset,
+                source_offset: Some(phys_offset),
+                len: extent_len,
+            });
+            logical_offset += extent_len;
+            Ok(())
+        })?;
+
+        Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
+            &mut *self.io,
+            extents,
+            total_size,
+        )))
     }
 
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
@@ -105,7 +130,7 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for FatResolver<'a, IO> {
             let mut consistent = true;
 
             for i in 0..check_count {
-                let next = driver.get(self.io, current)?;
+                let next = driver.get_ro(self.io, current)?;
                 let expected = if i + 1 < (size.div_ceil(cs)) as u32 {
                     current + 1
                 } else {
@@ -181,7 +206,7 @@ impl<'a, 'b, IO: RimIO + ?Sized> FsTreeResolver<'b> for FatResolver<'a, IO> {
     }
 }
 
-fn read_dir_entries<IO: RimIO + ?Sized>(
+fn read_dir_entries<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &FatMeta,
     start_cluster: u32,
@@ -250,7 +275,7 @@ fn read_dir_entries<IO: RimIO + ?Sized>(
 
 /// Search for `target` (case-insensitive if handled by `FatEntries`) in directory `dir_cluster`.
 /// Returns the first matching entry, or `None`.
-pub fn find_in_dir<IO: RimIO + ?Sized>(
+pub fn find_in_dir<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &FatMeta,
     dir_cluster: u32,

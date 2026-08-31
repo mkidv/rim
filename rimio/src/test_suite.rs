@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-use crate::{RimIO, RimIOExt, RimIOSetLen};
+use crate::prelude::*;
 
 pub fn check_basic_rw(io: &mut impl RimIO) {
     let data = [0xAA, 0xBB, 0xCC, 0xDD];

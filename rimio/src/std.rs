@@ -5,7 +5,7 @@ use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 #[cfg(feature = "std")]
 use crate::RimIOSetLen;
-use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
+use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite, checked_add_offset};
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
@@ -36,7 +36,7 @@ impl<'a, T> StdRimIO<'a, T> {
 #[cfg(feature = "std")]
 impl<'a, T: Read + Seek> RimRead for StdRimIO<'a, T> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.io.seek(SeekFrom::Start(abs_offset))?;
         self.io.read_exact(buf)?;
         Ok(())
@@ -53,7 +53,7 @@ impl<'a, T: Read + Seek> RimRead for StdRimIO<'a, T> {
 #[cfg(feature = "std")]
 impl<'a, T: Read + Write + Seek> RimWrite for StdRimIO<'a, T> {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.io.seek(SeekFrom::Start(abs_offset))?;
         self.io.write_all(data)?;
         Ok(())
@@ -117,7 +117,7 @@ impl RimRead for ReadOnlyFileRimIO {
         while read < buf.len() {
             let n = self
                 .file
-                .seek_read(&mut buf[read..], offset + read as u64)?;
+                .seek_read(&mut buf[read..], checked_add_offset(offset, read as u64)?)?;
             if n == 0 {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
@@ -164,7 +164,7 @@ impl RimRead for FileRimIO {
     #[cfg(target_family = "unix")]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         use std::os::unix::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.file.read_exact_at(buf, abs_offset)?;
         Ok(())
     }
@@ -172,12 +172,13 @@ impl RimRead for FileRimIO {
     #[cfg(target_os = "windows")]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         use std::os::windows::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         let mut read = 0;
         while read < buf.len() {
-            let n = self
-                .file
-                .seek_read(&mut buf[read..], abs_offset + read as u64)?;
+            let n = self.file.seek_read(
+                &mut buf[read..],
+                checked_add_offset(abs_offset, read as u64)?,
+            )?;
             if n == 0 {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
@@ -188,7 +189,7 @@ impl RimRead for FileRimIO {
 
     #[cfg(not(any(target_family = "unix", target_os = "windows")))]
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.file.seek(SeekFrom::Start(abs_offset))?;
         self.file.read_exact(buf)?;
         Ok(())
@@ -205,7 +206,7 @@ impl RimWrite for FileRimIO {
     #[cfg(target_family = "unix")]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         use std::os::unix::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.file.write_all_at(data, abs_offset)?;
         Ok(())
     }
@@ -213,14 +214,14 @@ impl RimWrite for FileRimIO {
     #[cfg(target_os = "windows")]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         use std::os::windows::fs::FileExt;
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.file.seek_write(data, abs_offset)?;
         Ok(())
     }
 
     #[cfg(not(any(target_family = "unix", target_os = "windows")))]
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
-        let abs_offset = self.partition_offset + offset;
+        let abs_offset = checked_add_offset(self.partition_offset, offset)?;
         self.file.seek(SeekFrom::Start(abs_offset))?;
         self.file.write_all(data)?;
         Ok(())
@@ -247,7 +248,7 @@ impl RimIO for FileRimIO {
 #[cfg(feature = "std")]
 impl RimIOSetLen for FileRimIO {
     fn set_len(&mut self, len: u64) -> RimIOResult {
-        let abs_len = self.partition_offset + len;
+        let abs_len = checked_add_offset(self.partition_offset, len)?;
         self.file.set_len(abs_len)?;
         Ok(())
     }
@@ -256,7 +257,8 @@ impl RimIOSetLen for FileRimIO {
 #[cfg(feature = "std")]
 impl<'a> RimIOSetLen for StdRimIO<'a, std::fs::File> {
     fn set_len(&mut self, len: u64) -> RimIOResult {
-        self.io.set_len(self.partition_offset + len)?;
+        self.io
+            .set_len(checked_add_offset(self.partition_offset, len)?)?;
         self.flush()?;
         self.io.seek(SeekFrom::Start(0))?;
         Ok(())

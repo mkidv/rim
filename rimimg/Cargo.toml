@@ -10,16 +10,25 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["std"]
+alloc = ["rimio/alloc"]
+std = [
+    "alloc",
+    "rimio/std",
+    "time/std",
+    "uuid/std",
+    "uuid/v4",
+]
+
 [dependencies]
-anyhow = "1.0"
-rimio = { workspace = true, features = ["std"] }
-tempfile = "3.20"
-time = { version = "0.3.41", default-features = false, features = ["std"] }
-uuid = { version = "1.17", features = ["v4"] }
+rimio.workspace = true
+time = { version = "0.3.41", default-features = false }
+uuid = { version = "1.17", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = ["derive"] }
 
-[dev-dependencies]
-tempfile = "3.20"
+[package.metadata.docs.rs]
+features = ["std"]
 
 [lints]
 workspace = true

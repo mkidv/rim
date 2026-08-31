@@ -144,6 +144,7 @@ mod tests {
     use super::*;
     use crate::Validate;
     use crate::core::checker::{FsChecker, VerifyReport};
+    use rimfs_core::testing::assert_has_error;
 
     fn make_meta_32mb() -> FatMeta {
         const SIZE: u64 = 32 * 1024 * 1024;
@@ -255,6 +256,52 @@ mod tests {
         assert_eq!(fsi.struct_signature, FAT_FSINFO_STRUCT_SIGNATURE);
         assert_eq!(fsi.trail_signature, FAT_FSINFO_TRAIL_SIGNATURE);
     }
+
+    #[test]
+    fn test_fat_vbr_corruption_detection() {
+        let meta = make_meta_32mb();
+        let mut img = vec![0u8; meta.volume_size_bytes as usize];
+        let mut io = MemRimIO::new(&mut img);
+
+        FatFormatter::new(&mut io, &meta).format(false).unwrap();
+        io.write_at(510, &[0x00, 0x00]).unwrap();
+
+        let mut rep = VerifyReport::default();
+        let mut checker = crate::checker::FatChecker::new(&mut io, &meta);
+        checker.check_boot(&Default::default(), &mut rep).unwrap();
+
+        assert_has_error(&rep, "VBR.INVALID");
+    }
+
+    #[test]
+    fn test_fat_mirror_corruption_detection_reads_second_fat() {
+        let meta = make_meta_32mb();
+        let mut img = vec![0u8; meta.volume_size_bytes as usize];
+        let mut io = MemRimIO::new(&mut img);
+
+        FatFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let cluster = meta.root_unit();
+        let fat1_entry = meta.fat_table_offset(1) + cluster as u64 * 4;
+        io.write_at(fat1_entry, &0u32.to_le_bytes()).unwrap();
+
+        let mut rep = VerifyReport::default();
+        let mut checker = crate::checker::FatChecker::new(&mut io, &meta);
+        checker
+            .check_chain(
+                &crate::checker::FatCheckerOptions {
+                    compare_fat_copies: true,
+                    fat_sample: meta.cluster_count,
+                    deep_fat_walk: false,
+                    ..Default::default()
+                },
+                &mut rep,
+            )
+            .unwrap();
+
+        assert_has_error(&rep, "FAT.MIRROR");
+    }
+
     #[test]
     fn test_format_fat12_basic() {
         // 10 MB FAT12
@@ -272,9 +319,7 @@ mod tests {
         assert_eq!(vbr_buf[510], 0x55);
         assert_eq!(vbr_buf[511], 0xAA);
 
-        // Verify FAT start
         let fat_start = meta.fat_offset_bytes;
-        println!("FAT12: VBR=0, FAT Start={}", fat_start);
         assert!(fat_start >= 512, "FAT must not overwrite VBR");
 
         // Verify that VBR matches what we expect
@@ -286,9 +331,6 @@ mod tests {
         let mut checker = crate::checker::FatChecker::new(&mut io, &meta);
         checker.check_boot(&Default::default(), &mut rep).unwrap();
 
-        for finding in &rep.findings {
-            println!("Finding: {:?}", finding);
-        }
         assert!(!rep.has_error(), "Checker found errors: {:?}", rep.findings);
         assert!(
             rep.findings.iter().any(|f| f.code == "VBR.OK"),

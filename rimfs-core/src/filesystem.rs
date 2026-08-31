@@ -26,7 +26,7 @@ pub trait FsFilesystem<'a> {
     type Checker: FsChecker + 'a;
 
     /// Resolver responsible for resolving paths and ensuring filesystem consistency.
-    type Resolver: FsTreeResolver<'a> + 'a;
+    type Resolver: FsTreeResolver + 'a;
 
     /// Creates a new instance of the formatter.
     fn formatter(io: &'a mut (dyn RimIO + 'a), meta: &'a Self::Meta) -> Self::Formatter;

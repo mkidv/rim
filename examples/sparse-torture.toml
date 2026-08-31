@@ -1,0 +1,121 @@
+# RIM Sparse / GPT / Filesystem Torture Test
+#
+# ~11 TiB logical disk.
+# DRY-RUN RECOMMENDED.
+#
+# Goals:
+# - exercise multi-TiB GPT geometry
+# - cross 32-bit LBA boundaries
+# - place filesystems at very large offsets
+# - exercise sparse read-after-write
+# - validate backup GPT at the far end of the image
+# - inject actual content into huge filesystems
+# - keep FAT12/FAT16 around as small legacy partitions
+#
+# Run:
+#   rim build examples/sparse-torture.toml --dry-run -v
+
+# ------------------------------------------------------------
+# Small ESP at the beginning
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "TORTURE EFI"
+size = "64M"
+fs = "fat32"
+bootable = true
+
+# ------------------------------------------------------------
+# 2 TiB EXT4
+# Pushes everything after this beyond interesting LBA ranges.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "EXT4 2T"
+mountpoint = "data/*"
+size = "2048G"
+fs = "ext4"
+
+# ------------------------------------------------------------
+# 4 TiB NTFS
+# Biggest single partition in the test.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "NTFS 4T"
+mountpoint = "data/*"
+size = "4096G"
+fs = "ntfs"
+
+# ------------------------------------------------------------
+# 2 TiB exFAT
+# Starts ~6 TiB into the disk.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "EXFAT 2T"
+mountpoint = "data/*"
+size = "2048G"
+fs = "exfat"
+
+# ------------------------------------------------------------
+# Large FAT32
+# Deliberately stressful but still below ~2 TiB.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "FAT32 FAR"
+mountpoint = "data/*"
+size = "32G"
+fs = "fat32"
+
+# ------------------------------------------------------------
+# Large RimFAT
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "RIMFAT 1T"
+mountpoint = "data/*"
+size = "1024G"
+fs = "rimfat"
+
+# ------------------------------------------------------------
+# Legacy FAT partitions very far into the image.
+# These are useful precisely because their absolute LBAs are huge
+# while their internal geometry remains small.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "FAT16 FAR"
+mountpoint = "data/*"
+size = "2048M"
+fs = "fat16"
+
+[[partitions]]
+name = "FAT12 FAR"
+mountpoint = "data/*"
+size = "16M"
+fs = "fat12"
+
+# ------------------------------------------------------------
+# Tail EXT4.
+# Important: forces another fully formatted FS close to the
+# end of a ~11 TiB disk, then GPT backup structures after it.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "EXT4 TAIL 1T"
+mountpoint = "data/*"
+size = "1024G"
+fs = "ext4"
+
+# ------------------------------------------------------------
+# Tiny final filesystem at an absurd absolute offset.
+# Great at detecting accidental u32 truncation of absolute LBAs.
+# ------------------------------------------------------------
+
+[[partitions]]
+name = "EXFAT TAIL"
+mountpoint = "data/*"
+size = "64M"
+fs = "exfat"
