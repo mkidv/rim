@@ -11,7 +11,10 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use crate::DEFAULT_SECTOR_SIZE;
 use crate::guids::GptPartitionKind;
-use crate::{errors::*, io_ext::RimIOLbaExt};
+use crate::{
+    errors::*,
+    io_ext::{RimReadLbaExt, RimWriteLbaExt},
+};
 use rimio::prelude::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -656,7 +659,10 @@ fn parse_entries_from_region(region: &[u8], entry_size: usize) -> PartResult<Vec
 }
 
 // --- header API (identical) ---
-pub fn read_gpt_header<IO: RimIO + ?Sized>(io: &mut IO, sector_size: u64) -> PartResult<GptHeader> {
+pub fn read_gpt_header<IO: RimRead + ?Sized>(
+    io: &mut IO,
+    sector_size: u64,
+) -> PartResult<GptHeader> {
     let hdr: GptHeader = io.read_struct_lba(GPT_PRIMARY_HEADER_LBA, sector_size)?;
     hdr.validate_header()?;
     Ok(hdr)
@@ -664,7 +670,7 @@ pub fn read_gpt_header<IO: RimIO + ?Sized>(io: &mut IO, sector_size: u64) -> Par
 
 // --- alloc: reads the raw region once, checks CRC, then parses ---
 #[cfg(feature = "alloc")]
-pub fn read_gpt_entries<IO: RimIO + ?Sized>(
+pub fn read_gpt_entries<IO: RimRead + ?Sized>(
     io: &mut IO,
     hdr: &GptHeader,
     sector_size: u64,
@@ -703,7 +709,7 @@ pub fn read_gpt_entries<IO: RimIO + ?Sized>(
 
 // --- read_gpt_at_lba refactoring: no more duplicates ---
 #[cfg(feature = "alloc")]
-fn read_gpt_at_lba<IO: RimIO + ?Sized>(
+fn read_gpt_at_lba<IO: RimRead + ?Sized>(
     io: &mut IO,
     header_lba: u64,
     sector_size: u64,
@@ -720,7 +726,7 @@ fn read_gpt_at_lba<IO: RimIO + ?Sized>(
 }
 
 #[cfg(feature = "alloc")]
-pub fn read_gpt_with_sector<IO: RimIO + ?Sized>(
+pub fn read_gpt_with_sector<IO: RimRead + ?Sized>(
     io: &mut IO,
     sector_size: u64,
 ) -> PartResult<(GptHeader, Vec<GptEntry>)> {
@@ -735,7 +741,7 @@ pub fn read_gpt_with_sector<IO: RimIO + ?Sized>(
 }
 
 #[cfg(feature = "alloc")]
-pub fn read_gpt<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<(GptHeader, Vec<GptEntry>)> {
+pub fn read_gpt<IO: RimRead + ?Sized>(io: &mut IO) -> PartResult<(GptHeader, Vec<GptEntry>)> {
     read_gpt_with_sector(io, crate::DEFAULT_SECTOR_SIZE)
 }
 

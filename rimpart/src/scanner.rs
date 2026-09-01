@@ -118,7 +118,7 @@ impl core::fmt::Display for DiskInfo {
 
 /// Main scan: detects MBR (empty/protective/legacy), GPT, and partitions
 #[cfg(feature = "alloc")]
-pub fn scan_disk_with_sector<IO: RimIO + ?Sized>(
+pub fn scan_disk_with_sector<IO: RimRead + ?Sized>(
     io: &mut IO,
     sector_size: u64,
 ) -> PartResult<DiskInfo> {
@@ -184,7 +184,7 @@ pub fn scan_disk_with_sector<IO: RimIO + ?Sized>(
 }
 
 #[cfg(feature = "alloc")]
-pub fn scan_disk<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<DiskInfo> {
+pub fn scan_disk<IO: RimRead + ?Sized>(io: &mut IO) -> PartResult<DiskInfo> {
     scan_disk_with_sector(io, DEFAULT_SECTOR_SIZE)
 }
 

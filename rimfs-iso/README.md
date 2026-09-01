@@ -17,7 +17,7 @@
 
 ```toml
 [dependencies]
-rimfs-iso = { version = "0.8.0", default-features = false, features = ["alloc"] }
+rimfs-iso = { version = "0.8.1", default-features = false, features = ["alloc"] }
 ```
 
 ```rust

@@ -13,20 +13,13 @@ fn lba_offset(lba: u64, sector_size: u64) -> RimIOResult<u64> {
         .ok_or(RimIOError::Other("lba_offset overflow"))
 }
 
-/// LBA-aligned read/write (buffer)
-pub trait RimIOLbaExt: RimIO {
+/// LBA-aligned reads.
+pub trait RimReadLbaExt: RimRead {
     /// Reads `buf.len()` bytes starting from an LBA (offset = lba * sector_size).
     #[inline]
     fn read_at_lba(&mut self, lba: u64, sector_size: u64, buf: &mut [u8]) -> RimIOResult {
         let off = lba_offset(lba, sector_size)?;
         self.read_at(off, buf)
-    }
-
-    /// Writes `buf.len()` bytes starting from an LBA (offset = lba * sector_size).
-    #[inline]
-    fn write_at_lba(&mut self, lba: u64, sector_size: u64, data: &[u8]) -> RimIOResult {
-        let off = lba_offset(lba, sector_size)?;
-        self.write_at(off, data)
     }
 
     /// Reads a struct `T` starting from an LBA (size = size_of::<T>()).
@@ -37,6 +30,18 @@ pub trait RimIOLbaExt: RimIO {
     {
         let off = lba_offset(lba, sector_size)?;
         self.read_struct::<T>(off)
+    }
+}
+
+impl<T: RimRead + ?Sized> RimReadLbaExt for T {}
+
+/// LBA-aligned writes.
+pub trait RimWriteLbaExt: RimWrite {
+    /// Writes `buf.len()` bytes starting from an LBA (offset = lba * sector_size).
+    #[inline]
+    fn write_at_lba(&mut self, lba: u64, sector_size: u64, data: &[u8]) -> RimIOResult {
+        let off = lba_offset(lba, sector_size)?;
+        self.write_at(off, data)
     }
 
     /// Writes a struct `T` starting from an LBA.
@@ -50,4 +55,4 @@ pub trait RimIOLbaExt: RimIO {
     }
 }
 
-impl<T: RimIO + ?Sized> RimIOLbaExt for T {}
+impl<T: RimWrite + ?Sized> RimWriteLbaExt for T {}

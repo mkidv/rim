@@ -4,6 +4,17 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-09-01
+### Added
+*   Added read-only image container opening in `rimimg` through `ImageReadIO` and `open_image_read_io`.
+*   Added `ImageFormat::from_read` for format detection on read-only `RimRead` streams.
+
+### Changed
+*   `rimpart` GPT/MBR scanning APIs now accept `RimRead` when mutation is not required.
+*   The WebAssembly inspect demo now reads uploaded RAW, VHD, VMDK, QCOW2, and VDI images through `rimimg` and reports container/logical sizes.
+*   Browser inspection now uses `SliceRimIO` directly, avoiding an extra mutable in-memory image copy.
+*   Simplified `rimgen` injection helpers.
+
 ## [0.8.0] - 2026-08-31
 ### Added
 *   **ZIP Archive Engine (`rimfs-zip`)**:

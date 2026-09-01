@@ -3,7 +3,7 @@
 
 use crate::errors::*;
 use crate::gpt::{GPT_PRIMARY_HEADER_LBA, GptEntry, GptHeader, overlaps_inclusive};
-use crate::io_ext::RimIOLbaExt;
+use crate::io_ext::{RimReadLbaExt, RimWriteLbaExt};
 use crc32fast::Hasher;
 use rimio::prelude::*;
 use zerocopy::{FromBytes, IntoBytes};

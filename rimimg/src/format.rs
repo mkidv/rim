@@ -56,8 +56,8 @@ impl ImageFormat {
         }
     }
 
-    /// Detect format by inspecting magic signatures from a `RimIO` stream.
-    pub fn from_io(io: &mut dyn RimIO) -> RimImgResult<Self> {
+    /// Detect format by inspecting magic signatures from a readable stream.
+    pub fn from_read(io: &mut dyn RimRead) -> RimImgResult<Self> {
         let total_size = io.total_size().unwrap_or(0);
 
         // 1. Check QCOW2 magic at offset 0 (0x514649fb)
@@ -99,6 +99,11 @@ impl ImageFormat {
 
         // Fallback: treated as RAW
         Ok(ImageFormat::Raw)
+    }
+
+    /// Detect format by inspecting magic signatures from a `RimIO` stream.
+    pub fn from_io(io: &mut dyn RimIO) -> RimImgResult<Self> {
+        Self::from_read(io)
     }
 }
 

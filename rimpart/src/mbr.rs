@@ -398,7 +398,7 @@ pub fn write_mbr_from_entries<IO: RimIO + ?Sized>(
     write_mbr(io, &mbr)
 }
 
-pub fn read_mbr<IO: RimIO + ?Sized>(io: &mut IO) -> PartResult<Mbr> {
+pub fn read_mbr<IO: RimRead + ?Sized>(io: &mut IO) -> PartResult<Mbr> {
     let mbr: Mbr = io.read_struct(0)?;
     mbr.validate_header()?;
     Ok(mbr)

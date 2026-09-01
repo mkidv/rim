@@ -16,7 +16,7 @@ mod tests;
 use alpine_layout::{ALPINE_ROOTFS_SIZE_SECTORS, ALPINE_TOTAL_SIZE_BYTES, make_alpine_layout};
 use demo_layout::{DEMO_IMAGE_SIZE_BYTES, make_demo_layout};
 use rimgen::builder::build_on_io_with_events;
-use rimio::MemRimIO;
+use rimio::{MemRimIO, SliceRimIO};
 use uefi_layout::{UEFI_ESP_SIZE_SECTORS, UEFI_TOTAL_SIZE_BYTES, make_uefi_layout};
 
 #[cfg(target_arch = "wasm32")]
@@ -176,16 +176,22 @@ fn push_json_string(out: &mut String, value: &str) {
     out.push('"');
 }
 
-/// Inspects a raw disk image and returns a compact JSON partition report.
+/// Inspects a disk image or container and returns a compact JSON partition report.
 pub fn inspect_disk_image(image_bytes: &[u8]) -> Result<String, String> {
-    let mut buffer = Vec::from(image_bytes);
-    let mut io = MemRimIO::new(&mut buffer);
-    let info = rimpart::scan_disk_with_sector(&mut io, 512)
+    let mut io = SliceRimIO::new(image_bytes);
+    let format = rimimg::ImageFormat::from_read(&mut io)
+        .map_err(|e| format!("image format detection failed: {e:?}"))?;
+    let mut disk = rimimg::open_image_read_io(&mut io)
+        .map_err(|e| format!("image container open failed: {e:?}"))?;
+    let logical_bytes = disk.raw_len();
+    let info = rimpart::scan_disk_with_sector(&mut disk, 512)
         .map_err(|e| format!("disk scan failed: {e:?}"))?;
 
     let mut out = format!(
-        "{{\"status\":\"ok\",\"kind\":\"inspect\",\"total_bytes\":{},\"sector_size\":{},\"mbr_kind\":\"{:?}\",\"gpt_present\":{},\"partitions_count\":{},\"partitions\":[",
+        "{{\"status\":\"ok\",\"kind\":\"inspect\",\"image_format\":\"{}\",\"total_bytes\":{},\"logical_bytes\":{},\"sector_size\":{},\"mbr_kind\":\"{:?}\",\"gpt_present\":{},\"partitions_count\":{},\"partitions\":[",
+        format,
         image_bytes.len(),
+        logical_bytes,
         info.sector_size,
         info.mbr_kind,
         info.gpt_header.is_some(),

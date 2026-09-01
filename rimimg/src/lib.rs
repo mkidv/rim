@@ -29,7 +29,7 @@ pub use errors::*;
 pub use format::ImageFormat;
 #[cfg(feature = "alloc")]
 pub use io::create_image_io;
-pub use io::{ImageIO, open_image_io};
+pub use io::{ImageIO, ImageReadIO, open_image_io, open_image_read_io};
 pub use options::ImageOptions;
 
 #[cfg(test)]
@@ -252,6 +252,38 @@ mod tests {
             image.read_at(0, &mut actual).unwrap();
             assert_eq!(actual, raw);
         }
+    }
+
+    #[test]
+    fn test_image_read_io_opens_slice_without_mutable_container() {
+        let format = ImageFormat::Qcow2;
+        let raw_len = 1024 * 1024;
+        let raw = patterned_raw(raw_len);
+        let mut container = vec![0u8; container_capacity(format, raw_len)];
+
+        {
+            let mut container_io = MemRimIO::new(&mut container);
+            let mut image = create_image_io(
+                &mut container_io,
+                raw_len as u64,
+                format,
+                ImageOptions::deterministic(0x51CE),
+            )
+            .unwrap();
+            image.write_at(0, &raw).unwrap();
+            image.finish().unwrap();
+        }
+
+        let mut slice = SliceRimIO::new(&container);
+        assert_eq!(ImageFormat::from_read(&mut slice).unwrap(), format);
+
+        let mut image = open_image_read_io(&mut slice).unwrap();
+        assert_eq!(image.format(), format);
+        assert_eq!(image.raw_len(), raw_len as u64);
+
+        let mut actual = vec![0u8; raw_len];
+        image.read_at(0, &mut actual).unwrap();
+        assert_eq!(actual, raw);
     }
 
     fn container_capacity(format: ImageFormat, raw_len: usize) -> usize {

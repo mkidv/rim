@@ -38,6 +38,22 @@ pub struct PartitionReport {
     pub duration: Duration,
 }
 
+#[derive(Clone, Copy)]
+struct PartitionSpan {
+    offset: u64,
+    size_bytes: u64,
+}
+
+impl PartitionSpan {
+    fn from_entry(entry: GptEntry) -> Self {
+        let sectors = entry.end_lba - entry.start_lba + 1;
+        Self {
+            offset: entry.start_lba * DEFAULT_SECTOR_SIZE,
+            size_bytes: sectors * DEFAULT_SECTOR_SIZE,
+        }
+    }
+}
+
 /// Format and inject files into all partitions described by a layout.
 pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
     io: &mut dyn RimIO,
@@ -55,9 +71,8 @@ pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
             name: &part.name,
         });
 
-        let start_lba = entries[i].start_lba;
-        let end_lba = entries[i].end_lba;
-        let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
+        let entry = entries[i];
+        let span = PartitionSpan::from_entry(entry);
 
         let (counts, duration) = match part.fs {
             #[cfg(feature = "fat")]
@@ -65,14 +80,14 @@ pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
             | Filesystem::Fat16
             | Filesystem::Fat12
             | Filesystem::Fat8
-            | Filesystem::RimFat => format_inject_fat(io, entries[i], part)?,
+            | Filesystem::RimFat => format_inject_fat(io, entry, part)?,
             #[cfg(feature = "exfat")]
-            Filesystem::ExFat => format_inject_exfat(io, entries[i], part)?,
+            Filesystem::ExFat => format_inject_exfat(io, entry, part)?,
             #[cfg(feature = "ext")]
-            Filesystem::Ext4 => format_inject_ext4(io, entries[i], part)?,
+            Filesystem::Ext4 => format_inject_ext4(io, entry, part)?,
             #[cfg(feature = "ntfs")]
-            Filesystem::Ntfs => format_inject_ntfs(io, entries[i], part)?,
-            Filesystem::Raw => format_raw(io, entries[i], part, &mut on_event)?,
+            Filesystem::Ntfs => format_inject_ntfs(io, entry, part)?,
+            Filesystem::Raw => format_raw(io, entry, part, &mut on_event)?,
             _ => {
                 return Err(GenError::UnsupportedFs(part.fs));
             }
@@ -81,9 +96,9 @@ pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
         let rep = PartitionReport {
             name: part.name.clone(),
             fs: part.fs,
-            start_lba,
-            end_lba,
-            size_bytes,
+            start_lba: entry.start_lba,
+            end_lba: entry.end_lba,
+            size_bytes: span.size_bytes,
             dirs_count: counts.dirs,
             files_count: counts.files,
             symlinks_count: counts.symlinks,
@@ -107,20 +122,16 @@ pub fn format_inject_fat(
     #[cfg(feature = "std")]
     let t0 = Instant::now();
 
-    let start_lba = entry.start_lba;
-    let end_lba = entry.end_lba;
-    let offset = start_lba * DEFAULT_SECTOR_SIZE;
-    let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
-
-    io.set_offset(offset);
+    let span = PartitionSpan::from_entry(entry);
+    io.set_offset(span.offset);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
     let mut meta = match part.fs {
-        Filesystem::Fat32 => FatMeta::new_fat32(size_bytes, Some(label))?,
-        Filesystem::Fat16 => FatMeta::new_fat16(size_bytes, Some(label))?,
-        Filesystem::Fat12 => FatMeta::new_fat12(size_bytes, Some(label))?,
-        Filesystem::Fat8 => FatMeta::new_fat8(size_bytes, Some(label))?,
-        Filesystem::RimFat => FatMeta::new_rimfat(size_bytes, Some(label))?,
+        Filesystem::Fat32 => FatMeta::new_fat32(span.size_bytes, Some(label))?,
+        Filesystem::Fat16 => FatMeta::new_fat16(span.size_bytes, Some(label))?,
+        Filesystem::Fat12 => FatMeta::new_fat12(span.size_bytes, Some(label))?,
+        Filesystem::Fat8 => FatMeta::new_fat8(span.size_bytes, Some(label))?,
+        Filesystem::RimFat => FatMeta::new_rimfat(span.size_bytes, Some(label))?,
         _ => return Err(rimfs::FsError::Invalid("Unsupported FAT variant")),
     };
 
@@ -140,12 +151,7 @@ pub fn format_inject_fat(
     let mut formatter = FatFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts {
-        dirs: 0,
-        files: 0,
-        symlinks: 0,
-        bytes: 0,
-    };
+    let mut counts = FsNodeCounts::default();
 
     if let Some(ref mut root) = part.root {
         let mut injector = FatInjector::new(io, &meta)?;
@@ -177,15 +183,11 @@ pub fn format_inject_exfat(
     #[cfg(feature = "std")]
     let t0 = Instant::now();
 
-    let start_lba = entry.start_lba;
-    let end_lba = entry.end_lba;
-    let offset = start_lba * DEFAULT_SECTOR_SIZE;
-    let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
-
-    io.set_offset(offset);
+    let span = PartitionSpan::from_entry(entry);
+    io.set_offset(span.offset);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
-    let mut meta = ExFatMeta::new(size_bytes, Some(label))?;
+    let mut meta = ExFatMeta::new(span.size_bytes, Some(label))?;
 
     if let Some(uuid_str) = &part.uuid {
         let clean = uuid_str.replace('-', "");
@@ -203,12 +205,7 @@ pub fn format_inject_exfat(
     let mut formatter = ExFatFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts {
-        dirs: 0,
-        files: 0,
-        symlinks: 0,
-        bytes: 0,
-    };
+    let mut counts = FsNodeCounts::default();
 
     if let Some(ref mut root) = part.root {
         let mut injector = ExFatInjector::new(io, &meta)?;
@@ -240,15 +237,11 @@ pub fn format_inject_ext4(
     #[cfg(feature = "std")]
     let t0 = Instant::now();
 
-    let start_lba = entry.start_lba;
-    let end_lba = entry.end_lba;
-    let offset = start_lba * DEFAULT_SECTOR_SIZE;
-    let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
-
-    io.set_offset(offset);
+    let span = PartitionSpan::from_entry(entry);
+    io.set_offset(span.offset);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
-    let mut meta = ExtMeta::new(size_bytes, Some(label))?;
+    let mut meta = ExtMeta::new(span.size_bytes, Some(label))?;
 
     if let Some(uuid_str) = &part.uuid {
         if let Ok(uuid) = uuid_str.parse::<Uuid>() {
@@ -263,12 +256,7 @@ pub fn format_inject_ext4(
     let mut formatter = ExtFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts {
-        dirs: 0,
-        files: 0,
-        symlinks: 0,
-        bytes: 0,
-    };
+    let mut counts = FsNodeCounts::default();
 
     if let Some(ref mut root) = part.root {
         let mut injector = ExtInjector::new(io, &meta)?;
@@ -300,15 +288,11 @@ pub fn format_inject_ntfs(
     #[cfg(feature = "std")]
     let t0 = Instant::now();
 
-    let start_lba = entry.start_lba;
-    let end_lba = entry.end_lba;
-    let offset = start_lba * DEFAULT_SECTOR_SIZE;
-    let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
-
-    io.set_offset(offset);
+    let span = PartitionSpan::from_entry(entry);
+    io.set_offset(span.offset);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
-    let mut meta = NtfsMeta::new(size_bytes, Some(label))?;
+    let mut meta = NtfsMeta::new(span.size_bytes, Some(label))?;
 
     if let Some(uuid_str) = &part.uuid {
         let clean = uuid_str.replace('-', "");
@@ -329,12 +313,7 @@ pub fn format_inject_ntfs(
     let mut formatter = NtfsFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts {
-        dirs: 0,
-        files: 0,
-        symlinks: 0,
-        bytes: 0,
-    };
+    let mut counts = FsNodeCounts::default();
 
     if let Some(ref mut root) = part.root {
         let mut injector = NtfsInjector::new(io, &meta)?;
@@ -366,24 +345,22 @@ pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
     #[cfg(feature = "std")]
     let t0 = Instant::now();
 
-    let start_lba = entry.start_lba;
-    let end_lba = entry.end_lba;
-    let offset = start_lba * DEFAULT_SECTOR_SIZE;
-    let size_bytes = (end_lba - start_lba + 1) * DEFAULT_SECTOR_SIZE;
-    let max_size = size_bytes as usize;
+    let span = PartitionSpan::from_entry(entry);
+    let max_size =
+        usize::try_from(span.size_bytes).map_err(|_| GenError::Other("partition too large"))?;
 
-    io.set_offset(offset);
+    io.set_offset(span.offset);
 
     let mut files_written = 0;
 
     if let Some(ref mut src) = part.raw_source {
         let raw_size = part.raw_size;
-        if raw_size > size_bytes {
+        if raw_size > span.size_bytes {
             return Err(GenError::PayloadTooLarge {
                 path: part.name.clone(),
                 part_name: part.name.clone(),
                 payload_bytes: raw_size,
-                part_bytes: size_bytes,
+                part_bytes: span.size_bytes,
             });
         }
 
@@ -407,10 +384,8 @@ pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
 
     Ok((
         FsNodeCounts {
-            dirs: 0,
             files: files_written,
-            symlinks: 0,
-            bytes: 0,
+            ..FsNodeCounts::default()
         },
         duration,
     ))
