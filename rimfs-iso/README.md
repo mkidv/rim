@@ -5,7 +5,7 @@
 ## Features
 
 - **Standard ISO 9660 & High Sierra Compliant**: 2048-byte sector geometry with ISO 733 and 723 both-endian integers.
-- **Pre-Computed Planning Architecture (`IsoLayoutPlan`)**: Calculates all LBA assignments and descriptor layouts prior to sequential serialization, ensuring zero backtracking and optimal performance under WebAssembly and UEFI environments.
+- **Pre-Computed Planning Architecture**: Calculates all LBA assignments and descriptor layouts prior to sequential serialization, ensuring zero backtracking and optimal performance under WebAssembly and UEFI environments.
 - **Joliet Extension**: Unicode UTF-16 Big-Endian filenames and directory hierarchies for Windows compatibility.
 - **Rock Ridge (SUSP) Extension**: Full POSIX support for Unix file modes (`PX`), alternate long names (`NM`), symbolic links (`SL`), and UIDs/GIDs.
 - **El Torito Boot Specification**:
@@ -17,7 +17,7 @@
 
 ```toml
 [dependencies]
-rimfs-iso = { version = "0.8.1", default-features = false, features = ["alloc"] }
+rimfs-iso = { version = "0.8.2", default-features = false, features = ["alloc"] }
 ```
 
 ```rust

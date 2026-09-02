@@ -20,7 +20,7 @@
 
 ```toml
 [dependencies]
-rimfs-zip = { version = "0.8.1", default-features = false, features = ["alloc"] }
+rimfs-zip = { version = "0.8.2", default-features = false, features = ["alloc"] }
 ```
 
 ```rust

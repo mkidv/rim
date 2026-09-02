@@ -11,7 +11,7 @@ use crate::meta::IsoMeta;
 use crate::types::*;
 use rimfs_core::errors::{FsInjectorError, FsInjectorResult};
 use rimfs_core::injector::FsTreeInjector;
-use rimfs_core::resolver::{FsTreeResolver, attr::FileAttributes, node::FsNode};
+use rimfs_core::resolver::{FsNodeCounts, FsTreeResolver, attr::FileAttributes, node::FsNode};
 use rimio::{RimIO, RimRead};
 
 /// Serializes and writes `FsNode` trees into a complete ISO 9660 / Joliet / Rock Ridge / El Torito image.
@@ -23,6 +23,14 @@ pub struct IsoInjector<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a IsoMeta) -> FsInjectorResult<Self> {
         Ok(Self { io, meta })
+    }
+
+    fn write_plan(&mut self, plan: &IsoLayoutPlan) -> FsInjectorResult<()> {
+        self.write_volume_descriptors(plan)?;
+        self.write_path_tables(plan)?;
+        self.write_directory_records(plan)?;
+        self.write_boot_catalog_and_images(plan)?;
+        Ok(())
     }
 
     /// Writes Volume Descriptors (PVD, Joliet SVD, El Torito Boot Record, and Terminator).
@@ -682,6 +690,37 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
         }
         Ok(())
     }
+
+    fn stream_resolver_file_payloads(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        plan: &IsoLayoutPlan,
+    ) -> FsInjectorResult<()> {
+        for planned_file in plan.files.iter().filter(|file| !file.is_symlink) {
+            let source_path =
+                planned_file
+                    .source_path
+                    .as_deref()
+                    .ok_or(FsInjectorError::Invalid(
+                        "Missing resolver source path for planned ISO file",
+                    ))?;
+            let mut source = resolver.open_file(source_path)?;
+            let mut buf = [0u8; 8192];
+            let mut remaining = planned_file.size;
+            let mut src_off = 0;
+            let mut dst_off = planned_file.lba as u64 * ISO_SECTOR_SIZE as u64;
+
+            while remaining > 0 {
+                let to_read = remaining.min(buf.len() as u64) as usize;
+                source.read_at(src_off, &mut buf[..to_read])?;
+                self.io.write_at(dst_off, &buf[..to_read])?;
+                dst_off += to_read as u64;
+                src_off += to_read as u64;
+                remaining -= to_read as u64;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
@@ -704,46 +743,31 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
     }
 
     fn inject_tree(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {
-        // 1. Build the full deterministic IsoLayoutPlan
         let plan = IsoLayoutPlan::build(node, self.meta)?;
-
-        // 2. Write Volume Descriptors
-        self.write_volume_descriptors(&plan)?;
-
-        // 3. Write Path Tables
-        self.write_path_tables(&plan)?;
-
-        // 4. Write Directory Records (Standard ISO + Rock Ridge, and Joliet)
-        self.write_directory_records(&plan)?;
-
-        // 5. Write Boot Catalog and synthesized boot images
-        self.write_boot_catalog_and_images(&plan)?;
-
-        // 6. Stream all file payloads to their pre-allocated LBAs
+        self.write_plan(&plan)?;
         self.stream_file_payloads(node, &plan, "")?;
-
         self.io.flush()?;
         Ok(())
     }
 
     fn inject_tree_from_resolver(
         &mut self,
-        _resolver: &mut dyn FsTreeResolver,
-        _path: &str,
-    ) -> FsInjectorResult<rimfs_core::resolver::FsNodeCounts> {
-        Err(FsInjectorError::Unsupported(
-            "ISO streaming resolver injection requires a layout plan",
-        ))
+        resolver: &mut dyn FsTreeResolver,
+        path: &str,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        let (plan, counts) = IsoLayoutPlan::build_from_resolver(resolver, path, self.meta)?;
+        self.write_plan(&plan)?;
+        self.stream_resolver_file_payloads(resolver, &plan)?;
+        self.io.flush()?;
+        Ok(counts)
     }
 
     fn inject_entry_from_resolver(
         &mut self,
-        _resolver: &mut dyn FsTreeResolver,
-        _path: &str,
-    ) -> FsInjectorResult<rimfs_core::resolver::FsNodeCounts> {
-        Err(FsInjectorError::Unsupported(
-            "ISO streaming resolver injection requires a layout plan",
-        ))
+        resolver: &mut dyn FsTreeResolver,
+        path: &str,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        self.inject_tree_from_resolver(resolver, path)
     }
 
     fn flush(&mut self) -> FsInjectorResult {

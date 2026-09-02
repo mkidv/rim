@@ -16,7 +16,7 @@ It provides an ergonomic, feature-gated API while implementations are cleanly se
 
 ```toml
 [dependencies]
-rimfs = "0.8.1"
+rimfs = "0.8.2"
 ```
 
 ## Cargo Features

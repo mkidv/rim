@@ -4,6 +4,14 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-09-02
+### Added
+*   `rimfs-iso` now supports streaming `FsTreeResolver` injection while still building the complete ISO layout plan before payload serialization.
+
+### Changed
+*   Kept the ISO layout planner internal to `rimfs-iso` instead of exporting `IsoLayoutPlan` through the public API, traits, or prelude.
+*   Updated ISO documentation to describe precomputed layout as an internal implementation detail.
+
 ## [0.8.1] - 2026-09-01
 ### Added
 *   Added read-only image container opening in `rimimg` through `ImageReadIO` and `open_image_read_io`.

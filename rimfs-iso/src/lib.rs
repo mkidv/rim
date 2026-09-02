@@ -22,7 +22,6 @@ pub use checker::{IsoChecker, IsoCheckerOptions};
 pub use filesystem::Iso;
 pub use formatter::IsoFormatter;
 pub use injector::IsoInjector;
-pub use layout::IsoLayoutPlan;
 pub use meta::IsoMeta;
 pub use resolver::{ElToritoBootEntry, IsoResolvedEntry, IsoResolver};
 pub use types::{ISO_SECTOR_SIZE, IsoHandle};
@@ -32,7 +31,6 @@ pub mod traits {
     pub use super::checker::{IsoChecker, IsoCheckerOptions};
     pub use super::formatter::IsoFormatter;
     pub use super::injector::IsoInjector;
-    pub use super::layout::IsoLayoutPlan;
     pub use super::meta::IsoMeta;
     pub use super::resolver::{ElToritoBootEntry, IsoResolver};
     pub use super::types::{ISO_SECTOR_SIZE, IsoHandle};
@@ -52,6 +50,8 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use rimfs_core::StdResolver;
     use rimfs_core::checker::{FsChecker, VerifyReport};
     use rimfs_core::formatter::FsFormatter;
     use rimfs_core::injector::FsTreeInjector;
@@ -161,6 +161,51 @@ mod tests {
         assert_eq!(attr.mode, Some(0o100755));
         assert_eq!(attr.uid, Some(1001));
         assert_eq!(attr.gid, Some(1001));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_iso_streaming_inject_from_std_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("hello.txt"), b"Hello from resolver").unwrap();
+        std::fs::write(root.join("docs").join("notes.txt"), b"Nested resolver file").unwrap();
+
+        let meta = IsoMeta::default();
+        let mut disk_buf = alloc::vec![0u8; 200 * ISO_SECTOR_SIZE];
+        let mut io = MemRimIO::new(&mut disk_buf);
+        let mut resolver = StdResolver::new();
+        let source = format!("{}/*", root.display());
+
+        let mut injector = IsoInjector::new(&mut io, &meta).unwrap();
+        let counts = injector
+            .inject_tree_from_resolver(&mut resolver, &source)
+            .unwrap();
+
+        assert_eq!(counts.dirs, 1);
+        assert_eq!(counts.files, 2);
+        assert_eq!(counts.bytes, 39);
+
+        let mut checker = IsoChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert_no_findings(&report);
+
+        let mut iso = IsoResolver::new(&mut io, &meta);
+        assert_exists(&mut iso, &["hello.txt", "docs", "docs/notes.txt"]);
+        assert_files(
+            &mut iso,
+            &[
+                ExpectedFile {
+                    path: "hello.txt",
+                    bytes: b"Hello from resolver",
+                },
+                ExpectedFile {
+                    path: "docs/notes.txt",
+                    bytes: b"Nested resolver file",
+                },
+            ],
+        );
     }
 
     #[test]

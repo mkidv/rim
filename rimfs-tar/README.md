@@ -17,7 +17,7 @@
 
 ```toml
 [dependencies]
-rimfs-tar = { version = "0.8.1", default-features = false, features = ["alloc"] }
+rimfs-tar = { version = "0.8.2", default-features = false, features = ["alloc"] }
 ```
 
 ```rust

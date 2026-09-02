@@ -14,77 +14,105 @@ use alloc::{
 use crate::meta::IsoMeta;
 use crate::types::*;
 use rimfs_core::errors::{FsInjectorError, FsInjectorResult};
-use rimfs_core::resolver::attr::FileAttributes;
+use rimfs_core::resolver::attr::{FileAttributes, NodeKind};
 use rimfs_core::resolver::node::FsNode;
+use rimfs_core::resolver::{FsNodeCounts, FsTreeResolver};
+use rimfs_core::{extract_name_from_path, is_wildcard, join_paths, strip_wildcard};
 use time::OffsetDateTime;
 
 /// In-memory representation of a planned file in the ISO layout.
 #[derive(Debug, Clone)]
-pub struct PlannedFile {
-    pub path: String,
-    pub name: String,
-    pub size: u64,
-    pub lba: u32,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub mtime: OffsetDateTime,
-    pub is_symlink: bool,
-    pub symlink_target: Option<String>,
+pub(crate) struct PlannedFile {
+    pub(crate) path: String,
+    pub(crate) source_path: Option<String>,
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) lba: u32,
+    pub(crate) mode: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) mtime: OffsetDateTime,
+    pub(crate) is_symlink: bool,
+    pub(crate) symlink_target: Option<String>,
 }
 
 /// In-memory representation of a planned directory in the ISO layout.
 #[derive(Debug, Clone)]
-pub struct PlannedDirectory {
-    pub path: String,
-    pub name: String,
-    pub parent_idx: usize, // 1-based index in path table
-    pub dir_idx: usize,    // 1-based index in path table
-    pub iso_lba: u32,
-    pub iso_size: u32,
-    pub joliet_lba: u32,
-    pub joliet_size: u32,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub mtime: OffsetDateTime,
-    pub file_indices: Vec<usize>,
-    pub subdir_indices: Vec<usize>,
+pub(crate) struct PlannedDirectory {
+    pub(crate) name: String,
+    pub(crate) parent_idx: usize, // 1-based index in path table
+    pub(crate) dir_idx: usize,    // 1-based index in path table
+    pub(crate) iso_lba: u32,
+    pub(crate) iso_size: u32,
+    pub(crate) joliet_lba: u32,
+    pub(crate) joliet_size: u32,
+    pub(crate) mode: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) mtime: OffsetDateTime,
+    pub(crate) file_indices: Vec<usize>,
+    pub(crate) subdir_indices: Vec<usize>,
 }
 
 /// Fully assigned and deterministic pre-computed layout plan for an ISO 9660 image.
 #[derive(Debug, Clone)]
-pub struct IsoLayoutPlan {
-    pub pvd_lba: u32,
-    pub svd_joliet_lba: Option<u32>,
-    pub boot_record_lba: Option<u32>,
-    pub terminator_lba: u32,
+pub(crate) struct IsoLayoutPlan {
+    pub(crate) svd_joliet_lba: Option<u32>,
+    pub(crate) boot_record_lba: Option<u32>,
+    pub(crate) terminator_lba: u32,
 
-    pub pvd_path_table_l_lba: u32,
-    pub pvd_path_table_m_lba: u32,
-    pub path_table_size: u32,
+    pub(crate) pvd_path_table_l_lba: u32,
+    pub(crate) pvd_path_table_m_lba: u32,
+    pub(crate) path_table_size: u32,
 
-    pub joliet_path_table_l_lba: Option<u32>,
-    pub joliet_path_table_m_lba: Option<u32>,
-    pub joliet_path_table_size: Option<u32>,
+    pub(crate) joliet_path_table_l_lba: Option<u32>,
+    pub(crate) joliet_path_table_m_lba: Option<u32>,
+    pub(crate) joliet_path_table_size: Option<u32>,
 
-    pub boot_catalog_lba: Option<u32>,
-    pub efi_boot_image_lba: Option<u32>,
-    pub efi_boot_image_sectors: u32,
-    pub efi_boot_image_data: Option<Vec<u8>>,
-    pub bios_boot_image_lba: Option<u32>,
-    pub bios_boot_image_sectors: u32,
+    pub(crate) boot_catalog_lba: Option<u32>,
+    pub(crate) efi_boot_image_lba: Option<u32>,
+    pub(crate) efi_boot_image_sectors: u32,
+    pub(crate) efi_boot_image_data: Option<Vec<u8>>,
+    pub(crate) bios_boot_image_lba: Option<u32>,
+    pub(crate) bios_boot_image_sectors: u32,
 
-    pub directories: Vec<PlannedDirectory>,
-    pub files: Vec<PlannedFile>,
-    pub total_sectors: u32,
+    pub(crate) directories: Vec<PlannedDirectory>,
+    pub(crate) files: Vec<PlannedFile>,
+    pub(crate) total_sectors: u32,
 }
 
 impl IsoLayoutPlan {
     /// Builds and calculates all LBAs and sector allocations for the given tree.
-    pub fn build(tree: &mut FsNode<'_>, meta: &IsoMeta) -> FsInjectorResult<Self> {
+    pub(crate) fn build(tree: &mut FsNode<'_>, meta: &IsoMeta) -> FsInjectorResult<Self> {
+        let (mut plan, next_lba) = Self::new_with_boot_regions(meta)?;
+
+        plan.collect_tree(tree, "", 1, 0)?;
+        plan.assign_extents(meta, next_lba);
+        Ok(plan)
+    }
+
+    pub(crate) fn build_from_resolver(
+        resolver: &mut dyn FsTreeResolver,
+        path: &str,
+        meta: &IsoMeta,
+    ) -> FsInjectorResult<(Self, FsNodeCounts)> {
+        let (mut plan, next_lba) = Self::new_with_boot_regions(meta)?;
+        let counts = if is_wildcard(path) {
+            plan.collect_resolver_root(resolver, strip_wildcard(path))?
+        } else {
+            let attr = resolver.read_attributes(path)?;
+            if attr.kind == NodeKind::Regular || attr.kind == NodeKind::Symlink {
+                plan.collect_resolver_file_root(resolver, path, attr)?
+            } else {
+                plan.collect_resolver_dir(resolver, path, "", 1, 0, attr)?
+            }
+        };
+        plan.assign_extents(meta, next_lba);
+        Ok((plan, counts))
+    }
+
+    fn new_with_boot_regions(meta: &IsoMeta) -> FsInjectorResult<(Self, u32)> {
         let mut plan = Self {
-            pvd_lba: 16,
             svd_joliet_lba: None,
             boot_record_lba: None,
             terminator_lba: 0,
@@ -105,9 +133,7 @@ impl IsoLayoutPlan {
             total_sectors: 0,
         };
 
-        // 1. Assign Volume Descriptors
-        let mut cur_vd_lba = 16; // PVD is always at sector 16
-        cur_vd_lba += 1;
+        let mut cur_vd_lba = 17;
 
         if meta.enable_joliet {
             plan.svd_joliet_lba = Some(cur_vd_lba);
@@ -125,7 +151,6 @@ impl IsoLayoutPlan {
 
         let mut next_lba = cur_vd_lba;
 
-        // 2. Synthesize EFI FAT boot image if requested
         if let Some(ref efi_bin) = meta.boot_efi {
             let fat_img = synthesize_efi_fat_image(efi_bin)?;
             let sectors = fat_img.len().div_ceil(ISO_SECTOR_SIZE) as u32;
@@ -135,7 +160,6 @@ impl IsoLayoutPlan {
             next_lba += sectors;
         }
 
-        // 3. Synthesize BIOS boot image if requested
         if let Some(ref bios_bin) = meta.boot_bios {
             let sectors = bios_bin.len().div_ceil(ISO_SECTOR_SIZE) as u32;
             plan.bios_boot_image_lba = Some(next_lba);
@@ -143,33 +167,32 @@ impl IsoLayoutPlan {
             next_lba += sectors;
         }
 
-        // 4. Allocate 1 sector for El Torito Boot Catalog if bootable
         if is_bootable {
             plan.boot_catalog_lba = Some(next_lba);
             next_lba += 1;
         }
 
-        // 5. Flatten the directory and file tree
-        plan.collect_tree(tree, "", 1, 0)?;
+        Ok((plan, next_lba))
+    }
 
-        // 6. Calculate Path Table sizes
+    fn assign_extents(&mut self, meta: &IsoMeta, mut next_lba: u32) {
         let mut pt_size = 0u32;
-        for dir in &plan.directories {
+        for dir in &self.directories {
             let name_len = if dir.dir_idx == 1 { 1 } else { dir.name.len() } as u32;
             let entry_len = 8 + name_len + (name_len % 2); // 8 bytes header + name + padding
             pt_size += entry_len;
         }
-        plan.path_table_size = pt_size;
+        self.path_table_size = pt_size;
         let pt_sectors = pt_size.div_ceil(ISO_SECTOR_SIZE as u32);
 
-        plan.pvd_path_table_l_lba = next_lba;
+        self.pvd_path_table_l_lba = next_lba;
         next_lba += pt_sectors;
-        plan.pvd_path_table_m_lba = next_lba;
+        self.pvd_path_table_m_lba = next_lba;
         next_lba += pt_sectors;
 
         if meta.enable_joliet {
             let mut jpt_size = 0u32;
-            for dir in &plan.directories {
+            for dir in &self.directories {
                 let name_len = if dir.dir_idx == 1 {
                     1
                 } else {
@@ -178,44 +201,41 @@ impl IsoLayoutPlan {
                 let entry_len = 8 + name_len + (name_len % 2);
                 jpt_size += entry_len;
             }
-            plan.joliet_path_table_size = Some(jpt_size);
+            self.joliet_path_table_size = Some(jpt_size);
             let jpt_sectors = jpt_size.div_ceil(ISO_SECTOR_SIZE as u32);
-            plan.joliet_path_table_l_lba = Some(next_lba);
+            self.joliet_path_table_l_lba = Some(next_lba);
             next_lba += jpt_sectors;
-            plan.joliet_path_table_m_lba = Some(next_lba);
+            self.joliet_path_table_m_lba = Some(next_lba);
             next_lba += jpt_sectors;
         }
 
-        // 7. Calculate and assign directory extents
-        for dir_idx in 0..plan.directories.len() {
-            let iso_size = plan.calculate_dir_size(dir_idx, false, meta.enable_rock_ridge);
+        for dir_idx in 0..self.directories.len() {
+            let iso_size = self.calculate_dir_size(dir_idx, false, meta.enable_rock_ridge);
             let iso_sectors = iso_size.div_ceil(ISO_SECTOR_SIZE as u32);
-            plan.directories[dir_idx].iso_lba = next_lba;
-            plan.directories[dir_idx].iso_size = iso_size;
+            self.directories[dir_idx].iso_lba = next_lba;
+            self.directories[dir_idx].iso_size = iso_size;
             next_lba += iso_sectors;
 
             if meta.enable_joliet {
-                let joliet_size = plan.calculate_dir_size(dir_idx, true, meta.enable_rock_ridge);
+                let joliet_size = self.calculate_dir_size(dir_idx, true, meta.enable_rock_ridge);
                 let joliet_sectors = joliet_size.div_ceil(ISO_SECTOR_SIZE as u32);
-                plan.directories[dir_idx].joliet_lba = next_lba;
-                plan.directories[dir_idx].joliet_size = joliet_size;
+                self.directories[dir_idx].joliet_lba = next_lba;
+                self.directories[dir_idx].joliet_size = joliet_size;
                 next_lba += joliet_sectors;
             }
         }
 
-        // 8. Assign file data extents
-        for file_idx in 0..plan.files.len() {
-            plan.files[file_idx].lba = next_lba;
-            let sectors = if plan.files[file_idx].is_symlink {
+        for file_idx in 0..self.files.len() {
+            self.files[file_idx].lba = next_lba;
+            let sectors = if self.files[file_idx].is_symlink {
                 0
             } else {
-                plan.files[file_idx].size.div_ceil(ISO_SECTOR_SIZE as u64) as u32
+                self.files[file_idx].size.div_ceil(ISO_SECTOR_SIZE as u64) as u32
             };
             next_lba += sectors.max(1);
         }
 
-        plan.total_sectors = next_lba;
-        Ok(plan)
+        self.total_sectors = next_lba;
     }
 
     /// Recursively flattens `FsNode` trees into `directories` and `files` lists.
@@ -256,7 +276,6 @@ impl IsoLayoutPlan {
         let gid = attr.gid.unwrap_or(0);
 
         self.directories.push(PlannedDirectory {
-            path: full_dir_path.clone(),
             name: dir_name,
             parent_idx,
             dir_idx,
@@ -296,6 +315,7 @@ impl IsoLayoutPlan {
 
                     self.files.push(PlannedFile {
                         path: file_path,
+                        source_path: None,
                         name: name.clone(),
                         size: file_size,
                         lba: 0,
@@ -323,6 +343,7 @@ impl IsoLayoutPlan {
 
                     self.files.push(PlannedFile {
                         path: file_path,
+                        source_path: None,
                         name: name.clone(),
                         size: target.len() as u64,
                         lba: 0,
@@ -347,6 +368,192 @@ impl IsoLayoutPlan {
         }
 
         Ok(dir_idx)
+    }
+
+    fn collect_resolver_root(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        base_path: &str,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        self.push_directory(String::new(), 1, FileAttributes::new_dir());
+        let mut counts = FsNodeCounts::default();
+        for entry in resolver.read_dir(base_path)? {
+            let entry_path = join_paths(base_path, &entry);
+            let attr = resolver.read_attributes(&entry_path)?;
+            let child_counts = self.collect_resolver_child(resolver, &entry_path, "", 1, attr)?;
+            counts.dirs += child_counts.dirs;
+            counts.files += child_counts.files;
+            counts.symlinks += child_counts.symlinks;
+            counts.bytes += child_counts.bytes;
+        }
+        Ok(counts)
+    }
+
+    fn collect_resolver_file_root(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        path: &str,
+        attr: FileAttributes,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        self.push_directory(String::new(), 1, FileAttributes::new_dir());
+        self.collect_resolver_file(resolver, path, "", 1, attr)
+    }
+
+    fn collect_resolver_child(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        path: &str,
+        parent_path: &str,
+        parent_idx: usize,
+        attr: FileAttributes,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        match attr.kind {
+            NodeKind::Directory => {
+                self.collect_resolver_dir(resolver, path, parent_path, parent_idx, 1, attr)
+            }
+            NodeKind::Regular | NodeKind::Symlink => {
+                self.collect_resolver_file(resolver, path, parent_path, parent_idx, attr)
+            }
+            _ => Err(FsInjectorError::Unsupported(
+                "Unsupported resolver entry kind",
+            )),
+        }
+    }
+
+    fn collect_resolver_dir(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        source_path: &str,
+        parent_path: &str,
+        parent_idx: usize,
+        cur_depth: usize,
+        attr: FileAttributes,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        let name = if cur_depth == 0 {
+            String::new()
+        } else {
+            extract_name_from_path(source_path).to_string()
+        };
+        let full_path = if parent_path.is_empty() {
+            name.clone()
+        } else if name.is_empty() {
+            parent_path.to_string()
+        } else {
+            format!("{}/{}", parent_path, name)
+        };
+        let dir_idx = self.push_directory(name, parent_idx, attr);
+        let mut counts = FsNodeCounts {
+            dirs: 1,
+            ..FsNodeCounts::default()
+        };
+
+        for entry in resolver.read_dir(source_path)? {
+            let entry_path = join_paths(source_path, &entry);
+            let attr = resolver.read_attributes(&entry_path)?;
+            let child_counts =
+                self.collect_resolver_child(resolver, &entry_path, &full_path, dir_idx, attr)?;
+            counts.dirs += child_counts.dirs;
+            counts.files += child_counts.files;
+            counts.symlinks += child_counts.symlinks;
+            counts.bytes += child_counts.bytes;
+        }
+
+        Ok(counts)
+    }
+
+    fn collect_resolver_file(
+        &mut self,
+        resolver: &mut dyn FsTreeResolver,
+        source_path: &str,
+        parent_path: &str,
+        parent_idx: usize,
+        attr: FileAttributes,
+    ) -> FsInjectorResult<FsNodeCounts> {
+        let name = extract_name_from_path(source_path).to_string();
+        let file_path = if parent_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", parent_path, name)
+        };
+
+        let file_idx = self.files.len();
+        let f_dt = attr.modified.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let f_uid = attr.uid.unwrap_or(0);
+        let f_gid = attr.gid.unwrap_or(0);
+        let (size, mode, target, counts) = if attr.kind == NodeKind::Symlink {
+            let target = resolver.read_link(source_path)?;
+            let size = target.len() as u64;
+            (
+                size,
+                (attr.mode.unwrap_or(0o777) & 0o7777) | 0o120000,
+                Some(target),
+                FsNodeCounts {
+                    symlinks: 1,
+                    bytes: size,
+                    ..FsNodeCounts::default()
+                },
+            )
+        } else {
+            let mut source = resolver.open_file(source_path)?;
+            let size = source.total_size().map_err(FsInjectorError::IO)?;
+            (
+                size,
+                (attr.mode.unwrap_or(0o644) & 0o7777) | 0o100000,
+                None,
+                FsNodeCounts {
+                    files: 1,
+                    bytes: size,
+                    ..FsNodeCounts::default()
+                },
+            )
+        };
+
+        self.files.push(PlannedFile {
+            path: file_path,
+            source_path: Some(source_path.to_string()),
+            name,
+            size,
+            lba: 0,
+            mode,
+            uid: f_uid,
+            gid: f_gid,
+            mtime: f_dt,
+            is_symlink: attr.kind == NodeKind::Symlink,
+            symlink_target: target,
+        });
+        self.directories[parent_idx - 1].file_indices.push(file_idx);
+
+        Ok(counts)
+    }
+
+    fn push_directory(&mut self, name: String, parent_idx: usize, attr: FileAttributes) -> usize {
+        let dir_idx = self.directories.len() + 1;
+        let dt = attr.modified.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let mode = attr.mode.unwrap_or(0o755) & 0o7777;
+        let uid = attr.uid.unwrap_or(0);
+        let gid = attr.gid.unwrap_or(0);
+
+        self.directories.push(PlannedDirectory {
+            name,
+            parent_idx,
+            dir_idx,
+            iso_lba: 0,
+            iso_size: 0,
+            joliet_lba: 0,
+            joliet_size: 0,
+            mode: mode | 0o040000,
+            uid,
+            gid,
+            mtime: dt,
+            file_indices: Vec::new(),
+            subdir_indices: Vec::new(),
+        });
+        if dir_idx != parent_idx {
+            self.directories[parent_idx - 1]
+                .subdir_indices
+                .push(dir_idx);
+        }
+        dir_idx
     }
 
     /// Calculates the size in bytes required for a directory's records.
