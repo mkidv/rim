@@ -8,9 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 *   Added read-only image container opening in `rimimg` through `ImageReadIO` and `open_image_read_io`.
 *   Added `ImageFormat::from_read` for format detection on read-only `RimRead` streams.
+*   Added `FsTreeInjector::inject_tree_from_resolver` for bounded-memory tree injection from resolvers.
 
 ### Changed
+*   Clarified `FsTreeResolver::read_file` as an explicit full-file materialization helper backed by `open_file`.
+*   Removed redundant filesystem-specific `read_file` implementations so file reads share the streaming `open_file` path.
 *   `rimpart` GPT/MBR scanning APIs now accept `RimRead` when mutation is not required.
+*   `rimgen` layout-config mountpoints now inject directly from `StdResolver` instead of resolving host files into `VecRimIO` snapshots.
 *   The WebAssembly inspect demo now reads uploaded RAW, VHD, VMDK, QCOW2, and VDI images through `rimimg` and reports container/logical sizes.
 *   Browser inspection now uses `SliceRimIO` directly, avoiding an extra mutable in-memory image copy.
 *   Simplified `rimgen` injection helpers.

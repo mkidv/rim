@@ -7,6 +7,8 @@ use crate::layout::*;
 use ::core::time::Duration;
 use alloc::string::String;
 use alloc::vec::Vec;
+use rimfs::core::allocator::FsHandle;
+use rimfs::core::injector::FsTreeInjector;
 use rimfs::core::resolver::*;
 #[cfg(feature = "exfat")]
 use rimfs::exfat::*;
@@ -17,7 +19,7 @@ use rimfs::fat::*;
 #[cfg(all(feature = "ntfs", feature = "std"))]
 use rimfs::ntfs::NtfsChecker;
 #[cfg(feature = "ntfs")]
-use rimfs::ntfs::{NtfsFormatter, NtfsInjector, NtfsMeta};
+use rimfs::ntfs::{NtfsFormatter, NtfsHandle, NtfsInjector, NtfsMeta};
 use rimio::{RimIO, RimWriteExt};
 use rimpart::gpt::GptEntry;
 #[cfg(feature = "std")]
@@ -42,6 +44,41 @@ pub struct PartitionReport {
 struct PartitionSpan {
     offset: u64,
     size_bytes: u64,
+}
+
+fn merge_counts(dst: &mut FsNodeCounts, src: FsNodeCounts) {
+    dst.dirs += src.dirs;
+    dst.files += src.files;
+    dst.symlinks += src.symlinks;
+    dst.bytes += src.bytes;
+}
+
+fn inject_partition_sources<Handle, Injector>(
+    injector: &mut Injector,
+    part: &mut Partition<'_>,
+) -> FsResult<FsNodeCounts>
+where
+    Handle: FsHandle,
+    Injector: FsTreeInjector<Handle>,
+{
+    let mut counts = FsNodeCounts::default();
+
+    if let Some(ref mut root) = part.root {
+        injector.inject_tree(root)?;
+        merge_counts(&mut counts, root.counts());
+    }
+
+    #[cfg(feature = "std")]
+    if let Some(source_path) = &part.source_mountpoint {
+        let mut resolver = rimfs::core::StdResolver::new();
+        let path = source_path.to_str().ok_or(rimfs::FsError::Invalid(
+            "Mountpoint path is not valid UTF-8",
+        ))?;
+        let source_counts = injector.inject_tree_from_resolver(&mut resolver, path)?;
+        merge_counts(&mut counts, source_counts);
+    }
+
+    Ok(counts)
 }
 
 impl PartitionSpan {
@@ -151,13 +188,8 @@ pub fn format_inject_fat(
     let mut formatter = FatFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts::default();
-
-    if let Some(ref mut root) = part.root {
-        let mut injector = FatInjector::new(io, &meta)?;
-        injector.inject_tree(root)?;
-        counts = root.counts();
-    }
+    let mut injector = FatInjector::new(io, &meta)?;
+    let counts = inject_partition_sources::<FatHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
@@ -205,13 +237,8 @@ pub fn format_inject_exfat(
     let mut formatter = ExFatFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts::default();
-
-    if let Some(ref mut root) = part.root {
-        let mut injector = ExFatInjector::new(io, &meta)?;
-        injector.inject_tree(root)?;
-        counts = root.counts();
-    }
+    let mut injector = ExFatInjector::new(io, &meta)?;
+    let counts = inject_partition_sources::<ExFatHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
@@ -256,13 +283,8 @@ pub fn format_inject_ext4(
     let mut formatter = ExtFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts::default();
-
-    if let Some(ref mut root) = part.root {
-        let mut injector = ExtInjector::new(io, &meta)?;
-        injector.inject_tree(root)?;
-        counts = root.counts();
-    }
+    let mut injector = ExtInjector::new(io, &meta)?;
+    let counts = inject_partition_sources::<ExtHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
@@ -313,13 +335,8 @@ pub fn format_inject_ntfs(
     let mut formatter = NtfsFormatter::new(io, &meta);
     formatter.format(false)?;
 
-    let mut counts = FsNodeCounts::default();
-
-    if let Some(ref mut root) = part.root {
-        let mut injector = NtfsInjector::new(io, &meta)?;
-        injector.inject_tree(root)?;
-        counts = root.counts();
-    }
+    let mut injector = NtfsInjector::new(io, &meta)?;
+    let counts = inject_partition_sources::<NtfsHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {

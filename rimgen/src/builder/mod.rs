@@ -12,8 +12,6 @@ use alloc::vec::Vec;
 use core::time::Duration;
 use gpt::{calculate_total_disk_sectors, partition_to_gpt_entry};
 pub use inject::PartitionReport;
-#[cfg(feature = "std")]
-use rimfs::core::resolver::FsTreeResolver;
 use rimio::prelude::*;
 #[cfg(feature = "std")]
 use std::time::Instant;
@@ -69,13 +67,10 @@ pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     on_event: F,
 ) -> GenResult<BuildReport> {
     let mut resolved = layout.to_layout(&mut crate::guid::RandomGuidGenerator)?;
-    let mut parser = rimfs::core::StdResolver::new();
     for (i, part) in layout.partitions.iter().enumerate() {
         let mountpoint = part.mountpoint.as_deref().unwrap_or("");
         if !mountpoint.is_empty() {
-            let source_path = layout.base_dir.join(mountpoint);
-            let node = parser.resolve_tree(source_path.to_str().unwrap_or(""))?;
-            resolved.partitions[i].root = Some(node);
+            resolved.partitions[i].source_mountpoint = Some(layout.base_dir.join(mountpoint));
         }
         if let Some(payload_relative) = &part.payload {
             let payload_path = layout.base_dir.join(payload_relative);

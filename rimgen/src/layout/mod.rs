@@ -35,13 +35,16 @@ pub struct Partition<'a> {
     pub label: Option<String>,
     pub uuid: Option<String>,
     pub root: Option<FsNode<'a>>,
+    #[cfg(feature = "std")]
+    pub source_mountpoint: Option<PathBuf>,
     pub raw_source: Option<Box<dyn RimRead + 'a>>,
     pub raw_size: u64,
 }
 
 impl<'a> core::fmt::Debug for Partition<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Partition")
+        let mut debug = f.debug_struct("Partition");
+        debug
             .field("name", &self.name)
             .field("kind", &self.kind)
             .field("size_sectors", &self.size_sectors)
@@ -50,7 +53,10 @@ impl<'a> core::fmt::Debug for Partition<'a> {
             .field("guid", &self.guid)
             .field("label", &self.label)
             .field("uuid", &self.uuid)
-            .field("root", &self.root)
+            .field("root", &self.root);
+        #[cfg(feature = "std")]
+        debug.field("source_mountpoint", &self.source_mountpoint);
+        debug
             .field(
                 "raw_source",
                 &self.raw_source.as_ref().map(|_| "<dyn RimRead>"),
@@ -78,6 +84,8 @@ impl<'a> Partition<'a> {
             label: None,
             uuid: None,
             root: None,
+            #[cfg(feature = "std")]
+            source_mountpoint: None,
             raw_source: None,
             raw_size: 0,
         }
@@ -244,6 +252,8 @@ impl LayoutConfig {
                 label: part.label.clone(),
                 uuid: part.uuid.clone(),
                 root: None,
+                #[cfg(feature = "std")]
+                source_mountpoint: None,
                 raw_source: None,
                 raw_size: 0,
             });
