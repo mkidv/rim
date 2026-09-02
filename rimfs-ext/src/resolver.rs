@@ -602,13 +602,6 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
         )))
     }
 
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (is_dir, inode, _) = self.resolve_entry_info(path)?;
-        crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
-
-        self.read_file_content(inode)
-    }
-
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
         let components = split_path(path);
         let mut current_inode = EXT_ROOT_INODE;

@@ -12,7 +12,7 @@ use crc32fast::Hasher;
 use rimfs_core::errors::FsInjectorResult;
 use rimfs_core::injector::FsTreeInjector;
 use rimfs_core::normalize_fs_path;
-use rimfs_core::resolver::{attr::FileAttributes, node::FsNode};
+use rimfs_core::resolver::attr::FileAttributes;
 use rimio::{RimIO, RimRead};
 use time::OffsetDateTime;
 
@@ -358,7 +358,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         Ok(())
     }
 
-    fn set_root_context(&mut self, _node: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
         Ok(())
     }
 

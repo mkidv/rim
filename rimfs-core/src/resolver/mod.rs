@@ -51,14 +51,18 @@ pub trait FsTreeResolver {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>>;
 
     /// Opens a file at the given path for streaming read without heap buffer allocation.
+    ///
+    /// Prefer this API for large files.
     fn open_file<'b>(&'b mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'b>>;
 
-    /// Returns the full content of the file at the given path.
+    /// Returns the full content of the file at the given path as a heap buffer.
     ///
-    /// Default implementation streams from `open_file`.
+    /// This intentionally materializes the whole file. Use [`FsTreeResolver::open_file`]
+    /// for large files or bounded-memory pipelines.
     fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
         let mut stream = self.open_file(path)?;
-        let size = stream.total_size().map_err(FsResolverError::IO)? as usize;
+        let size = usize::try_from(stream.total_size().map_err(FsResolverError::IO)?)
+            .map_err(|_| FsResolverError::Invalid("File is too large to materialize"))?;
         #[cfg(feature = "alloc")]
         {
             let mut buf = alloc::vec![0u8; size];
@@ -77,7 +81,10 @@ pub trait FsTreeResolver {
         Err(FsResolverError::Unsupported)
     }
 
-    /// Resolves an entry or directory hierarchy into an `FsNode`.
+    /// Resolves an entry or directory hierarchy into an owned `FsNode` snapshot.
+    ///
+    /// File payloads are materialized with [`FsTreeResolver::read_file`]. Use
+    /// `FsTreeInjector::inject_tree_from_resolver` for bounded-memory tree injection.
     ///
     /// If `path` ends with `/*`, a `FsNode::Container` is created with all children.
     /// If `recurse` is true, subdirectories are traversed recursively.

@@ -69,7 +69,7 @@ fn bench_exfat_large_write(c: &mut Criterion) {
 
                 // We simulate writing a file at root
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
                 injector
                     .write_file(
@@ -101,7 +101,7 @@ fn bench_exfat_large_write(c: &mut Criterion) {
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
                 injector
                     .write_file(
@@ -134,7 +134,7 @@ fn bench_exfat_large_write(c: &mut Criterion) {
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
                 injector
                     .write_file(
@@ -166,7 +166,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
-            .set_root_context(&FsNode::new_container(vec![]))
+            .set_root_context(&FileAttributes::new_dir())
             .unwrap();
         // Write a 10MB file
         let mut content = vec![0xAAu8; WRITE_SIZE];
@@ -201,7 +201,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
-            .set_root_context(&FsNode::new_container(vec![]))
+            .set_root_context(&FileAttributes::new_dir())
             .unwrap();
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
@@ -238,7 +238,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
-            .set_root_context(&FsNode::new_container(vec![]))
+            .set_root_context(&FileAttributes::new_dir())
             .unwrap();
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
@@ -294,7 +294,7 @@ fn bench_exfat_small_files(c: &mut Criterion) {
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
 
                 for i in 0..NUM_FILES {
@@ -328,7 +328,7 @@ fn bench_exfat_small_files(c: &mut Criterion) {
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
 
                 for i in 0..NUM_FILES {
@@ -360,7 +360,7 @@ fn bench_exfat_small_files(c: &mut Criterion) {
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
                 injector
-                    .set_root_context(&FsNode::new_container(vec![]))
+                    .set_root_context(&FileAttributes::new_dir())
                     .unwrap();
 
                 for i in 0..NUM_FILES {

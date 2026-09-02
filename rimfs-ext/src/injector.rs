@@ -97,7 +97,7 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
-    fn set_root_context(&mut self, root: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, attr: &FileAttributes) -> FsInjectorResult {
         // Use the pre-formatted root inode (inode 2), not allocating a new one.
         // The root directory was already written by the formatter.
 
@@ -165,7 +165,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             1,
         );
 
-        let mut ctx = ExtContext::new(handle, existing, extent, root.attr().clone());
+        let mut ctx = ExtContext::new(handle, existing, extent, attr.clone());
         ctx.child_dir_count = child_dir_count;
         self.stack.push(ctx);
 

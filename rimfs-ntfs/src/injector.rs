@@ -16,7 +16,6 @@ use crate::builder::{NtfsAttribute, NtfsIndexEntry, NtfsMftRecord};
 use crate::constant::SECURITY_ID_EVERYONE;
 use crate::core::allocator::FsAllocator;
 use crate::core::injector::{FsContext, FsTreeInjector};
-use crate::core::resolver::FsNode;
 use crate::core::resolver::attr::FileAttributes;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::NtfsMeta;
@@ -168,7 +167,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO> {
-    fn set_root_context(&mut self, _node: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
         // Root MFT record is 5
         let handle = NtfsHandle::new(5);
 

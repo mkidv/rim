@@ -66,7 +66,9 @@ fn bench_ext4_large_write(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
                 injector
                     .write_file(
                         "bigfile.bin",
@@ -96,7 +98,9 @@ fn bench_ext4_large_write(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
                 injector
                     .write_file(
                         "bigfile.bin",
@@ -127,7 +131,9 @@ fn bench_ext4_large_write(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
                 injector
                     .write_file(
                         "bigfile.bin",
@@ -157,7 +163,9 @@ fn bench_ext4_large_read(c: &mut Criterion) {
         let mut io = MemRimIO::new(&mut disk_buf);
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
-        injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+        injector
+            .set_root_context(&FileAttributes::new_dir())
+            .unwrap();
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
         injector
@@ -188,7 +196,9 @@ fn bench_ext4_large_read(c: &mut Criterion) {
         let mut io = StdRimIO::new(&mut file);
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
-        injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+        injector
+            .set_root_context(&FileAttributes::new_dir())
+            .unwrap();
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
         injector
@@ -218,7 +228,9 @@ fn bench_ext4_large_read(c: &mut Criterion) {
         let mut io = MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap();
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
-        injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+        injector
+            .set_root_context(&FileAttributes::new_dir())
+            .unwrap();
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
         injector
@@ -272,7 +284,9 @@ fn bench_ext4_small_files(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
 
                 for i in 0..NUM_FILES {
                     let name = format!("file{i}.txt");
@@ -302,7 +316,9 @@ fn bench_ext4_small_files(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
 
                 for i in 0..NUM_FILES {
                     let name = format!("file{i}.txt");
@@ -332,7 +348,9 @@ fn bench_ext4_small_files(c: &mut Criterion) {
                 let len = content_copy.len() as u64;
                 let mut content_io = MemRimIO::new(&mut content_copy);
 
-                injector.set_root_context(&FsNode::new_dir("/")).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
 
                 for i in 0..NUM_FILES {
                     let name = format!("file{i}.txt");

@@ -60,15 +60,6 @@ impl FsTreeResolver for StdResolver {
         Ok(Box::new(io))
     }
 
-    /// Returns the full content of the file at the given path.
-    ///
-    /// The path must refer to a regular file, not a directory.
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let path_str = clean_and_normalize_path(path);
-        let path = Path::new(&path_str);
-        Ok(fs::read(path)?)
-    }
-
     /// Returns the symbolic link target at the given path.
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
         let path_str = clean_and_normalize_path(path);

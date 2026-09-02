@@ -132,50 +132,6 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
         )))
     }
 
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let entry = self.resolve_entry(path)?;
-        crate::ensure!(!entry.is_dir(), FsResolverError::Invalid("Expected a file"));
-
-        let size = entry.size();
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-
-        let first_cluster = entry.first_cluster();
-        let is_contiguous = entry.stream.is_contiguous();
-
-        let mut out = vec![0u8; size];
-
-        if is_contiguous {
-            // OPTIMIZATION: Use read_block_best_effort for contiguous file
-            let offset = self.meta.unit_offset(first_cluster);
-            self.io
-                .read_block_best_effort(offset, &mut out, self.meta.unit_size())?;
-        } else {
-            // Standard path: Use ClusterCursor to chase FAT chain
-            let cs = self.meta.unit_size();
-            let mut written = 0usize;
-            let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
-            cur.for_each_run(self.io, |io, start, len| {
-                if written >= out.len() {
-                    return Ok(());
-                }
-                let off = self.meta.unit_offset(start);
-                let bytes = (len as usize) * cs;
-                let to_copy = core::cmp::min(bytes, out.len() - written);
-                io.read_at(off, &mut out[written..written + to_copy])?;
-                written += to_copy;
-                Ok(())
-            })?;
-
-            if written < out.len() {
-                crate::bail!("short_stream_read");
-            }
-        }
-
-        Ok(out)
-    }
-
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
         if path.is_empty() || path == "/" {
             return Ok(FileAttributes::new_dir());

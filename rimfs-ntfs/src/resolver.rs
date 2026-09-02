@@ -435,9 +435,9 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
             .0;
         crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
 
-        let attr = self
-            .find_attribute(&record, ATTR_DATA)?
-            .ok_or(FsResolverError::NotFound)?;
+        let Some(attr) = self.find_attribute(&record, ATTR_DATA)? else {
+            return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
+        };
 
         let view = attr
             .as_view()
@@ -480,28 +480,6 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
                     data_size,
                 )))
             }
-        }
-    }
-
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (found, mft_num, _) = self.resolve_path_internal(path)?;
-        crate::ensure!(found, FsResolverError::NotFound);
-
-        let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record)
-            .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
-            .0;
-        crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
-
-        if let Some(attr) = self.find_attribute(&record, ATTR_DATA)? {
-            if attr.is_resident() {
-                let content = self.get_resident_attribute_content(attr)?;
-                Ok(content.to_vec())
-            } else {
-                self.get_non_resident_attribute_content(attr)
-            }
-        } else {
-            Ok(Vec::new()) // Empty file
         }
     }
 

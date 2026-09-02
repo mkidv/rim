@@ -132,7 +132,7 @@ impl<'a, IO: RimIO + ?Sized> FatInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
-    fn set_root_context(&mut self, _: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _: &FileAttributes) -> FsInjectorResult {
         // Load root cluster’s existing entries, strip trailing EOD region
         let root = self.meta.root_unit();
         let offset = self.meta.unit_offset(root);
@@ -281,7 +281,9 @@ mod tests {
     use crate::core::injector::FsTreeInjector;
     use crate::prelude::*;
     use crate::resolver::FatResolver;
+    use rimfs_core::StdResolver;
     use rimfs_core::testing::{assert_structural_tree_eq, nested_files_tree};
+    use std::io::Write;
 
     fn test_injector_scenario(meta: FatMeta, name: &str) {
         let mut buf = vec![0u8; meta.volume_size_bytes as usize];
@@ -424,5 +426,45 @@ mod tests {
             let res = resolver.read_file("/reli.txt");
             assert!(res.is_err(), "Expected CRC error after corruption");
         }
+    }
+
+    #[test]
+    fn test_inject_tree_from_std_resolver_roundtrip() {
+        const SIZE_BYTES: u64 = 32 * 1024 * 1024;
+
+        let source_dir = tempfile::tempdir().unwrap();
+        std::fs::write(source_dir.path().join("hello.txt"), b"hello from host\n").unwrap();
+        std::fs::create_dir(source_dir.path().join("nested")).unwrap();
+
+        let unicode_path = source_dir.path().join("nested").join("unicodé.txt");
+        let mut unicode_file = std::fs::File::create(unicode_path).unwrap();
+        unicode_file.write_all(b"bonjour\n").unwrap();
+
+        let meta = FatMeta::new_fat32(SIZE_BYTES, Some("HOSTSRC")).unwrap();
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+        FatFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        {
+            let mut resolver = StdResolver::new();
+            let mut injector = FatInjector::new(&mut io, &meta).unwrap();
+            let path = source_dir.path().join("*");
+            let counts = injector
+                .inject_tree_from_resolver(&mut resolver, path.to_str().unwrap())
+                .unwrap();
+
+            assert_eq!(counts.dirs, 1);
+            assert_eq!(counts.files, 2);
+        }
+
+        let mut resolver = FatResolver::new(&mut io, &meta);
+        assert_eq!(
+            resolver.read_file("hello.txt").unwrap(),
+            b"hello from host\n"
+        );
+        assert_eq!(
+            resolver.read_file("nested/unicodé.txt").unwrap(),
+            b"bonjour\n"
+        );
     }
 }

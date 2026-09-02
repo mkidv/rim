@@ -10,7 +10,6 @@ use crate::core::cursor::ClusterCursor;
 pub use crate::core::resolver::*;
 
 use crate::core::FsCursorError;
-use crate::core::fat::{FatDriver, FatFsMeta};
 use crate::core::utils::path_utils::*;
 use crate::{attr::*, constant::*, meta::*, types::*};
 
@@ -108,78 +107,6 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for FatResolver<'a, IO> {
             extents,
             total_size,
         )))
-    }
-
-    fn read_file(&mut self, path: &str) -> FsResolverResult<Vec<u8>> {
-        let (is_dir, first_cluster, size) = self.resolve_entry_info(path)?;
-        crate::ensure!(!is_dir, FsResolverError::Invalid("Not a file"));
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-
-        let cs = self.meta.unit_size();
-        let is_contiguous_hint = self.read_attributes(path)?.contiguous;
-        let mut is_actually_contiguous = false;
-
-        if is_contiguous_hint && first_cluster >= FAT_FIRST_CLUSTER {
-            // Mini-check FAT: verify the first N clusters are indeed contiguous
-            // This protects against the hint being stale.
-            let mut driver = FatDriver::new(self.meta);
-            let check_count = (size.div_ceil(cs)).min(8) as u32;
-            let mut current = first_cluster;
-            let mut consistent = true;
-
-            for i in 0..check_count {
-                let next = driver.get_ro(self.io, current)?;
-                let expected = if i + 1 < (size.div_ceil(cs)) as u32 {
-                    current + 1
-                } else {
-                    FatFsMeta::entry_mask(self.meta) // Should be EOC
-                };
-
-                if i + 1 < (size.div_ceil(cs)) as u32 {
-                    if next != expected {
-                        consistent = false;
-                        break;
-                    }
-                } else {
-                    // Last check: must be EOC or next cluster in chain
-                    if !FatFsMeta::is_eoc(self.meta, next) && next != current + 1 {
-                        consistent = false;
-                        break;
-                    }
-                }
-                current = next;
-            }
-            is_actually_contiguous = consistent;
-        }
-
-        let mut out = vec![0u8; size];
-        let mut written = 0usize;
-
-        if is_actually_contiguous {
-            let offset = self.meta.unit_offset(first_cluster);
-            self.io.read_at(offset, &mut out)?;
-            written = size;
-        } else {
-            let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
-            cur.for_each_run(self.io, |io, start, len| {
-                if written >= out.len() {
-                    return Ok(());
-                }
-                let off = self.meta.unit_offset(start);
-                let bytes = (len as usize) * cs;
-                let to_copy = core::cmp::min(bytes, out.len() - written);
-                io.read_at(off, &mut out[written..written + to_copy])?;
-                written += to_copy;
-                Ok(())
-            })?;
-        }
-
-        if written < out.len() {
-            return Err("short_stream_read".into());
-        }
-        Ok(out)
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {

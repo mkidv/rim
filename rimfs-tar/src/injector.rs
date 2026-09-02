@@ -11,7 +11,7 @@ use crate::types::*;
 use rimfs_core::errors::FsInjectorResult;
 use rimfs_core::injector::FsTreeInjector;
 use rimfs_core::normalize_fs_path;
-use rimfs_core::resolver::{attr::FileAttributes, node::FsNode};
+use rimfs_core::resolver::attr::FileAttributes;
 use rimio::{RimIO, RimRead};
 
 /// Serializes and writes `FsNode` trees and files into a TAR archive stream.
@@ -146,7 +146,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         self.write_header(link_name, 0, mode, uid, gid, mtime, SYMTYPE, target)
     }
 
-    fn set_root_context(&mut self, _node: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
         Ok(())
     }
 

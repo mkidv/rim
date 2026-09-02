@@ -92,7 +92,7 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, IO> {
-    fn set_root_context(&mut self, _: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _: &FileAttributes) -> FsInjectorResult {
         let offset = self.meta.unit_offset(self.meta.root_unit());
 
         let mut buf = vec![0u8; self.meta.unit_size()];
@@ -313,11 +313,7 @@ mod tests {
         let mut injector = ExFatInjector::new(&mut io, &meta).expect("injector new failed");
 
         injector
-            .set_root_context(&FsNode::Dir {
-                name: "".to_string(),
-                attr: FileAttributes::new_dir(),
-                children: vec![],
-            })
+            .set_root_context(&FileAttributes::new_dir())
             .expect("set_root_context failed");
 
         // 3 clusters roughly

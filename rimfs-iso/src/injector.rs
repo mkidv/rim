@@ -9,9 +9,9 @@ use alloc::{format, vec, vec::Vec};
 use crate::layout::IsoLayoutPlan;
 use crate::meta::IsoMeta;
 use crate::types::*;
-use rimfs_core::errors::FsInjectorResult;
+use rimfs_core::errors::{FsInjectorError, FsInjectorResult};
 use rimfs_core::injector::FsTreeInjector;
-use rimfs_core::resolver::{attr::FileAttributes, node::FsNode};
+use rimfs_core::resolver::{FsTreeResolver, attr::FileAttributes, node::FsNode};
 use rimio::{RimIO, RimRead};
 
 /// Serializes and writes `FsNode` trees into a complete ISO 9660 / Joliet / Rock Ridge / El Torito image.
@@ -699,7 +699,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
         Ok(())
     }
 
-    fn set_root_context(&mut self, _node: &FsNode<'_>) -> FsInjectorResult {
+    fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
         Ok(())
     }
 
@@ -724,6 +724,26 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
 
         self.io.flush()?;
         Ok(())
+    }
+
+    fn inject_tree_from_resolver(
+        &mut self,
+        _resolver: &mut dyn FsTreeResolver,
+        _path: &str,
+    ) -> FsInjectorResult<rimfs_core::resolver::FsNodeCounts> {
+        Err(FsInjectorError::Unsupported(
+            "ISO streaming resolver injection requires a layout plan",
+        ))
+    }
+
+    fn inject_entry_from_resolver(
+        &mut self,
+        _resolver: &mut dyn FsTreeResolver,
+        _path: &str,
+    ) -> FsInjectorResult<rimfs_core::resolver::FsNodeCounts> {
+        Err(FsInjectorError::Unsupported(
+            "ISO streaming resolver injection requires a layout plan",
+        ))
     }
 
     fn flush(&mut self) -> FsInjectorResult {
