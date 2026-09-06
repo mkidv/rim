@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::group_layout::GroupLayout;
 use crate::meta::ExtMeta;
+use crate::types::GroupLayout;
 use rimio::prelude::*;
 
 struct InodeTableRegion {

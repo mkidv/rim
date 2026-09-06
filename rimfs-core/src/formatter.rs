@@ -28,10 +28,12 @@ use crate::meta::FsMeta;
 use rimio::prelude::*;
 
 /// Helper to zero out the data region (cluster heap) of a filesystem.
-pub fn zero_cluster_heap<M: FsMeta<u32>, IO: RimIO + ?Sized>(
-    io: &mut IO,
-    meta: &M,
-) -> FsFormatterResult {
+pub fn zero_cluster_heap<U, M, IO>(io: &mut IO, meta: &M) -> FsFormatterResult
+where
+    U: Copy + Ord + Into<u64>,
+    M: FsMeta<U>,
+    IO: RimIO + ?Sized,
+{
     let first = meta.first_data_unit();
     let last = meta.last_data_unit();
     if first > last {

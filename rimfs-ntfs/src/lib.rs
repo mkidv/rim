@@ -10,15 +10,10 @@ pub use rimfs_core::{bail, ensure};
 mod allocator;
 #[allow(dead_code)]
 mod attr;
-#[allow(dead_code)]
-pub(crate) mod attrdef;
-#[allow(dead_code)]
-pub(crate) mod bitmap;
-#[allow(dead_code, unused_imports)]
-pub(crate) mod builder;
 mod checker;
 #[allow(dead_code)]
 pub(crate) mod constant;
+pub mod features;
 mod filesystem;
 mod flags;
 mod formatter;
@@ -42,6 +37,7 @@ pub mod traits {
     pub use super::allocator::{NtfsAllocator, NtfsHandle};
     pub use super::attr::NtfsFileAttributesExt;
     pub use super::checker::{NtfsChecker, NtfsCheckerOptions};
+    pub use super::filesystem::Ntfs;
     pub use super::formatter::NtfsFormatter;
     pub use super::injector::NtfsInjector;
     pub use super::meta::NtfsMeta;

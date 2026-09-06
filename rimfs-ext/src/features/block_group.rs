@@ -11,9 +11,9 @@ use crate::constant::*;
 use crate::core::bitmap::BitmapDriver;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::group_layout::GroupLayout;
 use crate::meta::ExtMeta;
 use crate::types::ExtBlockGroupDesc;
+use crate::types::GroupLayout;
 
 #[derive(Default)]
 pub struct BlockGroupFeature {

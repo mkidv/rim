@@ -11,7 +11,10 @@ use crate::{
         traits::FsMeta,
         utils::volume::generate_volume_id_128,
     },
-    types::ExtSuperblock,
+    types::{
+        ExtSuperblock,
+        flags::{ExtCompatFeatures, ExtIncompatFeatures, ExtRoCompatFeatures},
+    },
 };
 use rimio::prelude::*;
 
@@ -69,15 +72,19 @@ impl ExtFeatureSet {
     };
 
     pub fn from_superblock(sb: &ExtSuperblock) -> Self {
+        let compat = ExtCompatFeatures::from_bits_truncate(sb.s_feature_compat);
+        let incompat = ExtIncompatFeatures::from_bits_truncate(sb.s_feature_incompat);
+        let ro_compat = ExtRoCompatFeatures::from_bits_truncate(sb.s_feature_ro_compat);
+
         Self {
-            has_compat: (sb.s_feature_compat & EXT_FEATURE_COMPAT_EXT_ATTR) != 0
-                || (sb.s_feature_compat & EXT_FEATURE_COMPAT_DIR_INDEX) != 0,
-            has_incompat: (sb.s_feature_incompat & EXT_FEATURE_INCOMPAT_FILETYPE) != 0,
-            has_extents: (sb.s_feature_incompat & EXT_FEATURE_INCOMPAT_EXTENTS) != 0,
-            has_64bit: (sb.s_feature_incompat & EXT_FEATURE_INCOMPAT_64BIT) != 0,
-            has_ro_compat: (sb.s_feature_ro_compat & EXT_FEATURE_RO_COMPAT_LARGE_FILE) != 0,
-            has_sparse_super: (sb.s_feature_ro_compat & EXT_FEATURE_RO_COMPAT_SPARSE_SUPER) != 0,
-            has_journal: (sb.s_feature_compat & EXT_FEATURE_COMPAT_HAS_JOURNAL) != 0,
+            has_compat: compat
+                .intersects(ExtCompatFeatures::EXT_ATTR | ExtCompatFeatures::DIR_INDEX),
+            has_incompat: incompat.contains(ExtIncompatFeatures::FILETYPE),
+            has_extents: incompat.contains(ExtIncompatFeatures::EXTENTS),
+            has_64bit: incompat.contains(ExtIncompatFeatures::_64BIT),
+            has_ro_compat: ro_compat.contains(ExtRoCompatFeatures::LARGE_FILE),
+            has_sparse_super: ro_compat.contains(ExtRoCompatFeatures::SPARSE_SUPER),
+            has_journal: compat.contains(ExtCompatFeatures::HAS_JOURNAL),
         }
     }
 }

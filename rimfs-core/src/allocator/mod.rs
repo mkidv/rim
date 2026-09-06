@@ -9,6 +9,8 @@ use rimio::RimIO;
 /// Example: cluster handle, inode handle, block handle, etc.
 pub trait FsHandle {}
 
+impl FsHandle for () {}
+
 /// Trait for managing allocation of logical units in a filesystem.
 ///
 /// - `Handle` is a handle representing an allocated unit (e.g., containing metadata or chains)

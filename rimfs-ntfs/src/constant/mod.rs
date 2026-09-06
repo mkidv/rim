@@ -45,8 +45,8 @@ pub const MFT_RECORD_FREE_START: u64 = 16;
 pub const MFT_RECORD_USER_START: u64 = 24;
 
 // $Extend children (assigned to > 24 according to specs)
-pub const MFT_RECORD_OBJID: u64 = 24; // $Extend\$ObjId
-pub const MFT_RECORD_QUOTA: u64 = 25; // $Extend\$Quota
+pub const MFT_RECORD_QUOTA: u64 = 24; // $Extend\$Quota
+pub const MFT_RECORD_OBJID: u64 = 25; // $Extend\$ObjId
 pub const MFT_RECORD_REPARSE: u64 = 26; // $Extend\$Reparse
 pub const MFT_RECORD_USNJRNL: u64 = 27; // $Extend\$UsnJrnl
 pub const MFT_RECORD_FIRST_USER: u64 = 1024; // First user file/directory
@@ -73,8 +73,11 @@ pub const ATTR_LOGGED_UTILITY_STREAM: u32 = 0x100;
 pub const ATTR_END: u32 = 0xFFFFFFFF;
 
 // Security IDs
-/// Standard "Everyone: Full Control" Security ID index in our minimal $Secure
-pub const SECURITY_ID_EVERYONE: u32 = 0;
+pub const SECURITY_ID_EVERYONE: u32 = 0x100;
+pub const SECURITY_ID_SYSTEM: u32 = 0x101;
+
+#[allow(unused_imports)]
+pub use crate::types::sid::*;
 
 // Filename namespace
 pub const FILE_NAME_POSIX: u8 = 0;

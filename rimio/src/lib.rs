@@ -54,7 +54,7 @@ pub mod prelude {
     pub use super::mem::{BoundedRimIO, MemRimIO, SliceRimIO};
     pub use super::run::*;
     #[cfg(feature = "alloc")]
-    pub use super::sparse::{PagedSparseRimIO, SparseRimIO};
+    pub use super::sparse::{OverlayRimIO, PagedOverlayRimIO, PagedSparseRimIO, SparseRimIO};
     pub use super::stats::*;
     pub use super::utils::*;
 

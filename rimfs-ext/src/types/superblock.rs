@@ -4,6 +4,7 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::constant::*;
+use crate::types::flags::{ExtCompatFeatures, ExtIncompatFeatures, ExtRoCompatFeatures};
 
 /// EXT Superblock structure (1024 bytes)
 ///
@@ -291,32 +292,32 @@ impl ExtSuperblock {
             s_inodes_per_group: meta.inodes_per_group,
             // Features
             s_feature_compat: if meta.features.has_compat {
-                EXT_FEATURE_COMPAT_EXT_ATTR | EXT_FEATURE_COMPAT_DIR_INDEX
+                (ExtCompatFeatures::EXT_ATTR | ExtCompatFeatures::DIR_INDEX).bits()
             } else {
                 0
             },
 
             s_feature_incompat: {
-                let mut f = EXT_FEATURE_INCOMPAT_FILETYPE;
+                let mut f = ExtIncompatFeatures::FILETYPE;
                 if meta.features.has_extents {
-                    f |= EXT_FEATURE_INCOMPAT_EXTENTS;
+                    f |= ExtIncompatFeatures::EXTENTS;
                 }
                 if meta.features.has_64bit {
-                    f |= EXT_FEATURE_INCOMPAT_64BIT;
+                    f |= ExtIncompatFeatures::_64BIT;
                 }
-                f
+                f.bits()
             },
 
             s_feature_ro_compat: {
-                let mut f = 0;
+                let mut f = ExtRoCompatFeatures::empty();
                 if meta.features.has_ro_compat {
-                    f |= EXT_FEATURE_RO_COMPAT_LARGE_FILE | EXT_FEATURE_RO_COMPAT_SPARSE_SUPER;
+                    f |= ExtRoCompatFeatures::LARGE_FILE | ExtRoCompatFeatures::SPARSE_SUPER;
                     // Logic: Ext features
                     if meta.features.has_extents {
-                        f |= EXT_FEATURE_RO_COMPAT_DIR_NLINK | EXT_FEATURE_RO_COMPAT_EXTRA_ISIZE;
+                        f |= ExtRoCompatFeatures::DIR_NLINK | ExtRoCompatFeatures::EXTRA_ISIZE;
                     }
                 }
-                f
+                f.bits()
             },
             // Set descriptor size to 64 bytes only if 64BIT feature is set
             s_desc_size: if meta.features.has_64bit { 64 } else { 0 },

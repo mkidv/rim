@@ -194,12 +194,10 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     /// Read entries from a directory MFT record
     ///
     /// Supports resident indexes in $INDEX_ROOT and non-resident in $INDEX_ALLOCATION
-    pub fn read_directory_entries(
-        &mut self,
-        record_number: u64,
-    ) -> FsResolverResult<Vec<(String, u64, FileAttributes)>> {
-        if let Some(cached) = self.dir_cache.get(&record_number) {
-            return Ok(cached.clone());
+    /// Ensure directory entries for an MFT record are loaded into cache
+    pub fn load_directory_entries(&mut self, record_number: u64) -> FsResolverResult<()> {
+        if self.dir_cache.contains_key(&record_number) {
+            return Ok(());
         }
 
         let record = self.read_mft_record(record_number)?;
@@ -280,8 +278,23 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             }
         }
 
-        self.dir_cache.insert(record_number, entries.clone());
-        Ok(entries)
+        self.dir_cache.insert(record_number, entries);
+        Ok(())
+    }
+
+    /// Read entries from a directory MFT record
+    ///
+    /// Supports resident indexes in $INDEX_ROOT and non-resident in $INDEX_ALLOCATION
+    pub fn read_directory_entries(
+        &mut self,
+        record_number: u64,
+    ) -> FsResolverResult<Vec<(String, u64, FileAttributes)>> {
+        self.load_directory_entries(record_number)?;
+        Ok(self
+            .dir_cache
+            .get(&record_number)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn parse_entries_from_node_header(
@@ -347,8 +360,10 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                 if let Ok(name) = String::from_utf16(&name_u16)
                     && name != "."
                 {
-                    let is_dir =
-                        (fn_attr.file_attributes & NtfsFileAttributes::DIRECTORY.bits()) != 0;
+                    let is_dir = (fn_attr.file_attributes
+                        & (NtfsFileAttributes::DIRECTORY.bits()
+                            | NtfsFileAttributes::I30_INDEX.bits()))
+                        != 0;
                     let attr = if is_dir {
                         FileAttributes::new_dir()
                     } else {
@@ -367,49 +382,75 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     }
 
     pub fn resolve_path_internal(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
-        // Start at root
-        let mut current_mft = MFT_RECORD_ROOT;
-
-        // Trim leading slash
-        let clean_path = path.trim_start_matches('/');
-        if clean_path.empty_or_root() {
-            return Ok((true, current_mft as u32, 0));
+        match crate::core::resolver::walker::walk_path(self, path) {
+            Ok(Some(entry)) => Ok((true, entry.mft_num as u32, 0)),
+            Ok(None) => Ok((true, MFT_RECORD_ROOT as u32, 0)),
+            Err(FsResolverError::NotFound) => Ok((false, 0, 0)),
+            Err(e) => Err(e),
         }
-
-        for component in clean_path.split('/') {
-            if component.is_empty() {
-                continue;
-            }
-
-            // Read directory entries of current
-            let entries = self.read_directory_entries(current_mft)?;
-
-            let mut found = false;
-            for (name, mft_num, _) in entries {
-                let name_u16: Vec<u16> = name.encode_utf16().collect();
-                if crate::utils::eq_names_upcase_str(&name_u16, component, &self.upcase) {
-                    current_mft = mft_num;
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                return Ok((false, 0, 0));
-            }
-        }
-
-        Ok((true, current_mft as u32, 0))
     }
 }
 
-trait EmptyOrRoot {
-    fn empty_or_root(&self) -> bool;
+/// Helper for zero-allocation UpCase comparison between UTF-8 and UTF-16
+#[inline]
+fn eq_utf8_to_utf16_upcase(name: &str, target_u16: &[u16], upcase: &UpcaseHandle) -> bool {
+    let mut name_utf16 = name.encode_utf16();
+    for &target_char in target_u16 {
+        match name_utf16.next() {
+            Some(nc) => {
+                if upcase.upper(nc) != upcase.upper(target_char) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    name_utf16.next().is_none()
 }
 
-impl EmptyOrRoot for &str {
-    fn empty_or_root(&self) -> bool {
-        self.is_empty() || *self == "/"
+use crate::core::resolver::walker::WalkerDataSource;
+
+#[derive(Debug, Clone)]
+pub struct NtfsDirEntry {
+    pub name: String,
+    pub mft_num: u64,
+    pub is_dir: bool,
+    pub attr: FileAttributes,
+}
+
+impl<'a, IO: RimRead + ?Sized> WalkerDataSource for NtfsResolver<'a, IO> {
+    type Entry = NtfsDirEntry;
+
+    fn root_cluster(&self) -> u32 {
+        MFT_RECORD_ROOT as u32
+    }
+
+    fn find_entry(&mut self, dir_mft: u32, name: &str) -> FsResolverResult<Option<Self::Entry>> {
+        let dir_mft = dir_mft as u64;
+        self.load_directory_entries(dir_mft)?;
+
+        let target_u16: Vec<u16> = name.encode_utf16().collect();
+        if let Some(entries) = self.dir_cache.get(&dir_mft) {
+            for (entry_name, mft_num, attr) in entries {
+                if eq_utf8_to_utf16_upcase(entry_name, &target_u16, &self.upcase) {
+                    return Ok(Some(NtfsDirEntry {
+                        name: entry_name.clone(),
+                        mft_num: *mft_num,
+                        is_dir: attr.is_dir(),
+                        attr: attr.clone(),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn is_dir(&self, entry: &Self::Entry) -> bool {
+        entry.is_dir
+    }
+
+    fn entry_cluster(&self, entry: &Self::Entry) -> u32 {
+        entry.mft_num as u32
     }
 }
 
@@ -418,8 +459,9 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
         let (found, mft_num, _) = self.resolve_path_internal(path)?;
         crate::ensure!(found, FsResolverError::NotFound);
 
-        let entries = self.read_directory_entries(mft_num as u64)?;
-        Ok(entries.into_iter().map(|(name, _, _)| name).collect())
+        self.load_directory_entries(mft_num as u64)?;
+        let entries = self.dir_cache.get(&(mft_num as u64)).unwrap();
+        Ok(entries.iter().map(|(name, _, _)| name.clone()).collect())
     }
 
     fn open_file<'c>(
@@ -433,7 +475,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
         let header = MftRecordHeader::read_from_prefix(&record)
             .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
             .0;
-        crate::ensure!(!header.is_dir(), FsResolverError::Invalid("not a file"));
+        crate::ensure!(!header.is_dir(), FsResolverError::Invalid("Not a file"));
 
         let Some(attr) = self.find_attribute(&record, ATTR_DATA)? else {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
@@ -522,8 +564,8 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{MftRecordBuilder, NtfsAttribute};
     use crate::types::MftRecordHeader;
+    use crate::types::{MftRecordBuilder, NtfsAttribute};
     use rimfs_core::injector::FsTreeInjector;
     use rimfs_core::testing::file_with_attr;
     use rimio::prelude::MemRimIO;

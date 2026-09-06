@@ -20,7 +20,7 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
     let format = format_from_path(&image).unwrap_or(ImageFormat::Raw);
 
     let (_tmp_file, check_path) = if format == ImageFormat::Raw {
-        (None, image.clone())
+        (None, image)
     } else {
         println!("Physical unwrap of {} format...", format);
         let tmp = NamedTempFile::new().context("Failed to create temp file for unwrapping")?;

@@ -10,7 +10,7 @@ use crate::core::feature::FsSystemFeature;
 use crate::core::traits::FileAttributes;
 use crate::meta::ExtMeta;
 use crate::types::{ExtDirEntry, ExtExtent, ExtInode};
-use crate::{constant::*, group_layout::GroupLayout};
+use crate::{constant::*, types::GroupLayout};
 
 #[derive(Default)]
 pub struct RootDirFeature {

@@ -292,8 +292,5 @@ fn find_eocd<IO: RimIO + ?Sized>(io: &mut IO, total_len: u64) -> FsCheckerResult
 
 #[inline]
 fn is_all_zeros(buf: &[u8]) -> bool {
-    let (prefix, words, suffix) = unsafe { buf.align_to::<u64>() };
-    prefix.iter().all(|&b| b == 0)
-        && words.iter().all(|&w| w == 0)
-        && suffix.iter().all(|&b| b == 0)
+    buf.iter().all(|&b| b == 0)
 }

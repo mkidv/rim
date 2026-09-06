@@ -59,8 +59,8 @@ impl<'a, IO: RimIO + ?Sized> FsFormatter for ExtFormatter<'a, IO> {
         }
 
         // Flush final superblock and BGDT with exact counts
-        crate::updates::flush_superblock(self.io, &allocator, self.meta)?;
-        crate::updates::flush_bgdt(self.io, &allocator, self.meta, &[2])?;
+        allocator.flush_superblock(self.io, self.meta)?;
+        allocator.flush_bgdt(self.io, self.meta, &[2])?;
 
         self.io.flush()?;
         Ok(())
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
     use crate::checker::ExtChecker;
     use crate::constant::*;
-    use crate::group_layout::GroupLayout;
+    use crate::types::GroupLayout;
     use rimfs_core::checker::{FsChecker, VerifyReport};
     use rimfs_core::testing::assert_has_error;
 

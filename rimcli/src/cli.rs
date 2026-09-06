@@ -17,8 +17,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Generate a disk image from a declarative layout (aliases: build, gen)
-    #[command(alias = "build", alias = "gen")]
+    /// Generate a disk image from a declarative layout (alias: gen)
+    #[command(alias = "gen")]
     Generate {
         /// Path to declarative layout TOML file
         layout: PathBuf,
@@ -32,12 +32,16 @@ pub enum Commands {
         truncate: bool,
 
         /// Simulate build without writing bytes (or plan)
-        #[arg(short = 'n', long)]
+        #[arg(long)]
         dry_run: bool,
 
         /// Use OS-native tools (via rimhost) instead of pure-Rust engine
         #[arg(long)]
         host: bool,
+
+        /// Generate volumes without writing GPT or protective MBR
+        #[arg(long = "no-gpt", alias = "nogpt")]
+        no_gpt: bool,
 
         /// Verbose output
         #[arg(short, long, action = clap::ArgAction::Count)]
@@ -85,5 +89,46 @@ pub enum Commands {
     Inspect {
         /// Target disk image file
         image: PathBuf,
+    },
+
+    /// Copy files or directory trees logically between host and/or filesystem images
+    Copy {
+        /// Source endpoint (host directory/file or formatted image/archive)
+        source: String,
+
+        /// Destination endpoint (host directory or formatted image)
+        destination: String,
+
+        /// Source subpath inside source (defaults to root "/")
+        #[arg(long, default_value = "/")]
+        src_path: String,
+
+        /// Metadata policy: preserve-all, preserve-basic, strip
+        #[arg(long, default_value = "preserve-all")]
+        metadata: String,
+
+        /// Unsupported feature policy: error, warn, ignore
+        #[arg(long, default_value = "warn")]
+        unsupported: String,
+
+        /// Overwrite policy: replace, error, skip (default: replace for Host, error for images)
+        #[arg(long)]
+        overwrite: Option<String>,
+
+        /// Perform a trial run without writing any data to the destination
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Disable case collision detection
+        #[arg(long)]
+        no_detect_case_collisions: bool,
+
+        /// Verbose output
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
+
+        /// Quiet output
+        #[arg(short, long)]
+        quiet: bool,
     },
 }

@@ -10,6 +10,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lib]
+name = "rimcli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rim"
 path = "src/main.rs"
@@ -19,7 +23,8 @@ anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 colored = "3.1.1"
 indicatif = "0.18.3"
-rimfs = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
+rimfs = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs", "tar", "zip", "iso"] }
+rimfs-core = { workspace = true, features = ["std"] }
 rimgen = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs"] }
 rimhost.workspace = true
 rimimg = { workspace = true, features = ["std"] }

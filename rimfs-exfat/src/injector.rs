@@ -135,23 +135,17 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let cs = self.meta.unit_size();
-        let need = (size as usize).div_ceil(cs).max(1);
+        let entry = if size == 0 {
+            ExFatEntries::file(name, 0, 0, attr, &self.upcase)
+        } else {
+            let cs = self.meta.unit_size();
+            let need = (size as usize).div_ceil(cs);
+            let handle: ExFatHandle = self.allocator.allocate(self.io, need)?;
 
-        let handle: ExFatHandle = self.allocator.allocate(self.io, need)?;
-
-        // update FAT + Bitmap -> Handled by allocator.
-
-        use crate::core::utils::stream_copy::write_stream_to_run_list;
-
-        // ... (in write_file) ...
-        // Stream content to disk
-        if handle.cluster_chain.total_units() > 0 {
+            use crate::core::utils::stream_copy::write_stream_to_run_list;
             write_stream_to_run_list(self.io, self.meta, source, &handle.cluster_chain, size)?;
-        }
 
-        if let Some(ctx) = self.stack.last_mut() {
-            let entry = if handle.cluster_chain.is_contiguous() {
+            if handle.cluster_chain.is_contiguous() {
                 ExFatEntries::file_contiguous(
                     name,
                     handle.cluster_id,
@@ -162,8 +156,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
             } else {
                 ExFatEntries::file(name, handle.cluster_id, size as u32, attr, &self.upcase)
             }
-            .map_err(FsResolverError::Parsing)?;
+        }
+        .map_err(FsResolverError::Parsing)?;
 
+        if let Some(ctx) = self.stack.last_mut() {
             entry.to_raw_buffer(&mut ctx.buf);
         }
         Ok(())

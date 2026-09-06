@@ -93,6 +93,41 @@ fn test_declarative_builder_and_format_conversions() {
     }
 }
 
+#[test]
+fn test_build_without_partition_table() {
+    let layout = LayoutConfig {
+        base_dir: PathBuf::from("."),
+        partitions: vec![PartitionConfig {
+            name: "DATA".to_string(),
+            size: Size::Fixed(16),
+            fs: Filesystem::Fat16,
+            mountpoint: None,
+            index: None,
+            bootable: false,
+            kind: None,
+            guid: None,
+            payload: None,
+            label: None,
+            uuid: None,
+        }],
+        disk: None,
+    };
+    let options = rimgen::BuildOptions {
+        partition_table: rimgen::PartitionTable::None,
+    };
+    let raw_len = rimgen::calculate_total_disk_sectors_from_config_with_options(&layout, options)
+        .unwrap()
+        * 512;
+    let mut buffer = vec![0; raw_len as usize];
+    let mut io = MemRimIO::new(&mut buffer);
+
+    let report = rimgen::build_config_on_io_with_options(&layout, &mut io, options).unwrap();
+
+    assert_eq!(report.partitions.len(), 1);
+    assert_eq!(report.partitions[0].start_lba, 0);
+    assert!(rimpart::gpt::read_gpt_with_sector(&mut io, 512).is_err());
+}
+
 fn build_config_to_file(layout: &LayoutConfig, output: &Path, format: ImageFormat) {
     let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(layout) * 512;
     let file = OpenOptions::new()

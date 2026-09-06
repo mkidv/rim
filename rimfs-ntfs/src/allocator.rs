@@ -75,6 +75,7 @@ pub struct NtfsAllocator<'a> {
     pub meta: &'a NtfsMeta,
     pub next_free_hint: u64,
     pub used_clusters: u64,
+    pub driver: BitmapDriver<'a, NtfsMeta>,
 }
 
 impl<'a> NtfsAllocator<'a> {
@@ -84,6 +85,7 @@ impl<'a> NtfsAllocator<'a> {
             meta,
             next_free_hint: meta.first_data_unit(),
             used_clusters: 0,
+            driver: BitmapDriver::new(meta),
         })
     }
 
@@ -102,7 +104,34 @@ impl<'a> NtfsAllocator<'a> {
             meta,
             next_free_hint: hint,
             used_clusters: used,
+            driver,
         })
+    }
+
+    /// Flush any dirty bitmap window cached in memory to disk.
+    pub fn flush<IO: RimIO + ?Sized>(&mut self, io: &mut IO) -> FsAllocatorResult<()> {
+        self.driver.flush(io).map_err(FsAllocatorError::IO)
+    }
+
+    /// Free a contiguous range of clusters back to the allocator.
+    pub fn free_range<IO: RimIO + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        start: u64,
+        count: u64,
+    ) -> FsAllocatorResult<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        self.driver
+            .set_bits_range(io, start, count, false)
+            .map_err(FsAllocatorError::IO)?;
+        self.driver.flush(io).map_err(FsAllocatorError::IO)?;
+        self.used_clusters = self.used_clusters.saturating_sub(count);
+        if start < self.next_free_hint {
+            self.next_free_hint = start;
+        }
+        Ok(())
     }
 }
 
@@ -127,25 +156,25 @@ impl<'a> FsAllocator<NtfsHandle> for NtfsAllocator<'a> {
         io: &mut IO,
         count: usize,
     ) -> FsAllocatorResult<NtfsHandle> {
-        let mut driver = BitmapDriver::new(self.meta);
         let count_u64 = count as u64;
         let start_search = self.next_free_hint;
 
-        let mut try_alloc = |start_bit: u64| -> Option<u64> {
-            driver
-                .find_next_free(io, start_bit, count_u64)
-                .ok()
-                .flatten()
+        let found = match self.driver.find_next_free(io, start_search, count_u64) {
+            Ok(Some(start)) => Some(start),
+            _ => {
+                if start_search > 0 {
+                    self.driver.find_next_free(io, 0, count_u64).ok().flatten()
+                } else {
+                    None
+                }
+            }
         };
 
-        let found =
-            try_alloc(start_search).or_else(|| if start_search > 0 { try_alloc(0) } else { None });
-
         if let Some(start) = found {
-            driver
+            self.driver
                 .set_bits_range(io, start, count_u64, true)
                 .map_err(FsAllocatorError::IO)?;
-            driver.flush(io).map_err(FsAllocatorError::IO)?;
+            self.driver.flush(io).map_err(FsAllocatorError::IO)?;
 
             self.used_clusters += count_u64;
             self.next_free_hint = start + count_u64;

@@ -39,7 +39,6 @@ pub mod traits {
 pub mod prelude {
     pub use super::filesystem::Iso;
     pub use super::traits::*;
-    pub use super::types::IsoHandle;
     #[cfg(feature = "std")]
     pub use rimfs_core::StdResolver;
     pub use rimfs_core::errors::*;
@@ -114,7 +113,7 @@ mod tests {
 
         let mut tree = FsNode::new_container(alloc::vec![
             FsNode::new_dir("docs"),
-            file_with_attr("hello.txt", b"Hello ISO 9660!", custom_attr.clone()),
+            file_with_attr("hello.txt", b"Hello ISO 9660!", custom_attr),
             file("docs/unicode_étudiant.txt", b"Donnees Joliet"),
             FsNode::new_symlink("link_to_hello", "hello.txt"),
         ]);
@@ -313,7 +312,7 @@ mod tests {
         let mut counting_io = CountingRimIO::new(
             SliceRimIO::new(&parent_buf),
             total_bytes.clone(),
-            total_reads.clone(),
+            total_reads,
         );
 
         let mut parent_resolver = IsoResolver::new(&mut counting_io, &parent_meta);

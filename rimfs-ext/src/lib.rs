@@ -16,14 +16,10 @@ pub(crate) mod constant;
 pub(crate) mod features;
 mod filesystem;
 mod formatter;
-pub(crate) mod group_layout;
 mod injector;
 mod meta;
-#[allow(dead_code)]
-pub(crate) mod ops;
 mod resolver;
 pub mod types;
-pub(crate) mod updates;
 #[allow(dead_code)]
 pub(crate) mod utils;
 

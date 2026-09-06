@@ -79,27 +79,6 @@ impl<'a> ExFatAllocator<'a> {
         io: &mut IO,
         meta: &'a ExFatMeta,
     ) -> FsAllocatorResult<Self> {
-        // 1. Read the bitmap chain (so we know where it is, though mapped IO for bitmap is tricky with unified BitmapView)
-        // Wait, BitmapView uses absolute offset from meta.bitmap_offset().
-        // For ExFAT, the bitmap might be fragmented.
-        // `meta.bitmap_offset()` assumes contiguous or uses the start.
-        // `ExFatMeta::bitmap_offset()` calculates: heap_offset + (bitmap_cluster - 2) * cluster_size.
-        // If the bitmap itself is fragmented, `BitmapView` as implemented (linear offset) works ONLY if we provide a RimIO that handles the mapping (like MappedRimIO) OR if we teach BitmapView about chains.
-
-        // CRITICAL FIX: `BitmapView` expects linear IO.
-        // If the bitmap file is fragmented, standard `io.read_at(meta.bitmap_offset() + ...)` is WRONG unless `io` is the volume root and the bitmap is contiguous.
-        // ExFAT Bitmap IS usually contiguous but CAN be fragmented.
-        // However, `BitmapFsMeta` returns a single `bitmap_offset`.
-        // If we want to support fragmented bitmaps, `BitmapView` logic needs to route reads through the chain.
-        // BUT: ExFatMeta implementing `BitmapFsMeta` effectively says "It's at this linear physical offset".
-        // This holds true only if the bitmap is contiguous.
-
-        // For now, let's assume contiguous or that `io` handles it.
-        // To be robust: We should ideally wrap `io` in a `MappedRimIO` representing the bitmap file, pass THAT to `BitmapView`.
-        // Assumption: Bitmap is contiguous. This is standard for ExFAT.
-        // If it weren't, we'd need a chained reader.
-        // ExFatMeta implements BitmapFsMeta returning the absolute offset of the bitmap start.
-
         let mut view = BitmapDriver::new(meta);
 
         let used_clusters = view.count_ones(io).map_err(FsAllocatorError::IO)? as u32;
@@ -113,14 +92,6 @@ impl<'a> ExFatAllocator<'a> {
         } else {
             meta.first_data_unit() // Full?
         };
-
-        // We don't really need to store the bitmap chain if we assume contiguity and use offset.
-        // But the struct expects `bitmap_chain`.
-        // We'll construct a synthetic one or read it just to satisfy the struct field,
-        // OR better: we can probably remove `bitmap_chain` from the struct if it's not used anymore?
-        // Check struct usage. `ExFatAllocator` struct def has `pub bitmap_chain: RunList`.
-        // It's public. We should probably keep it populated for now to avoid breaking other things,
-        // or just put the single run in it.
 
         let mut bitmap_chain = RunList::new();
         bitmap_chain.push(Run {

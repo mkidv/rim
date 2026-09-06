@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: MIT
+//! EXT Directory block and Inode writing utilities.
 
-#[cfg(all(not(feature = "std"), feature = "alloc", test))]
-use alloc::string::ToString;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
+use crate::allocator::ExtAllocator;
 use crate::core::allocator::FsAllocator;
+use crate::core::utils::align::pad_to_size;
 use crate::core::{FsInjectorError, FsInjectorResult};
-use crate::{
-    allocator::ExtAllocator, group_layout::GroupLayout, meta::ExtMeta, types::ExtLostFound,
-};
+use crate::meta::ExtMeta;
+use crate::types::{ExtLostFound, GroupLayout};
 use rimio::prelude::*;
 use zerocopy::IntoBytes;
 
-use crate::core::utils::align::pad_to_size;
-
+/// Pads a directory block buffer to the requested block size,
+/// expanding the `rec_len` of the last directory entry to span the remaining space.
 pub fn pad_directory_block(buf: &mut Vec<u8>, block_size: usize) {
     if buf.is_empty() {
         return;
@@ -50,6 +50,7 @@ pub fn pad_directory_block(buf: &mut Vec<u8>, block_size: usize) {
     pad_to_size(buf, block_size);
 }
 
+/// Writes raw inode bytes into the inode table on disk.
 pub fn write_inode<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExtMeta,
@@ -76,6 +77,7 @@ pub fn write_inode<IO: RimIO + ?Sized>(
     Ok(())
 }
 
+/// Creates the `lost+found` directory structure during file injection.
 pub fn create_lost_found<IO: RimIO + ?Sized>(
     io: &mut IO,
     allocator: &mut ExtAllocator,
@@ -98,7 +100,7 @@ pub fn create_lost_found<IO: RimIO + ?Sized>(
     // 3. Write Inode (Inode 11)
     let inode = ExtLostFound::INODE;
     let inode_data = ExtLostFound::create_inode(meta.block_size, block);
-    let inode_buf = inode_data.as_bytes(); // Using as_bytes() via IntoBytes derived on ExtInode
+    let inode_buf = inode_data.as_bytes();
     write_inode(io, meta, inode, inode_buf)?;
 
     // 4. Add entry to parent (Root) buffer

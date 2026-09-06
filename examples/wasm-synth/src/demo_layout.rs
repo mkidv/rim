@@ -77,7 +77,7 @@ Engine: Pure Rust (no_std + alloc)\n";
     let conf_file = FsNode::File {
         name: "rim.conf".into(),
         source: Box::new(VecRimIO::new(conf_content.to_vec())),
-        attr: file_attr.clone(),
+        attr: file_attr,
     };
 
     let etc_dir = FsNode::Dir {

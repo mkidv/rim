@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#![cfg_attr(not(feature = "std"), no_std)]
-
 #[cfg(feature = "std")]
 use std::{fs, io::Error, path::Path};
 

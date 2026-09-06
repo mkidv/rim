@@ -38,7 +38,6 @@ pub mod traits {
 pub mod prelude {
     pub use super::filesystem::Zip;
     pub use super::traits::*;
-    pub use super::types::ZipHandle;
     #[cfg(feature = "std")]
     pub use rimfs_core::StdResolver;
     pub use rimfs_core::errors::*;
@@ -95,7 +94,7 @@ mod tests {
 
         let mut tree = basic_tree();
         if let FsNode::Container { children, .. } = &mut tree {
-            children[0] = file_with_attr("hello.txt", b"Hello World!", custom_attr.clone());
+            children[0] = file_with_attr("hello.txt", b"Hello World!", custom_attr);
         }
 
         let mut injector = ZipInjector::new(&mut io, &meta).unwrap();

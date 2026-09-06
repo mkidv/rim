@@ -13,6 +13,8 @@ pub use core::StdResolver;
 #[cfg(feature = "alloc")]
 pub use core::utils::path_utils::*;
 pub use core::utils::volume::*;
+#[cfg(feature = "std")]
+pub use core::{StdInjector, StdOverwritePolicy};
 
 // Filesystem APIs
 #[cfg(feature = "fat")]

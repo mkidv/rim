@@ -16,11 +16,9 @@ use crate::{
     {
         allocator::{ExtAllocator, ExtHandle},
         constant::*,
-        group_layout::GroupLayout,
         meta::ExtMeta,
-        ops,
-        types::{ExtDirEntry, ExtExtent, ExtInode},
-        updates,
+        types::{ExtDirEntry, ExtExtent, ExtInode, GroupLayout},
+        utils,
     },
 };
 use rimio::prelude::*;
@@ -85,13 +83,9 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
     }
 
     pub fn flush_metadata(&mut self) -> FsInjectorResult {
-        updates::flush_superblock(self.io, &self.allocator, self.meta)?;
-        updates::flush_bgdt(
-            self.io,
-            &self.allocator,
-            self.meta,
-            &self.used_dirs_per_group,
-        )?;
+        self.allocator.flush_superblock(self.io, self.meta)?;
+        self.allocator
+            .flush_bgdt(self.io, self.meta, &self.used_dirs_per_group)?;
         Ok(())
     }
 }
@@ -193,7 +187,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
         if !has_lost_found {
             let parent = self.stack.last_mut().expect("Root context missing");
-            ops::create_lost_found(
+            utils::create_lost_found(
                 self.io,
                 &mut self.allocator,
                 self.meta,
@@ -238,7 +232,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         );
         let inode_buf = inode_data.to_bytes();
 
-        ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+        utils::write_inode(self.io, self.meta, inode, &inode_buf)?;
 
         // Add entry to parent dir
         let entry = ExtDirEntry::from_attr(inode, name, attr);
@@ -316,7 +310,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         };
         let inode_buf = inode_data.to_bytes();
 
-        ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+        utils::write_inode(self.io, self.meta, inode, &inode_buf)?;
 
         // Add entry to current dir
         let entry = ExtDirEntry::from_attr(inode, name, attr);
@@ -349,7 +343,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
             let inode_data = ExtInode::new_fast_symlink(&symlink_attr, target);
             let inode_buf = inode_data.to_bytes();
-            ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+            utils::write_inode(self.io, self.meta, inode, &inode_buf)?;
 
             let entry = ExtDirEntry::from_attr(inode, name, &symlink_attr);
             if let Some(ctx) = self.stack.last_mut() {
@@ -397,7 +391,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             };
 
             let inode_buf = inode_data.to_bytes();
-            ops::write_inode(self.io, self.meta, inode, &inode_buf)?;
+            utils::write_inode(self.io, self.meta, inode, &inode_buf)?;
 
             let entry = ExtDirEntry::from_attr(inode, name, &symlink_attr);
             if let Some(ctx) = self.stack.last_mut() {
@@ -411,7 +405,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(mut ctx) = self.stack.pop() {
             // Pad directory block so last entry spans to end
-            ops::pad_directory_block(&mut ctx.buf, self.meta.block_size as usize);
+            utils::pad_directory_block(&mut ctx.buf, self.meta.block_size as usize);
             // Write to first block. Logic limitation: directory size <= 1 block
             if let Some(run) = ctx.handle.blocks.0.first() {
                 self.write_block(run.start as u32, &ctx.buf)?;
@@ -426,7 +420,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                 self.meta.block_size.div_ceil(512),
                 &[ctx.extent],
             );
-            ops::write_inode(self.io, self.meta, ctx.handle.inode, &inode_data.to_bytes())?;
+            utils::write_inode(self.io, self.meta, ctx.handle.inode, &inode_data.to_bytes())?;
 
             // Increment parent's child_dir_count (this dir is a subdirectory of parent)
             if let Some(parent) = self.stack.last_mut() {

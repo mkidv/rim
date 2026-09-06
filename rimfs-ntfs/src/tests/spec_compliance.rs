@@ -177,8 +177,12 @@ fn test_mft_entry_flags() {
     // Spec: MFT entry flags
     // IN_USE = 0x0001
     // DIRECTORY = 0x0002
+    // IN_EXTEND = 0x0004
+    // IS_VIEW_INDEX = 0x0008
     assert_eq!(MftRecordFlags::IN_USE.bits(), 0x0001);
     assert_eq!(MftRecordFlags::IS_DIRECTORY.bits(), 0x0002);
+    assert_eq!(MftRecordFlags::IN_EXTEND.bits(), 0x0004);
+    assert_eq!(MftRecordFlags::IS_VIEW_INDEX.bits(), 0x0008);
 }
 
 #[test]
@@ -190,6 +194,8 @@ fn test_attribute_header_flags() {
     assert_eq!(AttributeFlags::COMPRESSED.bits(), 0x0001);
     assert_eq!(AttributeFlags::ENCRYPTED.bits(), 0x4000);
     assert_eq!(AttributeFlags::SPARSE.bits(), 0x8000);
+    assert_eq!(NtfsFileAttributes::I30_INDEX.bits(), 0x1000_0000);
+    assert_eq!(NtfsFileAttributes::VIEW_INDEX.bits(), 0x2000_0000);
 }
 
 #[test]

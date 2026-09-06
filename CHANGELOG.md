@@ -4,6 +4,49 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-06
+### Added
+*   **Universal Filesystem Copy Engine (`rim copy`)**:
+    *   New high-performance subcommand in `rimcli` for logical, streaming transfers between host filesystems and disk image partitions (or between two disk images) without requiring mounting or root privileges.
+    *   Symmetric endpoint addressing supporting host paths (`/path/to/dir`) and image partitions (`disk.img:<part>:/path` or raw filesystems).
+    *   Comprehensive policy controls:
+        *   `--overwrite <POLICY>`: `error`, `skip`, or `replace` (in-place entry replacement on Host).
+        *   `--metadata <POLICY>`: `best-effort`, `preserve`, or `ignore` (permissions, timestamps, mode).
+        *   `--unsupported <POLICY>`: `warn`, `error`, or `skip` (gracefully handling unsupported filesystem features such as symlinks on FAT).
+    *   Destination-aware case-collision detection respecting the sensitivity of the destination filesystem (strict collision errors on FAT/NTFS/Windows host; case-preserving coexistence on Ext4/Unix).
+    *   Interactive terminal progress reporting with transfer speed, ETA, and copy summary statistics.
+*   **In-Memory Dry-Run Simulation (`--dry-run`)**:
+    *   Dry-run mode operates strictly in memory with zero disk writes and zero file creation on destination hosts or images.
+    *   `OverlayRimIO` / `PagedOverlayRimIO` in `rimio`: sparse copy-on-write page overlay wrapping any read-only base storage in memory, enabling real filesystem injectors (`ExtInjector`, `FatInjector`, `NtfsInjector`, etc.) to run their allocation and verification algorithms purely in memory.
+    *   `DryRunStdInjector` in `rimcli`: performs path confinement, file overwrite detection, and payload stream verification for host destinations without disk mutation.
+    *   Reports dry-run statistics including simulated file counts, data streamed, and allocated overlay RAM.
+*   **`StdInjector` Host Streaming Injection (`rimfs-core`)**:
+    *   New `FsTreeInjector` implementation in `rimfs-core` (under `feature = "std"`) providing symmetric write-side host injection matching `StdResolver`.
+    *   Streams `RimRead` sources directly to host files, supports directory hierarchies, preserves representable metadata and permissions, and strictly confines writes within the destination root through symlink-boundary checks.
+*   **Unpartitioned Volume Generation (`--no-gpt` / `BuildOptions`)**:
+    *   Added `--no-gpt` (alias `--nogpt`) flag to `rim generate` to synthesize raw unpartitioned filesystem images without GPT or protective MBR partition tables.
+    *   Added `BuildOptions` and `PartitionTable::{Gpt, None}` to `rimgen`, supporting raw filesystem layouts at LBA 0.
+*   **NTFS Modernization & Windows 11 Compliance (`rimfs-ntfs`)**:
+    *   Added Windows 11 CHKDSK and kernel compliance regression test suite (`tests/windows_compliance.rs`) locking down on-disk structures (exact 2560-byte `$AttrDef` table, root DACL, `$Bitmap` consistency, and `UpCase:$Info`).
+    *   Added NTFS `$Extend/$Quota` system files, index layout, and SID collation support.
+    *   Modularized the checker subsystem into dedicated checkers for records, indexes, bitmaps, and system structures.
+    *   Modularized builder internals into dedicated `features/` and typed structures (`attrdef`, `attribute`, `collation`, `index_layout`, `mft`, `quota`, `sid`, `security`).
+    *   Upgraded `NtfsInjector` with robust INDX B-Tree directory allocation and attribute management.
+*   **EXT4 Run-Coalescing & Superblock Flushing (`rimfs-ext`)**:
+    *   Upgraded `Ext4BlockAllocator` to search for and allocate contiguous runs of free blocks, significantly accelerating multi-block allocations and reducing fragmentation.
+    *   Added `flush_superblock` and `flush_bgdt` to write free block/inode counters and directory counts across primary and sparse backup superblocks and block group descriptor tables.
+    *   Modularized internal layout and types into `types/flags.rs`, `types/group_layout.rs`, and `utils/dir.rs`.
+*   **Cross-Filesystem Transfer Matrix & Memory Optimizations**:
+    *   Added comprehensive `rimfs/tests/cross_fs_transfer.rs` integration suite verifying bidirectional tree transfers across all 7 supported engines (FAT, ExFAT, EXT, NTFS, TAR, ZIP, ISO).
+    *   Reduced heap allocations in directory resolvers (`FatResolver`, `ExFatResolver`) by reusing buffers across directory runs in `read_dir_entries` and `find_in_dir`.
+    *   Unified path resolution via `walk_path` across filesystems.
+    *   Made `zero_cluster_heap` generic over cluster unit types (`U: Copy + Ord + Into<u64>`).
+    *   Implemented `FsHandle` for `()`.
+
+### Changed
+*   Bumped workspace crates to version `0.9.0`.
+*   Preserved `no_std + alloc` compatibility across `rimfs-core` and `rimio`.
+
 ## [0.8.2] - 2026-09-02
 ### Added
 *   `rimfs-iso` now supports streaming `FsTreeResolver` injection while still building the complete ISO layout plan before payload serialization.

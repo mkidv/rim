@@ -2,6 +2,7 @@
 
 mod cli;
 mod commands;
+pub mod copy;
 pub mod ui;
 
 use clap::Parser;
@@ -17,10 +18,13 @@ fn main() -> anyhow::Result<()> {
             truncate,
             dry_run,
             host,
+            no_gpt,
             verbose,
             quiet,
         } => {
-            commands::generate::run(layout, output, truncate, dry_run, host, verbose, quiet)?;
+            commands::generate::run(
+                layout, output, truncate, dry_run, host, no_gpt, verbose, quiet,
+            )?;
         }
         Commands::Convert {
             input,
@@ -38,6 +42,31 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect { image } => {
             commands::inspect::run(&image)?;
+        }
+        Commands::Copy {
+            source,
+            destination,
+            src_path,
+            metadata,
+            unsupported,
+            overwrite,
+            dry_run,
+            no_detect_case_collisions,
+            verbose,
+            quiet,
+        } => {
+            commands::copy::run(
+                source,
+                destination,
+                src_path,
+                metadata,
+                unsupported,
+                overwrite,
+                dry_run,
+                no_detect_case_collisions,
+                verbose,
+                quiet,
+            )?;
         }
     }
 

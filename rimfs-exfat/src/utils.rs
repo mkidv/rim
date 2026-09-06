@@ -19,11 +19,6 @@ pub fn datetime_from_attr(attr: &FileAttributes) -> (u32, u8, u8) {
     ts.to_exfat_datetime()
 }
 
-pub fn datetime_now() -> (u32, u8, u8) {
-    let ts = time_utils::now_utc();
-    ts.to_exfat_datetime()
-}
-
 pub fn write_bitmap<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExFatMeta,

@@ -26,6 +26,7 @@ pub(crate) mod utils;
 pub mod traits {
     pub use super::allocator::{FatAllocator, FatHandle};
     pub use super::checker::{FatChecker, FatCheckerOptions};
+    pub use super::filesystem::Fat;
     pub use super::formatter::FatFormatter;
     pub use super::injector::FatInjector;
     pub use super::meta::FatMeta;

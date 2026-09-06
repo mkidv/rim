@@ -22,6 +22,7 @@ pub struct ZipInjector<'a, IO: RimIO + ?Sized> {
     meta: &'a ZipMeta,
     current_offset: u64,
     entries: Vec<ZipEntry>,
+    path_stack: Vec<String>,
 }
 
 impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
@@ -31,7 +32,18 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
             meta,
             current_offset: 0,
             entries: Vec::new(),
+            path_stack: Vec::new(),
         })
+    }
+
+    fn entry_path(&self, name: &str) -> String {
+        let name = normalize_fs_path(name);
+        if let Some(parent) = self.path_stack.last()
+            && !parent.is_empty()
+        {
+            return alloc::format!("{parent}/{name}");
+        }
+        name.to_string()
     }
 
     /// Helper to encode a Local File Header.
@@ -123,7 +135,7 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
-        let mut dir_name = String::from(normalize_fs_path(name));
+        let mut dir_name = self.entry_path(name);
         if !dir_name.ends_with('/') {
             dir_name.push('/');
         }
@@ -140,6 +152,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
 
         let lfh_offset =
             self.write_local_header(&dir_name, METHOD_STORE, time_dos, date_dos, 0, 0, 0, &extra)?;
+        let stack_path = normalize_fs_path(&dir_name).to_string();
 
         self.entries.push(ZipEntry {
             name: dir_name,
@@ -159,6 +172,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
             timestamp: Some(dt),
         });
 
+        self.path_stack.push(stack_path);
         Ok(())
     }
 
@@ -169,7 +183,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let file_name = normalize_fs_path(name);
+        let file_name = self.entry_path(name);
         let dt = attr.modified.unwrap_or(OffsetDateTime::UNIX_EPOCH);
         let (time_dos, date_dos) = datetime_to_dos(dt);
         let mode = attr.mode.unwrap_or(0o644) & 0o7777;
@@ -213,7 +227,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
                 let comp_size = compressed.len() as u64;
 
                 let lfh_offset = self.write_local_header(
-                    file_name,
+                    &file_name,
                     METHOD_DEFLATE,
                     time_dos,
                     date_dos,
@@ -227,7 +241,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
                 self.current_offset += comp_size;
 
                 self.entries.push(ZipEntry {
-                    name: String::from(file_name),
+                    name: file_name,
                     compression_method: METHOD_DEFLATE,
                     mtime_dos: time_dos,
                     mdate_dos: date_dos,
@@ -250,7 +264,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
 
         // Store (uncompressed) stream-first implementation
         let lfh_offset = self.write_local_header(
-            file_name,
+            &file_name,
             METHOD_STORE,
             time_dos,
             date_dos,
@@ -279,7 +293,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         self.patch_local_header(lfh_offset, crc32, size, size)?;
 
         self.entries.push(ZipEntry {
-            name: String::from(file_name),
+            name: file_name,
             compression_method: METHOD_STORE,
             mtime_dos: time_dos,
             mdate_dos: date_dos,
@@ -305,7 +319,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         target: &str,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let link_name = normalize_fs_path(name);
+        let link_name = self.entry_path(name);
         let dt = attr.modified.unwrap_or(OffsetDateTime::UNIX_EPOCH);
         let (time_dos, date_dos) = datetime_to_dos(dt);
         let mode = attr.mode.unwrap_or(0o777) & 0o7777;
@@ -324,7 +338,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         let crc32 = hasher.finalize();
 
         let lfh_offset = self.write_local_header(
-            link_name,
+            &link_name,
             METHOD_STORE,
             time_dos,
             date_dos,
@@ -338,7 +352,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         self.current_offset += target_len;
 
         self.entries.push(ZipEntry {
-            name: String::from(link_name),
+            name: link_name,
             compression_method: METHOD_STORE,
             mtime_dos: time_dos,
             mdate_dos: date_dos,
@@ -359,10 +373,12 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
     }
 
     fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
+        self.path_stack.clear();
         Ok(())
     }
 
     fn flush_current(&mut self) -> FsInjectorResult {
+        self.path_stack.pop();
         Ok(())
     }
 

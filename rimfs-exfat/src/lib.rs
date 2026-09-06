@@ -25,6 +25,7 @@ pub(crate) mod utils;
 pub mod traits {
     pub use super::allocator::{ExFatAllocator, ExFatHandle};
     pub use super::checker::{ExFatChecker, ExFatCheckerOptions};
+    pub use super::filesystem::ExFat;
     pub use super::formatter::ExFatFormatter;
     pub use super::injector::ExFatInjector;
     pub use super::meta::ExFatMeta;

@@ -49,4 +49,6 @@ pub use utils::path_utils::*;
 pub use utils::{time_utils::*, volume::*};
 
 #[cfg(feature = "std")]
+pub use injector::std_injector::{StdInjector, StdOverwritePolicy};
+#[cfg(feature = "std")]
 pub use resolver::std_resolver::StdResolver;

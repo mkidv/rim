@@ -89,6 +89,20 @@ impl NtfsIndexEntry {
         self
     }
 
+    pub fn with_timestamps_raw(
+        mut self,
+        creation_time: u64,
+        modification_time: u64,
+        mft_modification_time: u64,
+        access_time: u64,
+    ) -> Self {
+        self.creation_time = creation_time;
+        self.modification_time = modification_time;
+        self.mft_modification_time = mft_modification_time;
+        self.access_time = access_time;
+        self
+    }
+
     pub fn len(&self) -> usize {
         if let Some(ref raw) = self.raw {
             return raw.len();
@@ -247,7 +261,7 @@ impl NtfsIndexRecord {
 
         let node_header_offset = 24u64;
         let usa_offset = 40u64;
-        let entries_start = (usa_offset + (usa_size as u64 * 2) + 7) & !7;
+        let entries_start = 88u64.max((usa_offset + (usa_size as u64 * 2) + 7) & !7);
 
         // 1. INDX Header
         let indx_header = IndexRecordHeader::new(self.vcn, usa_offset as u16, usa_size);

@@ -558,6 +558,13 @@ mod std_error_impls {
             }
         }
     }
+
+    #[cfg(feature = "std")]
+    impl From<std::io::Error> for FsInjectorError {
+        fn from(e: std::io::Error) -> Self {
+            FsInjectorError::IO(RimIOError::from(e))
+        }
+    }
 }
 
 #[cfg(all(test, feature = "std"))]

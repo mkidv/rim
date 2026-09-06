@@ -16,6 +16,29 @@ use rimio::prelude::*;
 #[cfg(feature = "std")]
 use std::time::Instant;
 
+/// Partition table mode used while generating an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionTable {
+    /// Write a protective MBR and GPT partition table.
+    Gpt,
+    /// Do not write GPT or MBR structures; volumes are laid out directly.
+    None,
+}
+
+/// Options controlling how a layout is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildOptions {
+    pub partition_table: PartitionTable,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            partition_table: PartitionTable::Gpt,
+        }
+    }
+}
+
 /// Events emitted during disk image generation.
 #[derive(Debug, Clone)]
 pub enum BuildEvent<'a> {
@@ -50,13 +73,32 @@ pub struct BuildReport {
 
 /// Build a layout directly onto an open `RimIO` stream.
 pub fn build_on_io(layout: &mut Layout<'_>, io: &mut dyn RimIO) -> GenResult<BuildReport> {
-    build_on_io_with_events(layout, io, |_| {})
+    build_on_io_with_options_and_events(layout, io, BuildOptions::default(), |_| {})
+}
+
+/// Build a layout directly onto an open `RimIO` stream with custom options.
+pub fn build_on_io_with_options(
+    layout: &mut Layout<'_>,
+    io: &mut dyn RimIO,
+    options: BuildOptions,
+) -> GenResult<BuildReport> {
+    build_on_io_with_options_and_events(layout, io, options, |_| {})
 }
 
 /// Resolve a layout config with host files and build it onto an open `RimIO` stream.
 #[cfg(feature = "std")]
 pub fn build_config_on_io(layout: &LayoutConfig, io: &mut dyn RimIO) -> GenResult<BuildReport> {
-    build_config_on_io_with_events(layout, io, |_| {})
+    build_config_on_io_with_options_and_events(layout, io, BuildOptions::default(), |_| {})
+}
+
+/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+#[cfg(feature = "std")]
+pub fn build_config_on_io_with_options(
+    layout: &LayoutConfig,
+    io: &mut dyn RimIO,
+    options: BuildOptions,
+) -> GenResult<BuildReport> {
+    build_config_on_io_with_options_and_events(layout, io, options, |_| {})
 }
 
 /// Resolve a layout config with host files and build it onto an open `RimIO` stream.
@@ -64,6 +106,17 @@ pub fn build_config_on_io(layout: &LayoutConfig, io: &mut dyn RimIO) -> GenResul
 pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     layout: &LayoutConfig,
     io: &mut dyn RimIO,
+    on_event: F,
+) -> GenResult<BuildReport> {
+    build_config_on_io_with_options_and_events(layout, io, BuildOptions::default(), on_event)
+}
+
+/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+#[cfg(feature = "std")]
+pub fn build_config_on_io_with_options_and_events<F: for<'a> FnMut(BuildEvent<'a>)>(
+    layout: &LayoutConfig,
+    io: &mut dyn RimIO,
+    options: BuildOptions,
     on_event: F,
 ) -> GenResult<BuildReport> {
     let mut resolved = layout.to_layout(&mut crate::guid::RandomGuidGenerator)?;
@@ -81,22 +134,130 @@ pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
             resolved.partitions[i].raw_size = file_size;
         }
     }
-    build_on_io_with_events(&mut resolved, io, on_event)
+    build_on_io_with_options_and_events(&mut resolved, io, options, on_event)
 }
 
 /// Build a layout directly onto an open `RimIO` stream with event callbacks.
 pub fn build_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     layout: &mut Layout<'_>,
     io: &mut dyn RimIO,
+    on_event: F,
+) -> GenResult<BuildReport> {
+    build_on_io_with_options_and_events(layout, io, BuildOptions::default(), on_event)
+}
+
+/// Build a layout directly onto an open `RimIO` stream with custom options and event callbacks.
+pub fn build_on_io_with_options_and_events<F: for<'a> FnMut(BuildEvent<'a>)>(
+    layout: &mut Layout<'_>,
+    io: &mut dyn RimIO,
+    options: BuildOptions,
     mut on_event: F,
 ) -> GenResult<BuildReport> {
     #[cfg(feature = "std")]
     let t0 = Instant::now();
-    let total_sectors = calculate_total_disk_sectors(layout);
+    let total_sectors = calculate_total_disk_sectors_with_options(layout, options);
     let total_bytes = total_sectors * DEFAULT_SECTOR_SIZE;
 
+    let first_lba = match options.partition_table {
+        PartitionTable::Gpt => layout.alignment_sectors,
+        PartitionTable::None => 0,
+    };
+    let partition_entries = plan_partition_entries(layout, first_lba, total_sectors)?;
+
+    on_event(BuildEvent::LayoutPlanned {
+        total_bytes,
+        total_sectors,
+    });
+
+    #[cfg(feature = "std")]
+    let gpt_t0 = Instant::now();
+    if options.partition_table == PartitionTable::Gpt {
+        rimpart::mbr::write_mbr_protective(io, total_sectors)?;
+        rimpart::gpt::write_gpt_from_entries(
+            io,
+            &partition_entries,
+            total_sectors,
+            layout.disk_guid,
+        )?;
+        rimpart::validate_full_disk(io)?;
+    }
+    #[cfg(feature = "std")]
+    let gpt_duration = gpt_t0.elapsed();
+    #[cfg(not(feature = "std"))]
+    let gpt_duration = Duration::ZERO;
+
+    if options.partition_table == PartitionTable::Gpt {
+        on_event(BuildEvent::GptWritten {
+            duration: gpt_duration,
+        });
+    }
+
+    let partitions = inject::format_inject_resolved_all(io, layout, &partition_entries, on_event)?;
+    io.set_offset(0);
+
+    #[cfg(feature = "std")]
+    let total_duration = t0.elapsed();
+    #[cfg(not(feature = "std"))]
+    let total_duration = Duration::ZERO;
+
+    Ok(BuildReport {
+        total_bytes,
+        total_sectors,
+        gpt_duration,
+        partitions,
+        total_duration,
+    })
+}
+
+/// Calculate total disk sectors needed for a layout and build options.
+pub fn calculate_total_disk_sectors_with_options(
+    layout: &Layout<'_>,
+    options: BuildOptions,
+) -> u64 {
+    match options.partition_table {
+        PartitionTable::Gpt => calculate_total_disk_sectors(layout),
+        PartitionTable::None => calculate_total_content_sectors(layout),
+    }
+}
+
+/// Calculate total disk sectors needed for a layout config and build options.
+#[cfg(feature = "std")]
+pub fn calculate_total_disk_sectors_from_config_with_options(
+    layout: &LayoutConfig,
+    options: BuildOptions,
+) -> GenResult<u64> {
+    if options.partition_table == PartitionTable::Gpt {
+        return Ok(gpt::calculate_total_disk_sectors_from_config(layout));
+    }
+
+    let resolved = layout.to_layout(&mut crate::guid::RandomGuidGenerator)?;
+    Ok(calculate_total_disk_sectors_with_options(
+        &resolved, options,
+    ))
+}
+
+fn calculate_total_content_sectors(layout: &Layout<'_>) -> u64 {
+    if layout.partitions.is_empty() {
+        return 0;
+    }
+
+    let mut start = 0;
+    let mut last_end = 0;
+    for part in &layout.partitions {
+        last_end = start + part.size_sectors - 1;
+        start = rimpart::gpt::align_up(last_end, layout.alignment_sectors);
+    }
+
+    last_end + 1
+}
+
+fn plan_partition_entries(
+    layout: &Layout<'_>,
+    first_lba: u64,
+    total_sectors: u64,
+) -> GenResult<Vec<rimpart::gpt::GptEntry>> {
     let align_sectors = layout.alignment_sectors;
-    let mut start = align_sectors;
+    let mut start = first_lba;
     let mut partition_entries = Vec::with_capacity(layout.partitions.len());
 
     for part in &layout.partitions {
@@ -113,40 +274,5 @@ pub fn build_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
         start = rimpart::gpt::align_up(end, align_sectors);
     }
 
-    on_event(BuildEvent::LayoutPlanned {
-        total_bytes,
-        total_sectors,
-    });
-
-    #[cfg(feature = "std")]
-    let gpt_t0 = Instant::now();
-    rimpart::mbr::write_mbr_protective(io, total_sectors)?;
-    rimpart::gpt::write_gpt_from_entries(io, &partition_entries, total_sectors, layout.disk_guid)?;
-    rimpart::validate_full_disk(io)?;
-    #[cfg(feature = "std")]
-    let gpt_duration = gpt_t0.elapsed();
-    #[cfg(not(feature = "std"))]
-    let gpt_duration = Duration::ZERO;
-
-    on_event(BuildEvent::GptWritten {
-        duration: gpt_duration,
-    });
-
-    let (_hdr, entries) = rimpart::gpt::read_gpt_with_sector(io, DEFAULT_SECTOR_SIZE)?;
-
-    let partitions = inject::format_inject_resolved_all(io, layout, &entries, on_event)?;
-    io.set_offset(0);
-
-    #[cfg(feature = "std")]
-    let total_duration = t0.elapsed();
-    #[cfg(not(feature = "std"))]
-    let total_duration = Duration::ZERO;
-
-    Ok(BuildReport {
-        total_bytes,
-        total_sectors,
-        gpt_duration,
-        partitions,
-        total_duration,
-    })
+    Ok(partition_entries)
 }

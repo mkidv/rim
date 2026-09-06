@@ -162,8 +162,7 @@ impl LayoutConfig {
         layout.base_dir = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .canonicalize()?
-            .to_path_buf();
+            .canonicalize()?;
         layout.resolve_partition()?;
         layout.assign_guids();
         Ok(layout)

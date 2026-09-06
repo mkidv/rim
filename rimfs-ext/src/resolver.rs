@@ -10,20 +10,26 @@ use alloc::{
 use crate::constant::*;
 use crate::core::resolver::*;
 use crate::core::traits::FsMeta;
-use crate::core::utils::path_utils::*;
 use crate::types::{BlockMapArray, ExtExtent, ExtExtentHeader, ExtExtentIndex};
-use crate::{group_layout::GroupLayout, meta::ExtMeta};
+use crate::{meta::ExtMeta, types::GroupLayout};
 use rimio::prelude::*;
 use zerocopy::FromBytes;
 
 pub struct ExtResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     meta: &'a ExtMeta,
+    inode_cache: [(u32, Vec<u8>); 4],
+    cache_head: usize,
 }
 
 impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExtMeta) -> Self {
-        Self { io, meta }
+        Self {
+            io,
+            meta,
+            inode_cache: Default::default(),
+            cache_head: 0,
+        }
     }
 }
 
@@ -50,10 +56,16 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
 }
 
 impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
-    /// Read inode raw bytes from inode table
+    /// Read inode raw bytes from inode table (with MRU cache)
     pub(crate) fn read_inode(&mut self, inode_num: u32) -> FsResolverResult<Vec<u8>> {
         if inode_num == 0 || inode_num as u64 > self.meta.inode_count {
             return Err(FsResolverError::Invalid("Invalid inode number"));
+        }
+
+        for (cached_num, buf) in &self.inode_cache {
+            if *cached_num == inode_num {
+                return Ok(buf.clone());
+            }
         }
 
         let inode_index = inode_num - 1;
@@ -71,6 +83,10 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         self.io
             .read_at(offset, &mut buf)
             .map_err(FsResolverError::IO)?;
+
+        self.inode_cache[self.cache_head] = (inode_num, buf.clone());
+        self.cache_head = (self.cache_head + 1) % self.inode_cache.len();
+
         Ok(buf)
     }
 
@@ -463,17 +479,94 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         Ok(entries)
     }
 
-    /// Find an entry by name in a directory
+    /// Find an entry by name in a directory with early exit and zero unnecessary allocations
     fn find_in_dir(&mut self, dir_inode: u32, name: &str) -> FsResolverResult<Option<ExtDirEntry>> {
-        let entries = self.read_dir_entries(dir_inode)?;
-        let target_lower: Vec<u8> = name.bytes().map(|c| c.to_ascii_lowercase()).collect();
+        let inode_buf = self.read_inode(dir_inode)?;
 
-        for entry in entries {
-            let entry_lower: Vec<u8> = entry.name.bytes().map(|c| c.to_ascii_lowercase()).collect();
-            if entry_lower == target_lower {
-                return Ok(Some(entry));
+        if !self.inode_is_dir(&inode_buf) {
+            return Err(FsResolverError::Invalid("Not a directory"));
+        }
+
+        let dir_size = self.inode_size(&inode_buf) as usize;
+        let block_size = self.meta.block_size as usize;
+        let blocks_needed = dir_size.div_ceil(block_size);
+
+        let i_flags = inode_buf
+            .get(32..36)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
+
+        let mut offsets = Vec::new();
+        if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
+            let extents = self.read_extents(&inode_buf)?;
+            for extent in &extents {
+                let phys_block = extent.physical_start();
+                let len_blocks = (extent.ee_len & 0x7FFF) as usize;
+                for blk_idx in 0..len_blocks {
+                    if offsets.len() >= blocks_needed {
+                        break;
+                    }
+                    let blk = phys_block + blk_idx as u64;
+                    offsets.push(blk * block_size as u64);
+                }
+            }
+        } else {
+            let blocks = self.read_block_map(&inode_buf, dir_size)?;
+            for blk in blocks {
+                offsets.push(blk as u64 * block_size as u64);
             }
         }
+
+        let target_bytes = name.as_bytes();
+        let mut buf = vec![0u8; block_size];
+        let mut total_read = 0usize;
+
+        for offset in offsets {
+            if total_read >= dir_size {
+                break;
+            }
+            self.io
+                .read_at(offset, &mut buf)
+                .map_err(FsResolverError::IO)?;
+
+            let mut pos = 0usize;
+            while pos + 8 <= buf.len() && total_read + pos < dir_size {
+                let entry_inode_bytes: [u8; 4] = buf[pos..pos + 4].try_into().unwrap_or([0; 4]);
+                let entry_inode = u32::from_le_bytes(entry_inode_bytes);
+
+                let rec_len_bytes: [u8; 2] = buf[pos + 4..pos + 6].try_into().unwrap_or([0; 2]);
+                let rec_len = u16::from_le_bytes(rec_len_bytes) as usize;
+
+                let name_len = buf[pos + 6] as usize;
+                let file_type = buf[pos + 7];
+
+                if rec_len == 0 || rec_len > buf.len() - pos {
+                    break;
+                }
+
+                if entry_inode != 0
+                    && name_len == target_bytes.len()
+                    && pos + 8 + name_len <= buf.len()
+                {
+                    let entry_name_bytes = &buf[pos + 8..pos + 8 + name_len];
+                    if entry_name_bytes == target_bytes {
+                        let name_str = core::str::from_utf8(entry_name_bytes).map_err(|_| {
+                            FsResolverError::Invalid("Invalid UTF-8 in directory entry")
+                        })?;
+                        return Ok(Some(ExtDirEntry {
+                            inode: entry_inode,
+                            name: name_str.to_string(),
+                            file_type,
+                        }));
+                    }
+                }
+
+                pos += rec_len;
+            }
+            total_read += block_size;
+        }
+
         Ok(None)
     }
 }
@@ -603,96 +696,58 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
     }
 
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
-        let components = split_path(path);
-        let mut current_inode = EXT_ROOT_INODE;
+        let entry = crate::core::resolver::walker::walk_path(self, path)?
+            .ok_or(FsResolverError::NotFound)?;
 
-        for (i, comp) in components.iter().enumerate() {
-            let entry = self
-                .find_in_dir(current_inode, comp)?
-                .ok_or(FsResolverError::NotFound)?;
+        let inode_buf = self.read_inode(entry.inode)?;
+        let i_mode = inode_buf
+            .get(0..2)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes)
+            .unwrap_or(0);
 
-            if i == components.len() - 1 {
-                let inode_buf = self.read_inode(entry.inode)?;
-                let i_mode = inode_buf
-                    .get(0..2)
-                    .and_then(|b| b.try_into().ok())
-                    .map(u16::from_le_bytes)
-                    .unwrap_or(0);
+        crate::ensure!(
+            (i_mode & 0xF000) == 0xA000,
+            FsResolverError::Invalid("Not a symlink")
+        );
 
-                crate::ensure!(
-                    (i_mode & 0xF000) == 0xA000,
-                    FsResolverError::Invalid("Not a symlink")
-                );
+        let size = self.inode_size(&inode_buf) as usize;
+        let i_blocks = inode_buf
+            .get(28..32)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
 
-                let size = self.inode_size(&inode_buf) as usize;
-                let i_blocks = inode_buf
-                    .get(28..32)
-                    .and_then(|b| b.try_into().ok())
-                    .map(u32::from_le_bytes)
-                    .unwrap_or(0);
-
-                if i_blocks == 0 && size < 60 {
-                    // Fast symlink
-                    let target_bytes =
-                        inode_buf
-                            .get(40..40 + size)
-                            .ok_or(FsResolverError::Invalid(
-                                "Inode buffer too small for fast symlink",
-                            ))?;
-                    return String::from_utf8(target_bytes.to_vec())
-                        .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"));
-                } else {
-                    // Slow symlink
-                    let content = self.read_file_content(entry.inode)?;
-                    let target_slice = if content.len() >= size {
-                        &content[..size]
-                    } else {
-                        &content[..]
-                    };
-                    return String::from_utf8(target_slice.to_vec())
-                        .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"));
-                }
-            }
-
-            if !entry.is_dir() {
-                return Err(FsResolverError::Invalid(
-                    "Expected directory for intermediate component",
-                ));
-            }
-            current_inode = entry.inode;
+        if i_blocks == 0 && size < 60 {
+            // Fast symlink
+            let target_bytes = inode_buf
+                .get(40..40 + size)
+                .ok_or(FsResolverError::Invalid(
+                    "Inode buffer too small for fast symlink",
+                ))?;
+            String::from_utf8(target_bytes.to_vec())
+                .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"))
+        } else {
+            // Slow symlink
+            let content = self.read_file_content(entry.inode)?;
+            let target_slice = if content.len() >= size {
+                &content[..size]
+            } else {
+                &content[..]
+            };
+            String::from_utf8(target_slice.to_vec())
+                .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 in symlink target"))
         }
-
-        Err(FsResolverError::NotFound)
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
-        if path.is_empty() || path == "/" {
-            return Ok(FileAttributes::new_dir());
-        }
-
-        let components = split_path(path);
-        let mut current_inode = EXT_ROOT_INODE;
-
-        for (i, comp) in components.iter().enumerate() {
-            let entry = self
-                .find_in_dir(current_inode, comp)?
-                .ok_or(FsResolverError::NotFound)?;
-
-            if i == components.len() - 1 {
-                // Last component: read inode for attributes
+        match crate::core::resolver::walker::walk_path(self, path)? {
+            Some(entry) => {
                 let inode_buf = self.read_inode(entry.inode)?;
-                return Ok(self.parse_attributes(&inode_buf, entry.is_dir()));
+                Ok(self.parse_attributes(&inode_buf, entry.is_dir()))
             }
-
-            if !entry.is_dir() {
-                return Err(FsResolverError::Invalid(
-                    "Expected directory for intermediate component",
-                ));
-            }
-            current_inode = entry.inode;
+            None => Ok(FileAttributes::new_dir()),
         }
-
-        Err(FsResolverError::Invalid("Invalid path"))
     }
 }
 

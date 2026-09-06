@@ -378,7 +378,8 @@ fn bench_resolve_tree_all_engines(c: &mut Criterion) {
                     let mut io = MemRimIO::new(&mut local_disk);
                     let mut resolver = NtfsResolver::new(&mut io, &meta);
                     let node = resolver.resolve_tree("/*").unwrap();
-                    assert_eq!(node.counts().files, NUM_FILES);
+                    // NTFS root index includes 13 system files ($MFT, $LogFile, etc.)
+                    assert_eq!(node.counts().files, NUM_FILES + 13);
                 },
             );
         });

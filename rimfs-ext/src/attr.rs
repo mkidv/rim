@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::core::traits::{FileAttributes, NodeKind};
+use crate::types::ExtFileType;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,15 +44,7 @@ pub trait ExtFileAttributesExt {
 
 impl ExtFileAttributesExt for FileAttributes {
     fn as_ext4_file_type(&self) -> u8 {
-        match self.kind {
-            NodeKind::Directory => 2,
-            NodeKind::Symlink => 7,
-            NodeKind::Regular => 1,
-            NodeKind::CharDevice => 3,
-            NodeKind::BlockDevice => 4,
-            NodeKind::Fifo => 5,
-            NodeKind::Socket => 6,
-        }
+        ExtFileType::from(self.kind).as_u8()
     }
 
     fn as_ext4_mode(&self) -> ExtMode {

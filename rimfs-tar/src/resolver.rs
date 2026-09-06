@@ -183,10 +183,35 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for TarResolver<'a, IO> {
         }
 
         let children = self.read_dir(path)?;
-        if !children.is_empty() {
+        if !children.is_empty() || self.has_descendant(norm_path)? {
             return Ok(FileAttributes::new_dir());
         }
 
         Err(FsResolverError::NotFound)
+    }
+}
+
+impl<'a, IO: RimRead + ?Sized> TarResolver<'a, IO> {
+    fn has_descendant(&mut self, norm_path: &str) -> FsResolverResult<bool> {
+        let prefix = if norm_path.is_empty() {
+            String::new()
+        } else {
+            let mut prefix = norm_path.to_string();
+            prefix.push('/');
+            prefix
+        };
+        let mut offset = 0u64;
+
+        while let Some(entry) = self.read_header_at(offset)? {
+            let entry_name = normalize_fs_path(&entry.name);
+            if !entry_name.is_empty() && entry_name.starts_with(&prefix) {
+                return Ok(true);
+            }
+
+            let padded_size = (entry.size as usize + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
+            offset += (TAR_BLOCK_SIZE + padded_size) as u64;
+        }
+
+        Ok(false)
     }
 }

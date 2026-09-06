@@ -301,11 +301,11 @@ impl FatEntry {
         data[12] = 0;
         data[13] = 0;
 
-        let mut crc = utils::crc16(&data);
+        let mut crc = crate::core::utils::checksum_utils::crc16_ccitt(&data);
 
         // Include LFNs in CRC if present
         for lfn in lfns {
-            crc = utils::crc16_update(crc, lfn.as_bytes());
+            crc = crate::core::utils::checksum_utils::crc16_ccitt_update(crc, lfn.as_bytes());
         }
 
         crc

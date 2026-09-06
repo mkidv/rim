@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+//! EXT Block Group layout computation and metadata block ranges.
+
 use crate::meta::ExtMeta;
 
 /// Struct representing the layout of an EXT block group
@@ -130,15 +133,6 @@ mod tests {
             assert!(
                 layout.first_data_block > layout.inode_table_block,
                 "Group {group_id}: first_data_block should be > inode_table"
-            );
-
-            println!(
-                "✓ Group {group_id}: start={}, bb={}, ib={}, it={}, first_data={}",
-                layout.group_start,
-                layout.block_bitmap_block,
-                layout.inode_bitmap_block,
-                layout.inode_table_block,
-                layout.first_data_block
             );
         }
     }

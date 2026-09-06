@@ -25,23 +25,7 @@ use rimio::prelude::*;
 /// Parses the Central Directory into memory for fast $O(1)$ path and file resolution.
 #[inline]
 fn is_all_zeros(buf: &[u8]) -> bool {
-    let (prefix, words, suffix) = unsafe { buf.align_to::<u64>() };
-    for &b in prefix {
-        if b != 0 {
-            return false;
-        }
-    }
-    for &w in words {
-        if w != 0 {
-            return false;
-        }
-    }
-    for &b in suffix {
-        if b != 0 {
-            return false;
-        }
-    }
-    true
+    buf.iter().all(|&b| b == 0)
 }
 
 pub struct ZipResolver<'a, IO: RimRead + ?Sized> {

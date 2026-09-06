@@ -7,9 +7,8 @@ use rimio::prelude::*;
 
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::group_layout::GroupLayout;
 use crate::meta::ExtMeta;
-use crate::types::ExtSuperblock;
+use crate::types::{ExtSuperblock, GroupLayout};
 use crate::{constant::*, utils::is_sparse_super_group};
 
 #[derive(Default)]

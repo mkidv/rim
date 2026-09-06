@@ -86,10 +86,7 @@ pub fn format_octal(buf: &mut [u8], val: u64) {
         return;
     }
     buf[len - 1] = 0; // null terminator
-    if len > 1 {
-        buf[len - 2] = b' '; // space terminator before null in POSIX
-    }
-    let digits_len = len.saturating_sub(2);
+    let digits_len = len.saturating_sub(1);
     let mut v = val;
     for i in (0..digits_len).rev() {
         buf[i] = b'0' + (v & 7) as u8;

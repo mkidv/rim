@@ -197,6 +197,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
         attr: &FileAttributes,
     ) -> FsInjectorResult {
         // Allocate content chain and write file data first (best locality).
+        // Prefer contiguous allocation for optimal sequential I/O and single-extent layout.
         let cs = self.meta.unit_size();
         let need = (size as usize).div_ceil(cs).max(1);
         let handle: FatHandle = self.allocator.allocate(self.io, need)?;
@@ -209,8 +210,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
         // Append to parent
         if let Some(parent) = self.stack.last_mut() {
             let mut entries = FatEntries::file(name, handle.cluster_id, size as u32, attr);
-            // Optimization: newly created files via injector are always contiguous (single allocation call)
-            if self.meta.use_integrity {
+            // Optimization: newly created files via injector are contiguous when single-run
+            if self.meta.use_integrity && handle.cluster_chain.0.len() <= 1 {
                 entries.contiguous_hint = true;
             }
             entries

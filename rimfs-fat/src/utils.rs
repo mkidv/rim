@@ -23,11 +23,6 @@ pub fn datetime_from_attr(attr: &FileAttributes) -> (u16, u16, u8) {
     ts.to_dos_datetime()
 }
 
-pub fn datetime_now() -> (u16, u16, u8) {
-    let ts = time_utils::now_utc();
-    ts.to_dos_datetime()
-}
-
 /// Allowed characters in SFN (after uppercase):
 /// A–Z, 0–9 and !$%'-_@~`^#&(){}.
 #[inline(always)]
@@ -181,14 +176,4 @@ pub fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<FatLFNEntry> {
     // On disk, we first write the entry with 0x40|N, then ..., then 0x01
     out.reverse();
     out
-}
-
-/// CRC-16-CCITT (Poly: 0x1021) - Update existing CRC with new data
-pub fn crc16_update(crc: u16, data: &[u8]) -> u16 {
-    crate::core::utils::checksum_utils::crc16_ccitt_update(crc, data)
-}
-
-/// CRC-16-CCITT (Poly: 0x1021, Init: 0xFFFF)
-pub fn crc16(data: &[u8]) -> u16 {
-    crate::core::utils::checksum_utils::crc16_ccitt(data)
 }

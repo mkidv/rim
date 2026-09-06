@@ -5,7 +5,8 @@ use ::alloc::vec;
 use ::alloc::vec::Vec;
 
 use crate::core::checker::*;
-use crate::{constant::*, group_layout::GroupLayout, meta::ExtMeta};
+use crate::utils::is_sparse_super_group;
+use crate::{constant::*, meta::ExtMeta, types::GroupLayout};
 mod walker;
 
 use rimio::RimIO;
@@ -107,7 +108,6 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
         walker.scan_inodes(rep, &mut stats)?;
 
         // 2. Walk Tree (verifies connectivity)
-        #[cfg(feature = "std")]
         if opt.check_root_dir {
             walker.walk_from_root(rep, &mut stats)?;
         }
@@ -648,40 +648,4 @@ fn check_inode_bitmap<IO: RimIO + ?Sized>(
     ));
 
     Ok(())
-}
-
-/* =========================================================================
-   Helpers
-========================================================================= */
-
-/// Check if this group is a sparse super group (0, 1, 3^n, 5^n, 7^n)
-fn is_sparse_super_group(group: u32) -> bool {
-    if group == 0 || group == 1 {
-        return true;
-    }
-
-    // Check if power of 3
-    let mut n = group;
-    while n > 1 && n.is_multiple_of(3) {
-        n /= 3;
-    }
-    if n == 1 {
-        return true;
-    }
-
-    // Check if power of 5
-    let mut n = group;
-    while n > 1 && n.is_multiple_of(5) {
-        n /= 5;
-    }
-    if n == 1 {
-        return true;
-    }
-
-    // Check if power of 7
-    let mut n = group;
-    while n > 1 && n.is_multiple_of(7) {
-        n /= 7;
-    }
-    n == 1
 }

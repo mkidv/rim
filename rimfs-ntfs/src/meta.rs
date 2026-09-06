@@ -143,7 +143,7 @@ impl NtfsMeta {
             reserved_mft_records,
             bitmap_size_bytes,
             hidden_sectors: 0,
-            upcase_flavor: UpcaseFlavor::Legacy,
+            upcase_flavor: UpcaseFlavor::Windows,
             logfile_lcn,
             bitmap_lcn,
         })
@@ -161,7 +161,7 @@ impl NtfsMeta {
             NTFS_MFT_RECORD_SIZE,
             NTFS_INDEX_RECORD_SIZE,
             0, // Default to 0, though rimgen should pass it
-            UpcaseFlavor::Legacy,
+            UpcaseFlavor::Windows,
         )
     }
 
@@ -219,9 +219,10 @@ impl NtfsMeta {
         // Bitmap size: 1 bit per cluster
         let bitmap_size_bytes = total_clusters.div_ceil(8);
 
+        let boot_clusters = (16 * bytes_per_sector as u64).div_ceil(bytes_per_cluster as u64);
         let mirr_clusters = (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
-        // MFTMirr is at cluster 2 in standard Windows formatting
-        let mft_mirr_lcn = 2;
+        // Keep $MFTMirr out of the $Boot file extent (first 16 sectors).
+        let mft_mirr_lcn = 2.max(boot_clusters);
         // LogFile starts immediately after MFTMirr clusters
         let logfile_lcn = mft_mirr_lcn + mirr_clusters;
 
@@ -229,12 +230,10 @@ impl NtfsMeta {
         let log_clusters = (2 * 1024 * 1024)
             .min(volume_size_bytes / 10)
             .div_ceil(bytes_per_cluster as u64);
-        let attrdef_clusters = 1;
-        let root_index_clusters = 1;
         let bitmap_clusters = bitmap_size_bytes.div_ceil(bytes_per_cluster as u64);
         let upcase_clusters = (128 * 1024u64).div_ceil(bytes_per_cluster as u64);
 
-        let bitmap_lcn = logfile_lcn + log_clusters + attrdef_clusters + root_index_clusters;
+        let bitmap_lcn = logfile_lcn + log_clusters;
         // Skip system files
         let first_system_data = bitmap_lcn + bitmap_clusters + upcase_clusters;
 
@@ -332,6 +331,14 @@ impl NtfsMeta {
         let total_bytes = block_count as u64 * self.index_record_size as u64;
         total_bytes.div_ceil(self.bytes_per_cluster as u64)
     }
+
+    #[inline]
+    pub fn upcase_lcn(&self) -> u64 {
+        let bitmap_clusters = self
+            .bitmap_size_bytes
+            .div_ceil(self.bytes_per_cluster as u64);
+        self.bitmap_lcn + bitmap_clusters
+    }
 }
 
 impl FsMeta<u64> for NtfsMeta {
@@ -377,17 +384,17 @@ impl FsMeta<u64> for NtfsMeta {
 /// Determines optimal cluster size based on volume size
 fn determine_cluster_size(size_bytes: u64) -> u32 {
     const GB: u64 = 1024 * 1024 * 1024;
+    const DEFAULT_CLUSTER_LIMIT: u64 = 16 * GB;
 
-    // Microsoft recommended cluster sizes for NTFS
+    // Windows and mkfs.ntfs default to 4 KiB clusters for ordinary NTFS
+    // volumes. Smaller clusters make the fixed 16-sector $Boot file collide
+    // with early system extents unless every layout calculation is adjusted.
     match size_bytes {
-        0..=536_870_912 => 512,                // <= 512 MB: 512 bytes
-        536_870_913..=1_073_741_824 => 1024,   // 512 MB - 1 GB: 1 KB
-        1_073_741_825..=2_147_483_648 => 2048, // 1 GB - 2 GB: 2 KB
-        _ if size_bytes <= 16 * GB => 4096,    // 2 GB - 16 GB: 4 KB (default)
-        _ if size_bytes <= 32 * GB => 8192,    // 16 GB - 32 GB: 8 KB
-        _ if size_bytes <= 64 * GB => 16384,   // 32 GB - 64 GB: 16 KB
-        _ if size_bytes <= 128 * GB => 32768,  // 64 GB - 128 GB: 32 KB
-        _ => 65536,                            // > 128 GB: 64 KB
+        0..=DEFAULT_CLUSTER_LIMIT => 4096,
+        _ if size_bytes <= 32 * GB => 8192, // 16 GB - 32 GB: 8 KB
+        _ if size_bytes <= 64 * GB => 16384, // 32 GB - 64 GB: 16 KB
+        _ if size_bytes <= 128 * GB => 32768, // 64 GB - 128 GB: 32 KB
+        _ => 65536,                         // > 128 GB: 64 KB
     }
 }
 
@@ -428,7 +435,7 @@ mod tests {
     fn test_cluster_size_selection() {
         // Small volume
         let small = NtfsMeta::new(256 * 1024 * 1024, None).unwrap();
-        assert!(small.bytes_per_cluster <= 1024);
+        assert_eq!(small.bytes_per_cluster, NTFS_DEFAULT_CLUSTER_SIZE);
 
         // Medium volume
         let medium = NtfsMeta::new(4 * 1024 * 1024 * 1024, None).unwrap();
@@ -437,5 +444,29 @@ mod tests {
         // Large volume
         let large = NtfsMeta::new(200 * 1024 * 1024 * 1024, None).unwrap();
         assert!(large.bytes_per_cluster >= 32768);
+    }
+
+    #[test]
+    fn test_system_extents_do_not_overlap_boot_file() {
+        let meta = NtfsMeta::new_custom(
+            128 * 1024 * 1024,
+            Some("TEST"),
+            None,
+            NTFS_SECTOR_SIZE,
+            512,
+            NTFS_MFT_RECORD_SIZE,
+            NTFS_INDEX_RECORD_SIZE,
+            0,
+            UpcaseFlavor::Legacy,
+        )
+        .unwrap();
+
+        let boot_clusters =
+            (16 * meta.bytes_per_sector as u64).div_ceil(meta.bytes_per_cluster as u64);
+        let mirr_clusters =
+            (4 * meta.mft_record_size as u64).div_ceil(meta.bytes_per_cluster as u64);
+
+        assert!(meta.mft_mirr_lcn >= boot_clusters);
+        assert!(meta.logfile_lcn >= meta.mft_mirr_lcn + mirr_clusters);
     }
 }

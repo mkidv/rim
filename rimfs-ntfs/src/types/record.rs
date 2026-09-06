@@ -45,6 +45,16 @@ impl NtfsFileNameNamespace {
     pub fn bits(self) -> u8 {
         self as u8
     }
+
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Posix,
+            1 => Self::Win32,
+            2 => Self::Dos,
+            3 => Self::Win32AndDos,
+            _ => Self::Win32AndDos,
+        }
+    }
 }
 
 /// MFT Record Header (Multi_Sector_Header)
@@ -326,6 +336,24 @@ pub struct VolumeInformation {
     pub flags: u16,
 }
 
+impl VolumeInformation {
+    /// Creates a new NTFS 3.1 volume information structure
+    pub const fn new_ntfs_3_1(flags: u16) -> Self {
+        Self {
+            reserved: 0,
+            major_version: 3,
+            minor_version: 1,
+            flags,
+        }
+    }
+}
+
+impl Default for VolumeInformation {
+    fn default() -> Self {
+        Self::new_ntfs_3_1(crate::flags::NtfsVolumeFlags::empty().bits())
+    }
+}
+
 /// Index entry header (for directory indexes)
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
@@ -353,6 +381,28 @@ impl IndexEntryHeader {
             } else {
                 0
             },
+            padding: [0; 3],
+        }
+    }
+
+    /// Creates a standard 16-byte LAST_ENTRY terminator entry with no sub-nodes.
+    pub const fn end_marker() -> Self {
+        Self {
+            mft_reference: 0,
+            entry_length: 16,
+            content_length: 0,
+            flags: IndexEntryFlags::LAST_ENTRY.bits(),
+            padding: [0; 3],
+        }
+    }
+
+    /// Creates a 24-byte LAST_ENTRY terminator entry with a sub-node VCN.
+    pub const fn end_marker_with_subnode() -> Self {
+        Self {
+            mft_reference: 0,
+            entry_length: 24,
+            content_length: 0,
+            flags: IndexEntryFlags::LAST_ENTRY.bits() | IndexEntryFlags::HAS_SUBNODES.bits(),
             padding: [0; 3],
         }
     }

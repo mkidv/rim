@@ -35,7 +35,6 @@ pub mod traits {
 pub mod prelude {
     pub use super::filesystem::Tar;
     pub use super::traits::*;
-    pub use super::types::TarHandle;
     #[cfg(feature = "std")]
     pub use rimfs_core::StdResolver;
     pub use rimfs_core::errors::*;

@@ -12,6 +12,10 @@ pub type SparseRimIO = SparseRimIOImpl<DEFAULT_SPARSE_PAGE_SIZE>;
 
 pub type PagedSparseRimIO<const PAGE_SIZE: usize> = SparseRimIOImpl<PAGE_SIZE>;
 
+pub type OverlayRimIO<R> = OverlayRimIOImpl<R, DEFAULT_SPARSE_PAGE_SIZE>;
+
+pub type PagedOverlayRimIO<R, const PAGE_SIZE: usize> = OverlayRimIOImpl<R, PAGE_SIZE>;
+
 /// Sparse in-memory implementation of [`RimIO`].
 ///
 /// Represents a potentially very large logical storage while allocating
@@ -330,6 +334,284 @@ impl<const PAGE_SIZE: usize> RimIOSetLen for SparseRimIOImpl<PAGE_SIZE> {
     }
 }
 
+/// Sparse in-memory Copy-On-Write overlay implementation of [`RimIO`].
+///
+/// Wraps an underlying read-only [`RimRead`] storage and routes all modifications
+/// to in-memory sparse pages. Unmodified regions transparently read through to
+/// the underlying base storage.
+///
+/// This is useful for:
+/// - dry-run filesystem mutations without modifying the on-disk image,
+/// - non-destructive inspection and repairs,
+/// - disposable working sessions on read-only block devices.
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct OverlayRimIOImpl<R, const PAGE_SIZE: usize = DEFAULT_SPARSE_PAGE_SIZE> {
+    base: R,
+    pages: BTreeMap<u64, Box<[u8]>>,
+    partition_offset: u64,
+    logical_len: u64,
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead, const PAGE_SIZE: usize> OverlayRimIOImpl<R, PAGE_SIZE> {
+    /// Creates a new overlay wrapping `base` with the specified logical length.
+    pub fn new(base: R, logical_len: u64) -> Self {
+        assert!(PAGE_SIZE > 0, "OverlayRimIO page size must be non-zero");
+
+        Self {
+            base,
+            pages: BTreeMap::new(),
+            partition_offset: 0,
+            logical_len,
+        }
+    }
+
+    /// Creates a new overlay wrapping `base` with an initial partition offset.
+    pub fn new_with_offset(base: R, logical_len: u64, partition_offset: u64) -> Self {
+        assert!(PAGE_SIZE > 0, "OverlayRimIO page size must be non-zero");
+
+        Self {
+            base,
+            pages: BTreeMap::new(),
+            partition_offset,
+            logical_len,
+        }
+    }
+
+    /// Absolute logical length of the overlay storage.
+    #[inline]
+    pub const fn logical_len(&self) -> u64 {
+        self.logical_len
+    }
+
+    /// Number of modified sparse pages allocated in memory.
+    #[inline]
+    pub fn allocated_pages(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Approximate payload bytes allocated in memory.
+    #[inline]
+    pub fn allocated_bytes(&self) -> u64 {
+        (self.pages.len() as u64).saturating_mul(PAGE_SIZE as u64)
+    }
+
+    /// Reference to the underlying base storage.
+    #[inline]
+    pub fn base(&self) -> &R {
+        &self.base
+    }
+
+    /// Mutable reference to the underlying base storage.
+    #[inline]
+    pub fn base_mut(&mut self) -> &mut R {
+        &mut self.base
+    }
+
+    /// Drops the overlay and returns the underlying base storage.
+    #[inline]
+    pub fn into_base(self) -> R {
+        self.base
+    }
+
+    /// Discards all in-memory modifications, reverting the overlay to match `base`.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.pages.clear();
+    }
+
+    #[inline]
+    fn absolute_offset(&self, offset: u64) -> RimIOResult<u64> {
+        self.partition_offset
+            .checked_add(offset)
+            .ok_or(RimIOError::OutOfBounds)
+    }
+
+    #[inline]
+    fn check_bounds(&self, absolute_offset: u64, len: usize) -> RimIOResult {
+        let len = u64::try_from(len).map_err(|_| RimIOError::OutOfBounds)?;
+
+        let end = absolute_offset
+            .checked_add(len)
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        if end > self.logical_len {
+            return Err(RimIOError::OutOfBounds);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn page_size_u64() -> u64 {
+        PAGE_SIZE as u64
+    }
+
+    #[inline]
+    fn new_page() -> Box<[u8]> {
+        alloc::vec![0u8; PAGE_SIZE].into_boxed_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead, const PAGE_SIZE: usize> RimRead for OverlayRimIOImpl<R, PAGE_SIZE> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        let absolute_offset = self.absolute_offset(offset)?;
+        self.check_bounds(absolute_offset, buf.len())?;
+
+        let page_size = Self::page_size_u64();
+        let mut dst_pos = 0usize;
+
+        while dst_pos < buf.len() {
+            let absolute = absolute_offset + dst_pos as u64;
+            let page_index = absolute / page_size;
+            let page_offset = (absolute % page_size) as usize;
+
+            let chunk_len = (PAGE_SIZE - page_offset).min(buf.len() - dst_pos);
+
+            if let Some(page) = self.pages.get(&page_index) {
+                buf[dst_pos..dst_pos + chunk_len]
+                    .copy_from_slice(&page[page_offset..page_offset + chunk_len]);
+            } else {
+                self.base
+                    .read_at(absolute, &mut buf[dst_pos..dst_pos + chunk_len])?;
+            }
+
+            dst_pos += chunk_len;
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        Ok(self.logical_len.saturating_sub(self.partition_offset))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead, const PAGE_SIZE: usize> RimWrite for OverlayRimIOImpl<R, PAGE_SIZE> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        let absolute_offset = self.absolute_offset(offset)?;
+        self.check_bounds(absolute_offset, data.len())?;
+
+        let page_size = Self::page_size_u64();
+        let mut src_pos = 0usize;
+
+        while src_pos < data.len() {
+            let absolute = absolute_offset + src_pos as u64;
+            let page_index = absolute / page_size;
+            let page_offset = (absolute % page_size) as usize;
+
+            let chunk_len = (PAGE_SIZE - page_offset).min(data.len() - src_pos);
+
+            let page = if let Some(existing) = self.pages.get_mut(&page_index) {
+                existing
+            } else {
+                let mut new_page = Self::new_page();
+                if chunk_len < PAGE_SIZE {
+                    let base_offset = page_index * page_size;
+                    let _ = self.base.read_at(base_offset, &mut new_page);
+                }
+                self.pages.insert(page_index, new_page);
+                self.pages.get_mut(&page_index).unwrap()
+            };
+
+            page[page_offset..page_offset + chunk_len]
+                .copy_from_slice(&data[src_pos..src_pos + chunk_len]);
+
+            src_pos += chunk_len;
+        }
+
+        Ok(())
+    }
+
+    fn zero_at(&mut self, offset: u64, len: u64) -> RimIOResult {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let start = self
+            .partition_offset
+            .checked_add(offset)
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        let end = start.checked_add(len).ok_or(RimIOError::OutOfBounds)?;
+
+        if end > self.logical_len {
+            return Err(RimIOError::OutOfBounds);
+        }
+
+        let page_size = PAGE_SIZE as u64;
+        let first_page = start / page_size;
+        let last_page = (end - 1) / page_size;
+
+        for page_index in first_page..=last_page {
+            let page_start = page_index * page_size;
+            let page_end = page_start + page_size;
+
+            let zero_start = start.max(page_start);
+            let zero_end = end.min(page_end);
+
+            let local_start = (zero_start - page_start) as usize;
+            let local_end = (zero_end - page_start) as usize;
+
+            let page = if let Some(existing) = self.pages.get_mut(&page_index) {
+                existing
+            } else {
+                let mut new_page = Self::new_page();
+                if local_start > 0 || local_end < PAGE_SIZE {
+                    let base_offset = page_index * page_size;
+                    let _ = self.base.read_at(base_offset, &mut new_page);
+                }
+                self.pages.insert(page_index, new_page);
+                self.pages.get_mut(&page_index).unwrap()
+            };
+
+            page[local_start..local_end].fill(0);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> RimIOResult {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead, const PAGE_SIZE: usize> RimIO for OverlayRimIOImpl<R, PAGE_SIZE> {
+    #[inline]
+    fn set_offset(&mut self, partition_offset: u64) -> u64 {
+        self.partition_offset = partition_offset;
+        partition_offset
+    }
+
+    #[inline]
+    fn partition_offset(&self) -> u64 {
+        self.partition_offset
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<R: RimRead, const PAGE_SIZE: usize> RimIOSetLen for OverlayRimIOImpl<R, PAGE_SIZE> {
+    fn set_len(&mut self, new_len: u64) -> RimIOResult {
+        let new_absolute_len = self
+            .partition_offset
+            .checked_add(new_len)
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        let page_size = Self::page_size_u64();
+        let first_removed_page = new_absolute_len.div_ceil(page_size);
+        self.pages.split_off(&first_removed_page);
+
+        self.logical_len = new_absolute_len;
+        Ok(())
+    }
+}
+
 #[test]
 fn test_sparse_rimio_large_logical_disk() {
     const TIB: u64 = 1024 * 1024 * 1024 * 1024;
@@ -401,4 +683,58 @@ fn test_sparse_rimio_shrink_does_not_resurrect_data() {
     io.read_at(5000, &mut out).unwrap();
 
     assert_eq!(out, [0; 6]);
+}
+
+#[test]
+fn test_overlay_rimio_reads_base_and_captures_writes() {
+    let mut base_data = vec![0x11u8; 8192];
+    let mut base_io = crate::MemRimIO::new(&mut base_data);
+
+    let mut overlay = OverlayRimIOImpl::<_, 4096>::new(&mut base_io, 8192);
+
+    // Initial state: reads base, 0 allocated pages
+    assert_eq!(overlay.allocated_pages(), 0);
+    assert_eq!(overlay.allocated_bytes(), 0);
+
+    let mut buf = [0u8; 16];
+    overlay.read_at(100, &mut buf).unwrap();
+    assert_eq!(buf, [0x11; 16]);
+
+    // Partial write to page 0
+    overlay.write_at(100, &[0x99; 4]).unwrap();
+    assert_eq!(overlay.allocated_pages(), 1);
+    assert_eq!(overlay.allocated_bytes(), 4096);
+
+    // Read back modified range
+    let mut modified = [0u8; 8];
+    overlay.read_at(98, &mut modified).unwrap();
+    assert_eq!(modified, [0x11, 0x11, 0x99, 0x99, 0x99, 0x99, 0x11, 0x11]);
+
+    // Page 1 remains unmodified and unallocated
+    let mut p1_buf = [0u8; 16];
+    overlay.read_at(5000, &mut p1_buf).unwrap();
+    assert_eq!(p1_buf, [0x11; 16]);
+    assert_eq!(overlay.allocated_pages(), 1);
+
+    // Verify underlying base data was NEVER modified
+    assert!(base_data.iter().all(|&b| b == 0x11));
+}
+
+#[test]
+fn test_overlay_rimio_partition_offset() {
+    let mut base_data = vec![0xAAu8; 16384];
+    let mut base_io = crate::MemRimIO::new(&mut base_data);
+
+    let mut overlay = OverlayRimIOImpl::<_, 4096>::new(&mut base_io, 16384);
+    overlay.set_offset(4096);
+    assert_eq!(overlay.partition_offset(), 4096);
+
+    overlay.write_at(0, &[0xBB; 8]).unwrap();
+
+    let mut read_back = [0u8; 8];
+    overlay.read_at(0, &mut read_back).unwrap();
+    assert_eq!(read_back, [0xBB; 8]);
+
+    // Base data remains untouched
+    assert!(base_data.iter().all(|&b| b == 0xAA));
 }

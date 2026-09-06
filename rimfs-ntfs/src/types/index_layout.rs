@@ -1,33 +1,97 @@
 // SPDX-License-Identifier: MIT
+//! NTFS B-Tree Index Layout Builder
+//!
+//! Partitions directory index entries into index allocation blocks ($I30)
+//! and generates the root index structure, allocation blocks, and bitmap.
 
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
-use crate::builder::NtfsIndexEntry;
 use crate::meta::NtfsMeta;
-use crate::types::{IndexEntryFlags, IndexEntryHeader, NtfsIndexRecord};
+use crate::system::upcase::UpcaseHandle;
+use crate::types::{IndexEntryFlags, IndexEntryHeader, NtfsIndexEntry, NtfsIndexRecord};
+use crate::utils::compare_names_upcase;
 use zerocopy::IntoBytes;
 
-use rimio::prelude::RimIOResult;
+use rimio::prelude::*;
 
 pub struct IndexTreeLayout {
     pub root_entries: Vec<u8>,
-    pub allocation_blocks: Vec<Vec<u8>>, // In a real streaming scenario, this could be a generator
+    pub allocation_blocks: Vec<Vec<u8>>,
     pub bitmap: Vec<u8>,
     pub total_clusters: u64,
+}
+
+impl IndexTreeLayout {
+    /// Writes all allocation blocks sequentially into the allocated disk runlist.
+    pub fn write_allocation_blocks<IO: RimIO + ?Sized>(
+        &self,
+        io: &mut IO,
+        meta: &NtfsMeta,
+        runs: &rimio::run::RunList,
+    ) -> RimIOResult {
+        let mut mapped = MappedRimIO::new(io, runs, meta.bytes_per_cluster as usize);
+        let mut off = 0u64;
+        for block in &self.allocation_blocks {
+            mapped.write_at(off, block)?;
+            off += meta.index_record_size as u64;
+        }
+        Ok(())
+    }
+}
+
+pub enum DirectoryIndexResult {
+    /// Resident index root entries (small directory fitting in MFT record)
+    Resident { entries_buf: Vec<u8> },
+    /// Non-resident B-tree layout with allocation blocks and bitmap
+    NonResident { layout: IndexTreeLayout },
 }
 
 pub struct IndexTreeBuilder;
 
 impl IndexTreeBuilder {
+    /// Build directory index: either resident buffer or non-resident tree layout.
+    ///
+    /// Automatically sorts entries according to NTFS UpCase collation rules
+    /// and formats the terminator / subnodes as appropriate.
+    pub fn build_directory_index(
+        meta: &NtfsMeta,
+        mut entries: Vec<NtfsIndexEntry>,
+    ) -> RimIOResult<DirectoryIndexResult> {
+        let upcase = UpcaseHandle::from_flavor(&meta.upcase_flavor);
+        entries.sort_by(|a, b| compare_names_upcase(&a.name, &b.name, &upcase));
+
+        let entries_len: usize = entries.iter().map(|e| e.len()).sum();
+        let resident_max = meta.mft_record_size as usize / 3;
+
+        if entries_len < resident_max {
+            let mut buf = Vec::new();
+            for e in &entries {
+                let len = e.len();
+                let old = buf.len();
+                buf.resize(old + len, 0);
+                let mut mem_io = MemRimIO::new(&mut buf[old..]);
+                e.write_to_io(&mut mem_io, 0)?;
+            }
+            let last = IndexEntryHeader::new(0, 0, true);
+            buf.extend_from_slice(last.as_bytes());
+            Ok(DirectoryIndexResult::Resident { entries_buf: buf })
+        } else {
+            let layout = Self::build(meta, entries)?;
+            Ok(DirectoryIndexResult::NonResident { layout })
+        }
+    }
+
     pub fn build(meta: &NtfsMeta, entries: Vec<NtfsIndexEntry>) -> RimIOResult<IndexTreeLayout> {
         let index_record_size = meta.index_record_size as usize;
         // Max payload in an Index Record (4KB usually)
-        // Header (Indx + USA) ~ 24 + 2*2 = 28 bytes
+        // Header (Indx + USA + padding) = 88 bytes
         // Node Header = 16 bytes
         // End Entry = 16 bytes
         // Safety margin = 32 bytes
-        let max_payload = index_record_size.saturating_sub(64 + 32);
+        let max_payload = index_record_size.saturating_sub(88 + 32);
 
         let mut blocks: Vec<Vec<NtfsIndexEntry>> = Vec::new();
         let mut root_entries_indices: Vec<(usize, u64)> = Vec::new(); // (index in entries, vcn)
@@ -88,7 +152,7 @@ impl IndexTreeBuilder {
 
             // Serialize
             let mut buf = vec![0u8; new_entry.len()];
-            let mut io = rimio::prelude::MemRimIO::new(&mut buf);
+            let mut io = MemRimIO::new(&mut buf);
             new_entry.write_to_io(&mut io, 0)?;
             root_entries_bytes.extend_from_slice(&buf);
         }
@@ -103,8 +167,10 @@ impl IndexTreeBuilder {
         root_entries_bytes.extend_from_slice(&last_bytes);
 
         // --- 3. Build Bitmap ---
-        let bitmap_len = blocks.len().div_ceil(8);
+        // Windows/mkntfs stores the $I30 bitmap with a minimum size of 8 bytes.
+        let bitmap_len = blocks.len().div_ceil(8).max(8);
         let mut bitmap = vec![0u8; bitmap_len];
+
         for i in 0..blocks.len() {
             bitmap[i / 8] |= 1 << (i % 8);
         }

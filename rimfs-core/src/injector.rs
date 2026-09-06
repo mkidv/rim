@@ -6,6 +6,11 @@ use ::alloc::vec::Vec;
 pub use crate::errors::{FsInjectorError, FsInjectorResult};
 pub use crate::resolver::{FsNode, FsTreeResolver};
 
+#[cfg(feature = "std")]
+pub mod std_injector;
+#[cfg(feature = "std")]
+pub use std_injector::{StdInjector, StdOverwritePolicy};
+
 use crate::{
     allocator::FsHandle,
     resolver::attr::{FileAttributes, NodeKind},
@@ -70,8 +75,6 @@ pub trait FsTreeInjector<Handle: FsHandle> {
         ))
     }
 
-    /// Initialize the root directory context.
-    ///
     /// Initialize the root directory context.
     fn set_root_context(&mut self, attr: &FileAttributes) -> FsInjectorResult;
 

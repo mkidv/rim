@@ -6,19 +6,21 @@ use crate::ui::progress::create_spinner;
 use crate::ui::table::print_layout_table;
 use anyhow::anyhow;
 use colored::Colorize;
-use rimgen::{BuildEvent, LayoutConfig};
+use rimgen::{BuildEvent, BuildOptions, LayoutConfig, PartitionTable};
 use rimimg::ImageFormat;
 use rimio::prelude::*;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     layout_path: PathBuf,
     output: Option<PathBuf>,
     _truncate: bool,
     dry_run: bool,
     host: bool,
+    no_gpt: bool,
     verbose: u8,
     quiet: bool,
 ) -> anyhow::Result<()> {
@@ -35,6 +37,13 @@ pub fn run(
     layout.validate()?;
 
     let out_path = output.unwrap_or_else(|| layout_path.with_extension("img"));
+    let build_options = BuildOptions {
+        partition_table: if no_gpt {
+            PartitionTable::None
+        } else {
+            PartitionTable::Gpt
+        },
+    };
 
     if !quiet {
         if dry_run {
@@ -50,9 +59,17 @@ pub fn run(
             println!("\n📋 Planned layout:");
             print_layout_table(&layout);
         }
+
+        if no_gpt {
+            println!("Generating without GPT or protective MBR.");
+        }
     }
 
     if host {
+        if no_gpt {
+            return Err(anyhow!("--no-gpt cannot be combined with --host"));
+        }
+
         if !quiet {
             println!("🛠️  Using OS-native host integration (rimhost)...");
         }
@@ -134,9 +151,9 @@ pub fn run(
         };
 
         let dry_stats = if dry_run {
-            Some(build_config_dry_run(&layout, &mut on_event)?)
+            Some(build_config_dry_run(&layout, build_options, &mut on_event)?)
         } else {
-            build_config_to_file(&layout, &out_path, &mut on_event)?;
+            build_config_to_file(&layout, &out_path, build_options, &mut on_event)?;
             None
         };
 
@@ -187,12 +204,13 @@ struct DryRunStats {
 
 fn build_config_dry_run(
     layout: &LayoutConfig,
+    options: BuildOptions,
     on_event: &mut dyn for<'a> FnMut(BuildEvent<'a>),
 ) -> anyhow::Result<DryRunStats> {
-    let raw_len = raw_image_len(layout)?;
+    let raw_len = raw_image_len(layout, options)?;
     let mut io = SparseRimIO::new(raw_len);
 
-    rimgen::build_config_on_io_with_events(layout, &mut io, on_event)?;
+    rimgen::build_config_on_io_with_options_and_events(layout, &mut io, options, on_event)?;
 
     Ok(DryRunStats {
         logical_bytes: raw_len,
@@ -204,9 +222,10 @@ fn build_config_dry_run(
 fn build_config_to_file(
     layout: &LayoutConfig,
     output: &PathBuf,
+    build_options: BuildOptions,
     on_event: &mut dyn for<'a> FnMut(BuildEvent<'a>),
 ) -> anyhow::Result<()> {
-    let raw_len = raw_image_len(layout)?;
+    let raw_len = raw_image_len(layout, build_options)?;
     let format = image_format_from_path(output)?;
 
     let file = OpenOptions::new()
@@ -221,12 +240,22 @@ fn build_config_to_file(
     if format == ImageFormat::Raw {
         file_io.set_len(raw_len)?;
 
-        rimgen::build_config_on_io_with_events(layout, &mut file_io, on_event)?;
+        rimgen::build_config_on_io_with_options_and_events(
+            layout,
+            &mut file_io,
+            build_options,
+            on_event,
+        )?;
     } else {
         let options = rimimg::ImageOptions::default();
         let mut image = rimimg::create_image_io(&mut file_io, raw_len, format, options)?;
 
-        rimgen::build_config_on_io_with_events(layout, &mut image, on_event)?;
+        rimgen::build_config_on_io_with_options_and_events(
+            layout,
+            &mut image,
+            build_options,
+            on_event,
+        )?;
 
         image.finish()?;
     }
@@ -234,8 +263,8 @@ fn build_config_to_file(
     Ok(())
 }
 
-fn raw_image_len(layout: &LayoutConfig) -> anyhow::Result<u64> {
-    let sectors = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(layout);
+fn raw_image_len(layout: &LayoutConfig, options: BuildOptions) -> anyhow::Result<u64> {
+    let sectors = rimgen::calculate_total_disk_sectors_from_config_with_options(layout, options)?;
     sectors
         .checked_mul(rimgen::layout::constants::DEFAULT_SECTOR_SIZE)
         .ok_or_else(|| anyhow!("disk image size overflow"))

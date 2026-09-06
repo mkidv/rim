@@ -16,9 +16,17 @@ pub mod guid;
 pub mod layout;
 pub mod macros;
 
-pub use builder::{BuildEvent, BuildReport, PartitionReport, build_on_io, build_on_io_with_events};
+pub use builder::{
+    BuildEvent, BuildOptions, BuildReport, PartitionReport, PartitionTable, build_on_io,
+    build_on_io_with_events, build_on_io_with_options, build_on_io_with_options_and_events,
+    calculate_total_disk_sectors_with_options,
+};
 #[cfg(feature = "std")]
-pub use builder::{build_config_on_io, build_config_on_io_with_events};
+pub use builder::{
+    build_config_on_io, build_config_on_io_with_events, build_config_on_io_with_options,
+    build_config_on_io_with_options_and_events,
+    calculate_total_disk_sectors_from_config_with_options,
+};
 pub use errors::{GenError, GenResult, LayoutError, LayoutResult};
 #[cfg(feature = "std")]
 pub use guid::RandomGuidGenerator;

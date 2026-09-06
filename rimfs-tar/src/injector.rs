@@ -4,7 +4,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use crate::meta::TarMeta;
 use crate::types::*;
@@ -19,6 +19,7 @@ pub struct TarInjector<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     _meta: &'a TarMeta,
     current_offset: u64,
+    path_stack: alloc::vec::Vec<String>,
 }
 
 impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
@@ -27,7 +28,18 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
             io,
             _meta: meta,
             current_offset: 0,
+            path_stack: alloc::vec::Vec::new(),
         })
+    }
+
+    fn entry_path(&self, name: &str) -> String {
+        let name = normalize_fs_path(name);
+        if let Some(parent) = self.path_stack.last()
+            && !parent.is_empty()
+        {
+            return alloc::format!("{parent}/{name}");
+        }
+        name.to_string()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -73,7 +85,7 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
-        let mut dir_name = String::from(normalize_fs_path(name));
+        let mut dir_name = self.entry_path(name);
         if !dir_name.ends_with('/') {
             dir_name.push('/');
         }
@@ -84,7 +96,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         let mode = attr.mode.unwrap_or(0o755);
         let uid = attr.uid.unwrap_or(0);
         let gid = attr.gid.unwrap_or(0);
-        self.write_header(&dir_name, 0, mode, uid, gid, mtime, DIRTYPE, "")
+        self.write_header(&dir_name, 0, mode, uid, gid, mtime, DIRTYPE, "")?;
+        self.path_stack
+            .push(normalize_fs_path(&dir_name).to_string());
+        Ok(())
     }
 
     fn write_file(
@@ -94,7 +109,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let file_name = normalize_fs_path(name);
+        let file_name = self.entry_path(name);
         let mtime = attr
             .modified
             .map(|t| t.unix_timestamp() as u64)
@@ -102,7 +117,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         let mode = attr.mode.unwrap_or(0o644);
         let uid = attr.uid.unwrap_or(0);
         let gid = attr.gid.unwrap_or(0);
-        self.write_header(file_name, size, mode, uid, gid, mtime, REGTYPE, "")?;
+        self.write_header(&file_name, size, mode, uid, gid, mtime, REGTYPE, "")?;
 
         // Stream file payload
         let mut buf = [0u8; 4096];
@@ -135,7 +150,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         target: &str,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        let link_name = normalize_fs_path(name);
+        let link_name = self.entry_path(name);
         let mtime = attr
             .modified
             .map(|t| t.unix_timestamp() as u64)
@@ -143,14 +158,16 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         let mode = attr.mode.unwrap_or(0o777);
         let uid = attr.uid.unwrap_or(0);
         let gid = attr.gid.unwrap_or(0);
-        self.write_header(link_name, 0, mode, uid, gid, mtime, SYMTYPE, target)
+        self.write_header(&link_name, 0, mode, uid, gid, mtime, SYMTYPE, target)
     }
 
     fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
+        self.path_stack.clear();
         Ok(())
     }
 
     fn flush_current(&mut self) -> FsInjectorResult {
+        self.path_stack.pop();
         Ok(())
     }
 

@@ -17,10 +17,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     NtfsFormatter::new(&mut format_io, &meta).format(false)?;
     let format = (t.elapsed(), format_io.snapshot());
 
-    let mut tree = FsNode::new_container(vec![FsNode::new_file(
-        "hello.txt",
-        b"hello from NTFS\n".to_vec(),
-    )]);
+    let mut tree = FsNode::Container {
+        attr: FileAttributes::new_dir(),
+        children: vec![
+            FsNode::new_file("hello.txt", b"hello from NTFS\n".to_vec()),
+            FsNode::Dir {
+                name: "docs".to_string(),
+                attr: FileAttributes::new_dir(),
+                children: vec![
+                    FsNode::new_file("manual.txt", b"user manual content\n".to_vec()),
+                    FsNode::Dir {
+                        name: "sub".to_string(),
+                        attr: FileAttributes::new_dir(),
+                        children: vec![FsNode::new_file("nested.txt", b"deep nested\n".to_vec())],
+                    },
+                ],
+            },
+        ],
+    };
     let mut inject_io = IOCounter::with_align(format_io.into_inner(), align);
     let t = Instant::now();
     let mut injector = NtfsInjector::new(&mut inject_io, &meta)?;
@@ -38,6 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t = Instant::now();
     let mut resolver = NtfsResolver::new(&mut resolve_io, &meta);
     assert_eq!(resolver.read_file("hello.txt")?, b"hello from NTFS\n");
+    assert_eq!(
+        resolver.read_file("docs/manual.txt")?,
+        b"user manual content\n"
+    );
+    assert_eq!(resolver.read_file("docs/sub/nested.txt")?, b"deep nested\n");
     let resolve = (t.elapsed(), resolve_io.snapshot());
 
     println!("NTFS example completed in {:?}", total.elapsed());

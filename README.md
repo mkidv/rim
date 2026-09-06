@@ -1,6 +1,6 @@
 # RIM (Rust Image Maker)
 
-**RIM** is a modular, pure-Rust toolkit and engine for **generating, manipulating, converting, verifying, and analyzing disk images and filesystems**.
+**RIM** is a modular, pure-Rust toolkit and engine for **generating, copying, manipulating, converting, verifying, and analyzing disk images and filesystems**.
 
 Designed from the ground up for high reliability, streaming I/O, rootless userspace execution, cross-platform portability (Linux, macOS, Windows), and resource-constrained environments (`no_std`, `alloc`, and **UEFI firmware**).
 
@@ -15,7 +15,7 @@ The project is structured into modular, decoupled crates:
 
 | Crate | Role & Capabilities |
 |---|---|
-| **[`rimcli`](rimcli)** | Unified modern CLI producing the **`rim`** binary (`generate`, `convert`, `check`, `partition`, `inspect`). |
+| **[`rimcli`](rimcli)** | Unified modern CLI producing the **`rim`** binary (`generate`, `convert`, `check`, `partition`, `inspect`, `copy`). |
 | **[`rimgen`](rimgen)** | Pure library-first declarative storage synthesis engine (`Layout`, `LayoutConfig`, `build_on_io`). |
 | **[`rimimg`](rimimg)** | `no_std`-capable virtual machine disk containers (**RAW**, **VHD**, **VMDK**, **QCOW2**, **VDI**), detection, logical image I/O adapters, wrap/unwrap, and conversions. |
 | **[`rimhost`](rimhost)** | OS-native tooling integration (Windows PowerShell/Storage, Linux `losetup`/`mkfs`, macOS `diskutil`). |
@@ -41,6 +41,10 @@ The project is structured into modular, decoupled crates:
   - Completely safe to run inside non-privileged Docker containers and CI/CD pipelines (GitHub Actions, GitLab CI).
 - **Universal Portability**:
   - Identical behavior and deterministic output on **Linux**, **macOS** (Apple Silicon & Intel), and **Windows**.
+- **Universal Logical Filesystem Copy (`rim copy`)**:
+  - Direct logical transfers between host filesystems and disk image partitions (or between two disk images) without kernel mounting or root privileges.
+  - In-memory `--dry-run` simulation using sparse copy-on-write page overlays (`OverlayRimIO`) with zero destination disk writes.
+  - Destination-aware case-collision detection, metadata preservation policies, and cross-platform error handling.
 - **Supported Filesystems & Archives**:
   - **FAT**: FAT12, FAT16, FAT32, and RimFAT.
   - **ExFAT**: Full formatting, directory injection, and consistency verification.
@@ -72,7 +76,7 @@ cargo install --path rimcli
 
 ## 🛠️ CLI Usage (`rim`)
 
-The `rim` command-line tool provides 5 core subcommands:
+The `rim` command-line tool provides 6 core subcommands:
 
 ### 1. Generating a Disk Image (`generate` / `build`)
 
@@ -141,6 +145,27 @@ Verify GPT structures and filesystem consistency offline:
 
 ```bash
 rim check disk.img
+```
+
+### 6. Logical Filesystem Copy (`copy`)
+
+Perform high-performance, logical transfers between host filesystems and disk image partitions (or between two disk images) without mounting or requiring root privileges:
+
+```bash
+# Inject a host folder into a FAT32 partition within a disk image
+rim copy ./efi_payload/ disk.img:1:/EFI/BOOT/
+
+# Extract a directory from an EXT4 partition to the host
+rim copy disk.img:2:/etc/ ./extracted_etc/
+
+# Transfer logically between partitions or disk images (e.g. FAT to EXT4)
+rim copy disk1.img:1:/data disk2.img:2:/backup
+
+# Dry-run simulation (purely in-memory verification without touching disk)
+rim copy ./dist/ disk.img:1:/ --dry-run
+
+# Overwrite policy and metadata handling
+rim copy ./source disk.img:1:/ --overwrite replace --metadata preserve --unsupported warn
 ```
 
 ---

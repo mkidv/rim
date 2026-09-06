@@ -10,7 +10,6 @@ use crate::core::cursor::ClusterCursor;
 pub use crate::core::resolver::*;
 
 use crate::core::FsCursorError;
-use crate::core::utils::path_utils::*;
 use crate::{attr::*, constant::*, meta::*, types::*};
 
 pub struct FatResolver<'a, IO: RimRead + ?Sized> {
@@ -60,7 +59,7 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
 impl<'a, IO: RimRead + ?Sized> FsTreeResolver for FatResolver<'a, IO> {
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         let (is_dir, cluster, _) = self.resolve_entry_info(path)?;
-        crate::ensure!(is_dir, FsResolverError::Invalid("Root path is not a dir"));
+        crate::ensure!(is_dir, FsResolverError::Invalid("Not a directory"));
 
         let entries = read_dir_entries(self.io, self.meta, cluster)?;
         let entries_string = entries
@@ -110,26 +109,10 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for FatResolver<'a, IO> {
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
-        if path.is_empty() || path == "/" {
-            return Ok(FileAttributes::new_dir());
+        match crate::core::resolver::walker::walk_path(self, path)? {
+            Some(entry) => Ok(entry.attr()),
+            None => Ok(FileAttributes::new_dir()),
         }
-        let components = split_path(path);
-        let mut cluster = self.meta.root_unit();
-
-        for (i, comp) in components.iter().enumerate() {
-            let entry =
-                find_in_dir(self.io, self.meta, cluster, comp)?.ok_or(FsResolverError::NotFound)?;
-            if i == components.len() - 1 {
-                return Ok(entry.attr());
-            }
-            if !entry.is_dir() {
-                return Err(FsResolverError::Invalid(
-                    "Expected directory for intermediate component",
-                ));
-            }
-            cluster = entry.first_cluster();
-        }
-        Err(FsResolverError::Invalid("Invalid path"))
     }
 }
 
@@ -142,10 +125,13 @@ fn read_dir_entries<IO: RimRead + ?Sized>(
     let mut out = vec![];
     let mut lfn_stack = vec![];
 
+    let mut data: Vec<u8> = Vec::new();
     let mut cur = ClusterCursor::new(meta, start_cluster);
     cur.for_each_run(io, |io, run_start, run_len| {
         let total = (run_len as usize) * cs;
-        let mut data = vec![0u8; total];
+        if data.len() != total {
+            data.resize(total, 0);
+        }
         let off0 = meta.unit_offset(run_start);
         io.read_block_best_effort(off0, &mut data, total)?;
 
@@ -217,10 +203,13 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
     let mut lfn_stack: Vec<[u8; 32]> = Vec::new();
     let mut found: Option<FatEntries> = None;
 
-    // We read a full run in a single operation, then iterate by 32-byte chunks
+    // We read a full run in a single operation, reusing the buffer across runs
+    let mut data: Vec<u8> = Vec::new();
     let res = cur.for_each_run(io, |io, run_start, run_len| {
         let total = (run_len as usize) * cs;
-        let mut data = vec![0u8; total];
+        if data.len() != total {
+            data.resize(total, 0);
+        }
         let off0 = meta.unit_offset(run_start);
         io.read_block_best_effort(off0, &mut data, total)?;
 
