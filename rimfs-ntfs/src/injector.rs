@@ -18,7 +18,7 @@ use crate::core::resolver::attr::FileAttributes;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::NtfsMeta;
 use crate::mft;
-use crate::types::security::{SECURITY_DESCRIPTOR_ROOT, security_descriptor_everyone};
+use crate::types::security::SECURITY_DESCRIPTOR_ROOT;
 use crate::types::{
     IndexEntryFlags, IndexTreeBuilder, NtfsAttribute, NtfsFileAttributes, NtfsIndexEntry,
     NtfsMftRecord,
@@ -510,10 +510,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             if is_root {
                 record.add_attribute(NtfsAttribute::security_descriptor(
                     SECURITY_DESCRIPTOR_ROOT.to_vec(),
-                ));
-            } else {
-                record.add_attribute(NtfsAttribute::security_descriptor(
-                    security_descriptor_everyone(),
                 ));
             }
 
