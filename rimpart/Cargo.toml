@@ -20,14 +20,14 @@ std = ["alloc", "rimio/std"]
 [dependencies]
 crc32fast = { version = "1.4.2", default-features = false }
 paste = "1.0.15"
-rimio = { path = "../rimio", version = "0.9.0", default-features = false }
+rimio = { path = "../rimio", version = "0.9.1", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = [
     "derive",
 ] }
 
 [dev-dependencies]
 rimio = { path = "../rimio", default-features = false, features = ["mem"] }
-criterion = { version = "0.7.0", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bench]]
 name = "gpt_crc_stream_bench"

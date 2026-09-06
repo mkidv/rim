@@ -8,9 +8,9 @@ use crate::format::ImageFormat;
 use crate::options::ImageOptions;
 use crate::{qcow2, vdi, vhd, vmdk};
 
-/// Logical raw-disk view over an image container.
+/// Linear raw-disk view over an image container (RAW, VHD, VMDK, VDI).
 #[allow(clippy::upper_case_acronyms)]
-pub struct ImageIO<'a> {
+pub struct LinearImageIO<'a> {
     inner: &'a mut dyn RimIO,
     raw_len: u64,
     data_offset: u64,
@@ -21,9 +21,9 @@ pub struct ImageIO<'a> {
     finished: bool,
 }
 
-/// Read-only logical raw-disk view over an image container.
+/// Read-only linear raw-disk view over an image container (RAW, VHD, VMDK, VDI).
 #[allow(clippy::upper_case_acronyms)]
-pub struct ImageReadIO<'a> {
+pub struct LinearImageReadIO<'a> {
     inner: &'a mut dyn RimRead,
     raw_len: u64,
     data_offset: u64,
@@ -31,8 +31,23 @@ pub struct ImageReadIO<'a> {
     partition_offset: u64,
 }
 
-impl<'a> ImageIO<'a> {
-    fn new(
+/// Logical raw-disk view over an image container.
+#[allow(clippy::upper_case_acronyms)]
+pub enum ImageIO<'a> {
+    Linear(LinearImageIO<'a>),
+    #[cfg(feature = "alloc")]
+    Qcow2(qcow2::Qcow2IO<'a>),
+}
+
+/// Read-only logical raw-disk view over an image container.
+#[allow(clippy::upper_case_acronyms)]
+pub enum ImageReadIO<'a> {
+    Linear(LinearImageReadIO<'a>),
+    Qcow2(qcow2::Qcow2ReadIO<'a>),
+}
+
+impl<'a> LinearImageIO<'a> {
+    pub fn new(
         inner: &'a mut dyn RimIO,
         raw_len: u64,
         data_offset: u64,
@@ -93,8 +108,8 @@ impl<'a> ImageIO<'a> {
     }
 }
 
-impl<'a> ImageReadIO<'a> {
-    fn new(
+impl<'a> LinearImageReadIO<'a> {
+    pub fn new(
         inner: &'a mut dyn RimRead,
         raw_len: u64,
         data_offset: u64,
@@ -117,6 +132,15 @@ impl<'a> ImageReadIO<'a> {
         self.format
     }
 
+    pub fn set_offset(&mut self, offset: u64) -> u64 {
+        self.partition_offset = offset;
+        offset
+    }
+
+    pub fn partition_offset(&self) -> u64 {
+        self.partition_offset
+    }
+
     #[inline]
     fn checked_raw_range(&self, offset: u64, len: usize) -> Result<u64, RimIOError> {
         let logical = self
@@ -136,7 +160,63 @@ impl<'a> ImageReadIO<'a> {
     }
 }
 
-impl RimRead for ImageReadIO<'_> {
+impl<'a> ImageIO<'a> {
+    pub fn raw_len(&self) -> u64 {
+        match self {
+            Self::Linear(io) => io.raw_len(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.raw_len(),
+        }
+    }
+
+    pub fn format(&self) -> ImageFormat {
+        match self {
+            Self::Linear(io) => io.format(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(_) => ImageFormat::Qcow2,
+        }
+    }
+
+    pub fn finish(&mut self) -> RimImgResult {
+        match self {
+            Self::Linear(io) => io.finish(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.finish(),
+        }
+    }
+}
+
+impl<'a> ImageReadIO<'a> {
+    pub fn raw_len(&self) -> u64 {
+        match self {
+            Self::Linear(io) => io.raw_len(),
+            Self::Qcow2(io) => io.raw_len(),
+        }
+    }
+
+    pub fn format(&self) -> ImageFormat {
+        match self {
+            Self::Linear(io) => io.format(),
+            Self::Qcow2(_) => ImageFormat::Qcow2,
+        }
+    }
+
+    pub fn set_offset(&mut self, offset: u64) -> u64 {
+        match self {
+            Self::Linear(io) => io.set_offset(offset),
+            Self::Qcow2(io) => io.set_offset(offset),
+        }
+    }
+
+    pub fn partition_offset(&self) -> u64 {
+        match self {
+            Self::Linear(io) => io.partition_offset(),
+            Self::Qcow2(io) => io.partition_offset(),
+        }
+    }
+}
+
+impl RimRead for LinearImageReadIO<'_> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> rimio::RimIOResult {
         let physical = self.checked_raw_range(offset, buf.len())?;
         self.inner.read_at(physical, buf)
@@ -147,7 +227,7 @@ impl RimRead for ImageReadIO<'_> {
     }
 }
 
-impl RimRead for ImageIO<'_> {
+impl RimRead for LinearImageIO<'_> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> rimio::RimIOResult {
         let physical = self.checked_raw_range(offset, buf.len())?;
         self.inner.read_at(physical, buf)
@@ -158,7 +238,7 @@ impl RimRead for ImageIO<'_> {
     }
 }
 
-impl RimWrite for ImageIO<'_> {
+impl RimWrite for LinearImageIO<'_> {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> rimio::RimIOResult {
         let physical = self.checked_raw_range(offset, data.len())?;
         self.inner.write_at(physical, data)
@@ -169,7 +249,7 @@ impl RimWrite for ImageIO<'_> {
     }
 }
 
-impl RimIO for ImageIO<'_> {
+impl RimIO for LinearImageIO<'_> {
     fn set_offset(&mut self, partition_offset: u64) -> u64 {
         self.partition_offset = partition_offset;
         partition_offset
@@ -180,6 +260,76 @@ impl RimIO for ImageIO<'_> {
     }
 }
 
+impl RimRead for ImageReadIO<'_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> rimio::RimIOResult {
+        match self {
+            Self::Linear(io) => io.read_at(offset, buf),
+            Self::Qcow2(io) => io.read_at(offset, buf),
+        }
+    }
+
+    fn total_size(&mut self) -> rimio::RimIOResult<u64> {
+        match self {
+            Self::Linear(io) => io.total_size(),
+            Self::Qcow2(io) => io.total_size(),
+        }
+    }
+}
+
+impl RimRead for ImageIO<'_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> rimio::RimIOResult {
+        match self {
+            Self::Linear(io) => io.read_at(offset, buf),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.read_at(offset, buf),
+        }
+    }
+
+    fn total_size(&mut self) -> rimio::RimIOResult<u64> {
+        match self {
+            Self::Linear(io) => io.total_size(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.total_size(),
+        }
+    }
+}
+
+impl RimWrite for ImageIO<'_> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> rimio::RimIOResult {
+        match self {
+            Self::Linear(io) => io.write_at(offset, data),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.write_at(offset, data),
+        }
+    }
+
+    fn flush(&mut self) -> rimio::RimIOResult {
+        match self {
+            Self::Linear(io) => io.flush(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.flush(),
+        }
+    }
+}
+
+impl RimIO for ImageIO<'_> {
+    fn set_offset(&mut self, partition_offset: u64) -> u64 {
+        match self {
+            Self::Linear(io) => io.set_offset(partition_offset),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.set_offset(partition_offset),
+        }
+    }
+
+    fn partition_offset(&self) -> u64 {
+        match self {
+            Self::Linear(io) => io.partition_offset(),
+            #[cfg(feature = "alloc")]
+            Self::Qcow2(io) => io.partition_offset(),
+        }
+    }
+}
+
 #[cfg(feature = "alloc")]
 pub fn create_image_io<'a>(
     dst: &'a mut dyn RimIO,
@@ -187,61 +337,140 @@ pub fn create_image_io<'a>(
     format: ImageFormat,
     options: ImageOptions,
 ) -> RimImgResult<ImageIO<'a>> {
-    let (data_offset, write_footer_on_finish) = match format {
-        ImageFormat::Raw => (0, false),
-        ImageFormat::Vhd => (0, true),
+    match format {
+        ImageFormat::Raw => Ok(ImageIO::Linear(LinearImageIO::new(
+            dst, raw_len, 0, format, options, false,
+        ))),
+        ImageFormat::Vhd => Ok(ImageIO::Linear(LinearImageIO::new(
+            dst, raw_len, 0, format, options, true,
+        ))),
         ImageFormat::Vmdk => {
             vmdk::init_vmdk_io(dst, raw_len, options)?;
-            (vmdk::DESCRIPTOR_SECTORS * vmdk::SECTOR_SIZE, false)
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                dst,
+                raw_len,
+                vmdk::DESCRIPTOR_SECTORS * vmdk::SECTOR_SIZE,
+                format,
+                options,
+                false,
+            )))
         }
-        ImageFormat::Qcow2 => (qcow2::init_qcow2_io(dst, raw_len)?, false),
+        ImageFormat::Qcow2 => {
+            let qcow2_io = qcow2::create_sparse_qcow2_io(dst, raw_len)?;
+            Ok(ImageIO::Qcow2(qcow2_io))
+        }
         ImageFormat::Vdi => {
             vdi::init_vdi_io(dst, raw_len, options)?;
-            (vdi::DATA_OFFSET, false)
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                dst,
+                raw_len,
+                vdi::DATA_OFFSET,
+                format,
+                options,
+                false,
+            )))
         }
-    };
-
-    Ok(ImageIO::new(
-        dst,
-        raw_len,
-        data_offset,
-        format,
-        options,
-        write_footer_on_finish,
-    ))
+    }
 }
 
 pub fn open_image_io(src: &mut dyn RimIO) -> RimImgResult<ImageIO<'_>> {
     let format = ImageFormat::from_io(src)?;
-    let (raw_len, data_offset) = match format {
-        ImageFormat::Raw => (src.total_size()?, 0),
-        ImageFormat::Vhd => open_vhd(src)?,
-        ImageFormat::Vmdk => open_vmdk(src)?,
-        ImageFormat::Qcow2 => open_qcow2(src)?,
-        ImageFormat::Vdi => open_vdi(src)?,
-    };
-
-    Ok(ImageIO::new(
-        src,
-        raw_len,
-        data_offset,
-        format,
-        ImageOptions::deterministic(0),
-        false,
-    ))
+    match format {
+        ImageFormat::Raw => {
+            let raw_len = src.total_size()?;
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                src,
+                raw_len,
+                0,
+                format,
+                ImageOptions::deterministic(0),
+                false,
+            )))
+        }
+        ImageFormat::Vhd => {
+            let (raw_len, data_offset) = open_vhd(src)?;
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+                ImageOptions::deterministic(0),
+                false,
+            )))
+        }
+        ImageFormat::Vmdk => {
+            let (raw_len, data_offset) = open_vmdk(src)?;
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+                ImageOptions::deterministic(0),
+                false,
+            )))
+        }
+        #[cfg(feature = "alloc")]
+        ImageFormat::Qcow2 => {
+            let qcow2_io = qcow2::open_sparse_qcow2_io(src)?;
+            Ok(ImageIO::Qcow2(qcow2_io))
+        }
+        #[cfg(not(feature = "alloc"))]
+        ImageFormat::Qcow2 => Err(RimImgError::UnsupportedFormat),
+        ImageFormat::Vdi => {
+            let (raw_len, data_offset) = open_vdi(src)?;
+            Ok(ImageIO::Linear(LinearImageIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+                ImageOptions::deterministic(0),
+                false,
+            )))
+        }
+    }
 }
 
 pub fn open_image_read_io(src: &mut dyn RimRead) -> RimImgResult<ImageReadIO<'_>> {
     let format = ImageFormat::from_read(src)?;
-    let (raw_len, data_offset) = match format {
-        ImageFormat::Raw => (src.total_size()?, 0),
-        ImageFormat::Vhd => open_vhd(src)?,
-        ImageFormat::Vmdk => open_vmdk(src)?,
-        ImageFormat::Qcow2 => open_qcow2(src)?,
-        ImageFormat::Vdi => open_vdi(src)?,
-    };
-
-    Ok(ImageReadIO::new(src, raw_len, data_offset, format))
+    match format {
+        ImageFormat::Raw => {
+            let raw_len = src.total_size()?;
+            Ok(ImageReadIO::Linear(LinearImageReadIO::new(
+                src, raw_len, 0, format,
+            )))
+        }
+        ImageFormat::Vhd => {
+            let (raw_len, data_offset) = open_vhd(src)?;
+            Ok(ImageReadIO::Linear(LinearImageReadIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+            )))
+        }
+        ImageFormat::Vmdk => {
+            let (raw_len, data_offset) = open_vmdk(src)?;
+            Ok(ImageReadIO::Linear(LinearImageReadIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+            )))
+        }
+        ImageFormat::Qcow2 => {
+            let qcow2_reader = qcow2::open_sparse_qcow2_read_io(src)?;
+            Ok(ImageReadIO::Qcow2(qcow2_reader))
+        }
+        ImageFormat::Vdi => {
+            let (raw_len, data_offset) = open_vdi(src)?;
+            Ok(ImageReadIO::Linear(LinearImageReadIO::new(
+                src,
+                raw_len,
+                data_offset,
+                format,
+            )))
+        }
+    }
 }
 
 fn finish_vhd(dst: &mut dyn RimIO, raw_len: u64, options: ImageOptions) -> RimImgResult {
@@ -285,13 +514,6 @@ fn open_vmdk(src: &mut dyn RimRead) -> RimImgResult<(u64, u64)> {
     }
 
     Ok((len - data_offset, data_offset))
-}
-
-fn open_qcow2(src: &mut dyn RimRead) -> RimImgResult<(u64, u64)> {
-    let header: qcow2::Qcow2Header = src.read_struct(0)?;
-    qcow2::validate_qcow2_header(&header)?;
-    let data_offset = qcow2::data_start_from_header(&header);
-    Ok((header.size.get(), data_offset))
 }
 
 fn open_vdi(src: &mut dyn RimRead) -> RimImgResult<(u64, u64)> {

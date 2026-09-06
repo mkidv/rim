@@ -1068,10 +1068,10 @@ fn test_multi_partition_addressing_and_isolation() {
     }
     drop(file);
 
-    // Populate partition 1 with A.TXT
+    // Populate partition 1 with a.txt
     let src_a = dir.path().join("src_a");
     fs::create_dir_all(&src_a).unwrap();
-    fs::write(src_a.join("A.TXT"), b"Partition 1 FAT32 content").unwrap();
+    fs::write(src_a.join("a.txt"), b"Partition 1 FAT32 content").unwrap();
 
     rimcli::commands::copy::run(
         src_a.to_str().unwrap().to_string(),
@@ -1087,10 +1087,10 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
 
-    // Populate partition 2 with B.TXT
+    // Populate partition 2 with b.txt
     let src_b = dir.path().join("src_b");
     fs::create_dir_all(&src_b).unwrap();
-    fs::write(src_b.join("B.TXT"), b"Partition 2 EXT4 content").unwrap();
+    fs::write(src_b.join("b.txt"), b"Partition 2 EXT4 content").unwrap();
 
     rimcli::commands::copy::run(
         src_b.to_str().unwrap().to_string(),
@@ -1106,7 +1106,7 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
 
-    // Verify disk.img:1:/ resolves A.TXT and NOT B.TXT
+    // Verify disk.img:1:/ resolves a.txt and NOT b.txt
     let out_a = dir.path().join("out_a");
     rimcli::commands::copy::run(
         format!("{}:1:/", img_path.display()),
@@ -1122,12 +1122,12 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
     assert_eq!(
-        fs::read(out_a.join("A.TXT")).unwrap(),
+        fs::read(out_a.join("a.txt")).unwrap(),
         b"Partition 1 FAT32 content"
     );
-    assert!(!out_a.join("B.TXT").exists());
+    assert!(!out_a.join("b.txt").exists());
 
-    // Verify disk.img:2:/ resolves B.TXT and NOT A.TXT
+    // Verify disk.img:2:/ resolves b.txt and NOT a.txt
     let out_b = dir.path().join("out_b");
     rimcli::commands::copy::run(
         format!("{}:2:/", img_path.display()),
@@ -1143,10 +1143,10 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
     assert_eq!(
-        fs::read(out_b.join("B.TXT")).unwrap(),
+        fs::read(out_b.join("b.txt")).unwrap(),
         b"Partition 2 EXT4 content"
     );
-    assert!(!out_b.join("A.TXT").exists());
+    assert!(!out_b.join("a.txt").exists());
 
     // Destination selection isolation test:
     // Snapshot partition 1 bytes
@@ -1374,6 +1374,7 @@ fn test_container_copy_vhd_and_vmdk() {
     let raw_path = dir.path().join("raw.img");
     let vhd_path = dir.path().join("disk.vhd");
     let vmdk_path = dir.path().join("disk.vmdk");
+    let qcow2_path = dir.path().join("disk.qcow2");
 
     let layout = rimgen::LayoutConfig {
         base_dir: PathBuf::from("."),
@@ -1408,10 +1409,12 @@ fn test_container_copy_vhd_and_vmdk() {
     }
     drop(file);
 
-    // Convert raw to VHD and VMDK
+    // Convert raw to VHD, VMDK, and QCOW2
     rimcli::commands::convert::run(raw_path.clone(), vhd_path.clone(), 0, true).unwrap();
 
     rimcli::commands::convert::run(raw_path.clone(), vmdk_path.clone(), 0, true).unwrap();
+
+    rimcli::commands::convert::run(raw_path.clone(), qcow2_path.clone(), 0, true).unwrap();
 
     // Write to VHD container via rim copy (testing streaming container write)
     let src = dir.path().join("src_vhd");
@@ -1494,24 +1497,18 @@ fn test_container_copy_vhd_and_vmdk() {
         fs::read(out_vmdk.join("vmdk_file.txt")).unwrap(),
         b"VMDK container write payload"
     );
-}
 
-#[test]
-fn test_qcow2_destination_rejection() {
-    let dir = tempfile::tempdir().unwrap();
-    let qcow2_path = dir.path().join("disk.qcow2");
+    // Write to QCOW2 container via rim copy (testing dynamic sparse container write)
+    let src_qcow2 = dir.path().join("src_qcow2");
+    fs::create_dir_all(&src_qcow2).unwrap();
+    fs::write(
+        src_qcow2.join("qcow2_file.txt"),
+        b"QCOW2 container write payload",
+    )
+    .unwrap();
 
-    // Create a dummy QCOW2 header
-    let mut header = [0u8; 512];
-    header[..4].copy_from_slice(&[0x51, 0x46, 0x49, 0xfb]);
-    fs::write(&qcow2_path, header).unwrap();
-
-    let src = dir.path().join("src_dummy");
-    fs::create_dir_all(&src).unwrap();
-    fs::write(src.join("dummy.txt"), b"test").unwrap();
-
-    let err = rimcli::commands::copy::run(
-        src.to_str().unwrap().to_string(),
+    rimcli::commands::copy::run(
+        src_qcow2.to_str().unwrap().to_string(),
         format!("{}:1:/", qcow2_path.display()),
         "/".to_string(),
         "preserve-all".to_string(),
@@ -1522,10 +1519,27 @@ fn test_qcow2_destination_rejection() {
         0,
         true,
     )
-    .unwrap_err()
-    .to_string();
+    .unwrap();
 
-    assert!(err.contains("Writing directly to QCOW2 containers as a destination is not supported"));
+    // Read back from QCOW2 container
+    let out_qcow2 = dir.path().join("out_qcow2");
+    rimcli::commands::copy::run(
+        format!("{}:1:/", qcow2_path.display()),
+        out_qcow2.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out_qcow2.join("qcow2_file.txt")).unwrap(),
+        b"QCOW2 container write payload"
+    );
 }
 
 #[test]

@@ -75,7 +75,12 @@ pub(crate) fn wrap_file_with_progress<F: FnMut(u64, u64)>(
     let input_file = File::open(input)
         .with_context(|| format!("Failed to open input image {}", input.display()))?;
     let input_len = input_file.metadata()?.len();
-    let output_file = File::create(output)
+    let output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output)
         .with_context(|| format!("Failed to create output image {}", output.display()))?;
     let mut src = FileRimIO::new(input_file);
     let mut dst = FileRimIO::new(output_file);
@@ -106,7 +111,12 @@ pub(crate) fn unwrap_file_with_progress<F: FnMut(u64, u64)>(
     let input_file = File::open(input)
         .with_context(|| format!("Failed to open input image {}", input.display()))?;
     let input_len = input_file.metadata()?.len();
-    let output_file = File::create(output)
+    let output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output)
         .with_context(|| format!("Failed to create output image {}", output.display()))?;
     let mut src = FileRimIO::new(input_file);
     let mut dst = FileRimIO::new(output_file);

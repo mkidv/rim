@@ -24,19 +24,19 @@ zip = ["alloc", "dep:rimfs-zip"]
 iso = ["alloc", "dep:rimfs-iso"]
 
 [dependencies]
-rimfs-core = { path = "../rimfs-core", version = "0.9.0", default-features = false }
-rimfs-fat = { path = "../rimfs-fat", version = "0.9.0", default-features = false, optional = true }
-rimfs-exfat = { path = "../rimfs-exfat", version = "0.9.0", default-features = false, optional = true }
-rimfs-ext = { path = "../rimfs-ext", version = "0.9.0", default-features = false, optional = true }
-rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.9.0", default-features = false, optional = true }
-rimfs-tar = { path = "../rimfs-tar", version = "0.9.0", default-features = false, optional = true }
-rimfs-zip = { path = "../rimfs-zip", version = "0.9.0", default-features = false, optional = true }
-rimfs-iso = { path = "../rimfs-iso", version = "0.9.0", default-features = false, optional = true }
+rimfs-core = { path = "../rimfs-core", version = "0.9.1", default-features = false }
+rimfs-fat = { path = "../rimfs-fat", version = "0.9.1", default-features = false, optional = true }
+rimfs-exfat = { path = "../rimfs-exfat", version = "0.9.1", default-features = false, optional = true }
+rimfs-ext = { path = "../rimfs-ext", version = "0.9.1", default-features = false, optional = true }
+rimfs-ntfs = { path = "../rimfs-ntfs", version = "0.9.1", default-features = false, optional = true }
+rimfs-tar = { path = "../rimfs-tar", version = "0.9.1", default-features = false, optional = true }
+rimfs-zip = { path = "../rimfs-zip", version = "0.9.1", default-features = false, optional = true }
+rimfs-iso = { path = "../rimfs-iso", version = "0.9.1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3.20.0"
-rimio = { path = "../rimio", version = "0.9.0", features = ["mmap", "std"] }
+rimio = { path = "../rimio", version = "0.9.1", features = ["mmap", "std"] }
 
 [package.metadata.docs.rs]
 features = ["std"]

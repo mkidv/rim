@@ -59,7 +59,7 @@ The project is structured into modular, decoupled crates:
   - Microsoft VHD: `.vhd` (fixed VHD, Read & Write)
   - VMware VMDK: `.vmdk` (monolithicFlat, Read & Write)
   - VirtualBox VDI: `.vdi` (fixed VDI 1.1, Read & Write)
-  - QEMU QCOW2: `.qcow2` (v2 linear Read & Convert; creation via `rim generate`)
+  - QEMU QCOW2: `.qcow2` (v2 & v3 Dynamic Sparse Allocator, Read & Write, lazy L2, zero clusters, direct injection via `rim copy`)
 - **Bare-Metal & Embedded Ready**:
   - `no_std`, `alloc`, **WebAssembly** (`wasm32-unknown-unknown`), and native **UEFI** firmware (`EFI_BLOCK_IO_PROTOCOL`) support.
 

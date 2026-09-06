@@ -302,4 +302,279 @@ mod tests {
             ImageFormat::Vdi => vdi::DATA_OFFSET as usize + raw_len,
         }
     }
+
+    #[test]
+    fn test_qcow2_sparse_unallocated_reads_zeroes() {
+        let virtual_size = 10 * 1024 * 1024 * 1024u64; // 10 GiB
+        let mut storage = vec![0u8; 1024 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        let mut img = create_image_io(
+            &mut mem_io,
+            virtual_size,
+            ImageFormat::Qcow2,
+            ImageOptions::deterministic(1),
+        )
+        .unwrap();
+        assert_eq!(img.raw_len(), virtual_size);
+
+        // Read at 0
+        let mut buf = [0xAAu8; 4096];
+        img.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 4096]);
+
+        // Read at 512 MiB boundary (L1 index 1)
+        img.read_at(512 * 1024 * 1024, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 4096]);
+
+        // Read at 9.9 GiB
+        img.read_at(virtual_size - 4096, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 4096]);
+    }
+
+    #[test]
+    fn test_qcow2_lazy_l2_allocation() {
+        let virtual_size = 10 * 1024 * 1024 * 1024u64; // 10 GiB
+        let mut storage = vec![0u8; 1024 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        {
+            let mut img = create_image_io(
+                &mut mem_io,
+                virtual_size,
+                ImageFormat::Qcow2,
+                ImageOptions::deterministic(1),
+            )
+            .unwrap();
+
+            // Write at offset 0 (L1 index 0)
+            img.write_at(0, b"Payload at cluster 0").unwrap();
+
+            // Write at offset 1 GiB (L1 index 2)
+            img.write_at(1024 * 1024 * 1024, b"Payload at cluster 1GB")
+                .unwrap();
+
+            img.finish().unwrap();
+        }
+
+        // Re-open and verify
+        let mut img = open_image_io(&mut mem_io).unwrap();
+        let mut buf0 = [0u8; 20];
+        img.read_at(0, &mut buf0).unwrap();
+        assert_eq!(&buf0, b"Payload at cluster 0");
+
+        let mut buf1g = [0u8; 22];
+        img.read_at(1024 * 1024 * 1024, &mut buf1g).unwrap();
+        assert_eq!(&buf1g, b"Payload at cluster 1GB");
+
+        // Verify hole at 512 MiB (L1 index 1)
+        let mut buf512m = [0xAAu8; 4096];
+        img.read_at(512 * 1024 * 1024, &mut buf512m).unwrap();
+        assert_eq!(buf512m, [0u8; 4096]);
+    }
+
+    #[test]
+    fn test_qcow2_multi_cluster_l1_table() {
+        // 8 TiB virtual disk
+        let virtual_size = 8 * 1024 * 1024 * 1024 * 1024u64;
+        let (l1_size, n_rt, aligned) = qcow2::calculate_sparse_geometry(virtual_size);
+        assert_eq!(aligned, virtual_size);
+        // Each L2 table covers 512 MiB. 8 TiB has 16384 L2 tables.
+        assert_eq!(l1_size, 16384);
+        // L1 table size in bytes = 16384 * 8 = 131072 = 2 clusters of 64KB
+        let n_l1_clusters = ((l1_size as u64) * 8).div_ceil(qcow2::CLUSTER_SIZE);
+        assert_eq!(n_l1_clusters, 2);
+        assert_eq!(n_rt, 1);
+
+        // Test with sparse storage in memory
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        {
+            let mut img = create_image_io(
+                &mut mem_io,
+                virtual_size,
+                ImageFormat::Qcow2,
+                ImageOptions::deterministic(1),
+            )
+            .unwrap();
+            assert_eq!(img.raw_len(), virtual_size);
+
+            // Write in the second half of L1 table (at 5 TiB)
+            let write_offset = 5 * 1024 * 1024 * 1024 * 1024u64;
+            img.write_at(write_offset, b"Data at 5 TiB").unwrap();
+            img.finish().unwrap();
+        }
+
+        let mut img = open_image_io(&mut mem_io).unwrap();
+        let mut buf = [0u8; 13];
+        img.read_at(5 * 1024 * 1024 * 1024 * 1024u64, &mut buf)
+            .unwrap();
+        assert_eq!(&buf, b"Data at 5 TiB");
+    }
+
+    #[test]
+    fn test_qcow2_shared_l1_rejection() {
+        let virtual_size = 1024 * 1024u64;
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        {
+            let mut img = create_image_io(
+                &mut mem_io,
+                virtual_size,
+                ImageFormat::Qcow2,
+                ImageOptions::deterministic(1),
+            )
+            .unwrap();
+            img.write_at(0, b"test").unwrap();
+            img.finish().unwrap();
+        }
+
+        // Corrupt L1 entry by clearing bit 63 (OFLAG_COPIED) to simulate snapshot
+        let header: qcow2::Qcow2Header = mem_io.read_struct(0).unwrap();
+        let l1_off = header.l1_table_offset.get();
+        let mut l1_entry_bytes = [0u8; 8];
+        mem_io.read_at(l1_off, &mut l1_entry_bytes).unwrap();
+        let mut l1_entry = u64::from_be_bytes(l1_entry_bytes);
+        l1_entry &= !qcow2::QCOW_OFLAG_COPIED;
+        mem_io.write_at(l1_off, &l1_entry.to_be_bytes()).unwrap();
+
+        // Writing to shared L1 table must be rejected
+        let mut img = open_image_io(&mut mem_io).unwrap();
+        assert!(img.write_at(0, b"overwrite").is_err());
+    }
+
+    #[test]
+    fn test_qcow2_shared_l2_rejection() {
+        let virtual_size = 1024 * 1024u64;
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        {
+            let mut img = create_image_io(
+                &mut mem_io,
+                virtual_size,
+                ImageFormat::Qcow2,
+                ImageOptions::deterministic(1),
+            )
+            .unwrap();
+            img.write_at(0, b"test").unwrap();
+            img.finish().unwrap();
+        }
+
+        // Find L2 entry and clear bit 63 (OFLAG_COPIED)
+        let header: qcow2::Qcow2Header = mem_io.read_struct(0).unwrap();
+        let l1_off = header.l1_table_offset.get();
+        let mut l1_bytes = [0u8; 8];
+        mem_io.read_at(l1_off, &mut l1_bytes).unwrap();
+        let l1_entry = u64::from_be_bytes(l1_bytes);
+        let l2_off = l1_entry & qcow2::L2_OFFSET_MASK;
+
+        let mut l2_bytes = [0u8; 8];
+        mem_io.read_at(l2_off, &mut l2_bytes).unwrap();
+        let mut l2_entry = u64::from_be_bytes(l2_bytes);
+        l2_entry &= !qcow2::QCOW_OFLAG_COPIED;
+        mem_io.write_at(l2_off, &l2_entry.to_be_bytes()).unwrap();
+
+        // Writing to shared cluster must be rejected
+        let mut img = open_image_io(&mut mem_io).unwrap();
+        assert!(img.write_at(0, b"overwrite").is_err());
+    }
+
+    #[test]
+    fn test_qcow2_zero_cluster_read_and_write() {
+        let virtual_size = 1024 * 1024u64;
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        {
+            let mut img = create_image_io(
+                &mut mem_io,
+                virtual_size,
+                ImageFormat::Qcow2,
+                ImageOptions::deterministic(1),
+            )
+            .unwrap();
+            img.write_at(0, b"Initial data").unwrap();
+            img.finish().unwrap();
+        }
+
+        // Manually mark cluster 0 as ZERO cluster (set bit 0 QCOW_OFLAG_ZERO)
+        let header: qcow2::Qcow2Header = mem_io.read_struct(0).unwrap();
+        let l1_off = header.l1_table_offset.get();
+        let mut l1_bytes = [0u8; 8];
+        mem_io.read_at(l1_off, &mut l1_bytes).unwrap();
+        let l1_entry = u64::from_be_bytes(l1_bytes);
+        let l2_off = l1_entry & qcow2::L2_OFFSET_MASK;
+
+        let mut l2_bytes = [0u8; 8];
+        mem_io.read_at(l2_off, &mut l2_bytes).unwrap();
+        let mut l2_entry = u64::from_be_bytes(l2_bytes);
+        l2_entry |= qcow2::QCOW_OFLAG_ZERO;
+        mem_io.write_at(l2_off, &l2_entry.to_be_bytes()).unwrap();
+
+        // Reading zero cluster must return all zeroes
+        {
+            let mut img = open_image_io(&mut mem_io).unwrap();
+            let mut buf = [0xAAu8; 12];
+            img.read_at(0, &mut buf).unwrap();
+            assert_eq!(buf, [0u8; 12]);
+
+            // Writing to zero cluster should clear bit 0 and write payload
+            img.write_at(0, b"Overwritten!").unwrap();
+            img.finish().unwrap();
+        }
+
+        // Verify bit 0 is cleared in L2 entry
+        mem_io.read_at(l2_off, &mut l2_bytes).unwrap();
+        let updated_l2 = u64::from_be_bytes(l2_bytes);
+        assert_eq!(updated_l2 & qcow2::QCOW_OFLAG_ZERO, 0);
+
+        // Verify data was persisted
+        let mut img = open_image_io(&mut mem_io).unwrap();
+        let mut buf = [0u8; 12];
+        img.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"Overwritten!");
+    }
+
+    #[test]
+    fn test_qcow2_v3_header_validation() {
+        let virtual_size = 1024 * 1024u64;
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        qcow2::init_sparse_qcow2_layout(&mut mem_io, virtual_size).unwrap();
+
+        // Valid v3 image opens fine
+        assert!(open_image_io(&mut mem_io).is_ok());
+
+        // Test incompatible features != 0 rejection
+        let v3_offset = core::mem::size_of::<qcow2::Qcow2Header>() as u64;
+        let mut v3_ext: qcow2::Qcow2HeaderV3Extension = mem_io.read_struct(v3_offset).unwrap();
+        v3_ext.incompatible_features = zerocopy::byteorder::U64::new(1); // bit 0 (dirty)
+        mem_io.write_struct(v3_offset, &v3_ext).unwrap();
+        match open_image_io(&mut mem_io) {
+            Err(e) => assert_eq!(e, RimImgError::UnsupportedFormat),
+            Ok(_) => panic!("Expected error for incompatible_features != 0"),
+        }
+
+        // Reset and test refcount_order != 4 rejection
+        v3_ext.incompatible_features = zerocopy::byteorder::U64::new(0);
+        v3_ext.refcount_order = zerocopy::byteorder::U32::new(3); // 8-bit refcounts
+        mem_io.write_struct(v3_offset, &v3_ext).unwrap();
+        match open_image_io(&mut mem_io) {
+            Err(e) => assert_eq!(e, RimImgError::UnsupportedFormat),
+            Ok(_) => panic!("Expected error for refcount_order != 4"),
+        }
+
+        // Reset and test header_length < 104 rejection
+        v3_ext.refcount_order = zerocopy::byteorder::U32::new(4);
+        v3_ext.header_length = zerocopy::byteorder::U32::new(72);
+        mem_io.write_struct(v3_offset, &v3_ext).unwrap();
+        match open_image_io(&mut mem_io) {
+            Err(RimImgError::InvalidHeader(_)) => {}
+            other => panic!("Expected InvalidHeader error, got {:?}", other.is_err()),
+        }
+    }
 }

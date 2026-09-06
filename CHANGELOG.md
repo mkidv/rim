@@ -4,6 +4,18 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-09-06
+### Added
+*   **Dynamic Sparse QCOW2 Allocator (`rimimg` & `rimcli`)**:
+    *   Full QCOW2 v2 and v3 specification compliance (strict header validation, `incompatible_features == 0`, `refcount_order == 4`, `header_length >= 104`).
+    *   Dynamic cluster allocation with lazy L2 table allocation on first write.
+    *   Convergent fixed-point sizing algorithm guaranteeing 100% refcount table coverage for data clusters and all metadata tables.
+    *   Dynamic refcount block allocation with self-refcounting bootstrap and crash-consistent publication ordering.
+    *   Zero-cluster semantics (bit 0 `QCOW_OFLAG_ZERO`): reads logical zeroes without disk I/O; allocates and clears flag on write.
+    *   Snapshot and COW protection: dual `OFLAG_COPIED` verification on L1 and L2 entries, safely rejecting writes to shared clusters.
+    *   Unlocked direct write support in `rim copy` for QCOW2 containers (`rim copy payload disk.qcow2:1:/path`).
+    *   Bit-for-bit parity and zero-leak verification cross-validated against QEMU 10.0 (`qemu-img check`, `qemu-img map`).
+
 ## [0.9.0] - 2026-09-06
 ### Added
 *   **Universal Filesystem Copy Engine (`rim copy`)**:

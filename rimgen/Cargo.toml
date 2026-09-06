@@ -46,8 +46,7 @@ rimio.workspace = true
 rimpart.workspace = true
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 uuid = { version = "1.17.0", default-features = false, features = ["serde"] }
-
-toml = { version = "0.9.7", optional = true }
+toml = { version = "1.1.5", optional = true }
 
 [dev-dependencies]
 rimimg = { workspace = true, features = ["std"] }

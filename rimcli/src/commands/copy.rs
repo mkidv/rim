@@ -11,7 +11,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rimfs::core::resolver::FsTreeResolver;
 use rimfs::core::{StdInjector, StdOverwritePolicy, StdResolver};
 use rimfs::{exfat, ext, fat, iso, ntfs, tar, zip};
-use rimimg::ImageFormat;
 use rimio::RimIO;
 use rimio::prelude::{OverlayRimIO, StdRimIO};
 
@@ -481,13 +480,6 @@ fn dispatch_destination(
         })?;
 
     let mut std_io = StdRimIO::new(&mut file);
-    let format = ImageFormat::from_io(&mut std_io)?;
-    if format == ImageFormat::Qcow2 {
-        anyhow::bail!(
-            "Writing directly to QCOW2 containers as a destination is not supported; QCOW2 is supported as a read source or via conversion ('rim convert')"
-        );
-    }
-
     let mut image_io = rimimg::open_image_io(&mut std_io)?;
     let raw_len = image_io.raw_len();
 

@@ -40,6 +40,275 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --all-features
 
+      # ─────────────────────────────────────────────────────────────
+      # Linux Native FS Integrity & Verification
+      # ─────────────────────────────────────────────────────────────
+      - name: Install Linux Filesystem Tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dosfstools \
+            exfatprogs \
+            e2fsprogs \
+            ntfs-3g \
+            fdisk \
+            util-linux
+
+      - name: Build rimcli (Linux Release)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo build --release -p rimcli
+
+      - name: CLI Smoke Test (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./target/release/rim generate \
+            examples/esp-boot.toml \
+            --output test_esp.img
+
+          ./target/release/rim inspect test_esp.img
+          ./target/release/rim check test_esp.img --verbose
+
+          ./target/release/rim convert \
+            test_esp.img \
+            test_esp.qcow2
+
+          ./target/release/rim inspect test_esp.qcow2
+
+      - name: Prepare POSIX Rootfs (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p \
+            examples/rootfs/bin \
+            examples/rootfs/etc \
+            examples/rootfs/var/shared \
+            examples/rootfs/tmp \
+            examples/rootfs/private
+
+          echo "echo hello" > examples/rootfs/bin/hello.sh
+          chmod 755 examples/rootfs/bin/hello.sh
+
+          echo "setuid binary" > examples/rootfs/bin/su_dummy
+          chmod 4755 examples/rootfs/bin/su_dummy
+
+          chmod 2775 examples/rootfs/var/shared
+          chmod 1777 examples/rootfs/tmp
+          chmod 700 examples/rootfs/private
+
+          echo "secret data" > examples/rootfs/private/secret.txt
+          chmod 600 examples/rootfs/private/secret.txt
+
+          # Fast symlink
+          ln -s \
+            hello.sh \
+            examples/rootfs/bin/hello_link
+
+          # Slow symlink
+          ln -s \
+            ../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing \
+            examples/rootfs/bin/slow_link
+
+          # Dangling symlink
+          ln -s \
+            /nonexistent/target \
+            examples/rootfs/etc/dangling_link
+
+      - name: Generate Multi-FS Image (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./target/release/rim generate \
+            examples/multi-fs-vm.toml \
+            --output test_multifs.img
+
+          ./target/release/rim inspect test_multifs.img
+          ./target/release/rim check test_multifs.img --verbose
+
+      - name: Attach Image to Loop Device (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        id: loop
+        shell: bash
+        run: |
+          sudo losetup -P -f test_multifs.img
+          LOOPDEV=$(losetup -j test_multifs.img | cut -d: -f1)
+          if [ -z "$LOOPDEV" ]; then
+            echo "Could not attach image to loop device"
+            exit 1
+          fi
+          echo "loopdev=$LOOPDEV" >> "$GITHUB_OUTPUT"
+          echo "Attached image to $LOOPDEV"
+          ls -la "${LOOPDEV}"*
+
+      - name: Native Filesystem Checks (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
+
+          echo ">>> FAT32"
+          sudo fsck.vfat -v -n "${LOOPDEV}p1"
+
+          echo ">>> EXT4"
+          sudo e2fsck -n -f "${LOOPDEV}p2"
+
+          echo ">>> exFAT"
+          sudo fsck.exfat -n "${LOOPDEV}p3"
+
+          echo ">>> NTFS"
+          sudo ntfsfix -n "${LOOPDEV}p4"
+
+          echo ">>> All native Linux filesystem checks passed"
+
+      - name: Verify EXT4 POSIX Semantics (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
+          MOUNT_DIR="${RUNNER_TEMP}/rim-ext-test"
+          mkdir -p "$MOUNT_DIR"
+
+          cleanup_mount() {
+            sudo umount "$MOUNT_DIR" 2>/dev/null || true
+          }
+          trap cleanup_mount EXIT
+
+          sudo mount -o ro "${LOOPDEV}p2" "$MOUNT_DIR"
+
+          echo ">>> Checking permissions"
+          test "$(stat -c '%a' "$MOUNT_DIR/private")" = "700"
+          test "$(stat -c '%a' "$MOUNT_DIR/private/secret.txt")" = "600"
+          test "$(stat -c '%a' "$MOUNT_DIR/bin/su_dummy")" = "4755"
+          test "$(stat -c '%a' "$MOUNT_DIR/var/shared")" = "2775"
+          test "$(stat -c '%a' "$MOUNT_DIR/tmp")" = "1777"
+
+          echo ">>> Checking fast symlink"
+          test -L "$MOUNT_DIR/bin/hello_link"
+          test "$(readlink "$MOUNT_DIR/bin/hello_link")" = "hello.sh"
+          test "$(stat -c '%b' "$MOUNT_DIR/bin/hello_link")" = "0"
+
+          echo ">>> Checking slow symlink"
+          test -L "$MOUNT_DIR/bin/slow_link"
+          test "$(readlink "$MOUNT_DIR/bin/slow_link")" = \
+            "../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing"
+
+          echo ">>> Checking dangling symlink"
+          test -L "$MOUNT_DIR/etc/dangling_link"
+          test "$(readlink "$MOUNT_DIR/etc/dangling_link")" = "/nonexistent/target"
+
+          echo ">>> Checking content through symlink"
+          OUTPUT=$(cat "$MOUNT_DIR/bin/hello_link")
+          test "$OUTPUT" = "echo hello"
+
+          echo ">>> EXT4 POSIX semantic validation passed"
+
+      - name: Detach Loop Device (Linux)
+        if: always() && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
+          if [ -n "$LOOPDEV" ]; then
+            sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # Windows Native FS Integrity & Verification
+      # ─────────────────────────────────────────────────────────────
+      - name: Build rimcli (Windows Release)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release -p rimcli
+
+      - name: CLI Smoke Test (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $rim = ".\target\release\rim.exe"
+          & $rim generate examples/esp-boot.toml --output test_esp.img
+          & $rim inspect test_esp.img
+          & $rim check test_esp.img --verbose
+          & $rim convert test_esp.img test_esp.qcow2
+          & $rim inspect test_esp.qcow2
+          & $rim check test_esp.qcow2
+
+      - name: Generate Multi-FS VHD (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $rim = ".\target\release\rim.exe"
+          & $rim generate examples/multi-fs-vm.toml --output test_multifs.vhd
+          & $rim inspect test_multifs.vhd
+          & $rim check test_multifs.vhd --verbose
+
+      - name: Native FS Integrity & CHKDSK (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $rim = ".\target\release\rim.exe"
+          $vhdPath = (Resolve-Path "test_multifs.vhd").Path
+          Write-Host "Mounting VHD image: $vhdPath"
+          $diskImage = Mount-DiskImage -ImagePath $vhdPath -PassThru -StorageType VHD
+          try {
+              $disk = $diskImage | Get-Disk
+              Write-Host "Attached as Disk Number: $($disk.Number)"
+              Start-Sleep -Seconds 2
+
+              $partitions = Get-Partition -DiskNumber $disk.Number
+              foreach ($p in $partitions) {
+                  # Skip unpartitioned or Linux Root (EXT4) partition
+                  if ($p.GptType -eq "{0fc63daf-8483-4772-8e79-3d69d8477de4}" -or $p.Type -eq "Basic") {
+                      $vol = $p | Get-Volume -ErrorAction SilentlyContinue
+                      if (-not $vol -or $vol.FileSystem -notin @("FAT", "FAT32", "exFAT", "NTFS")) {
+                          Write-Host "Skipping non-Windows partition $($p.PartitionNumber) (Type: $($p.Type), GptType: $($p.GptType))"
+                          continue
+                      }
+                  }
+
+                  $driveLetter = $p.DriveLetter
+                  if (-not $driveLetter) {
+                      $usedLetters = (Get-Volume).DriveLetter | Where-Object { $_ }
+                      $avail = 68..90 | ForEach-Object { [char]$_ } | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
+                      if ($avail) {
+                          Set-Partition -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -NewDriveLetter $avail -ErrorAction SilentlyContinue
+                          $driveLetter = $avail
+                      }
+                  }
+
+                  if ($driveLetter) {
+                      $vol = Get-Volume -DriveLetter $driveLetter
+                      Write-Host ">>> Checking Partition $($p.PartitionNumber) on ${driveLetter}: ($($vol.FileSystem), Label: $($vol.FileSystemLabel))"
+                      $output = chkdsk "${driveLetter}:"
+                      $output | ForEach-Object { Write-Host "  $_" }
+                      if ($LASTEXITCODE -ne 0) {
+                          throw "CHKDSK failed on ${driveLetter}: with exit code $LASTEXITCODE"
+                      }
+                      Write-Host ">>> CHKDSK PASSED on ${driveLetter}:"
+                  }
+              }
+
+              # Test direct rim copy partition injection into VHD
+              Write-Host "Testing direct rim copy injection into VHD..."
+              New-Item -ItemType Directory -Force win_payload | Out-Null
+              Set-Content win_payload\test_win.txt "Hello from Windows CI Kernel Test!"
+              & $rim copy win_payload test_multifs.vhd:3:/
+              & $rim copy win_payload test_multifs.vhd:4:/
+              Write-Host "rim copy succeeded into partitions 3 (exFAT) and 4 (NTFS)"
+
+              # Verify partitions remain consistent with chkdsk after rim copy
+              foreach ($p in (Get-Partition -DiskNumber $disk.Number)) {
+                  if ($p.DriveLetter) {
+                      $dl = $p.DriveLetter
+                      Write-Host ">>> Post-copy CHKDSK on ${dl}:"
+                      $output = chkdsk "${dl}:"
+                      if ($LASTEXITCODE -ne 0) {
+                          throw "Post-copy CHKDSK failed on ${dl}: with exit code $LASTEXITCODE"
+                      }
+                      Write-Host ">>> Post-copy CHKDSK PASSED on ${dl}:"
+                  }
+              }
+          } finally {
+              Write-Host "Dismounting VHD: $vhdPath"
+              Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue
+          }
+
+
   embedded-targets:
     name: Embedded & Portable Targets (no_std, WASM, UEFI)
     runs-on: ubuntu-latest
@@ -112,206 +381,4 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  integrity-linux:
-    name: Native FS Integrity (Linux)
-    runs-on: ubuntu-latest
-    needs:
-      - portable
-      - quality
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Filesystem Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            dosfstools \
-            exfatprogs \
-            e2fsprogs \
-            ntfs-3g \
-            fdisk \
-            util-linux
-
-      - name: Build rimcli
-        run: cargo build --release -p rimcli
-
-      - name: CLI Smoke Test
-        run: |
-          ./target/release/rim generate \
-            examples/esp-boot.toml \
-            --output test_esp.img
-
-          ./target/release/rim inspect test_esp.img
-          ./target/release/rim check test_esp.img --verbose
-
-          ./target/release/rim convert \
-            test_esp.img \
-            test_esp.qcow2
-
-          ./target/release/rim inspect test_esp.qcow2
-
-      - name: Prepare POSIX Rootfs
-        run: |
-          mkdir -p \
-            examples/rootfs/bin \
-            examples/rootfs/etc \
-            examples/rootfs/var/shared \
-            examples/rootfs/tmp \
-            examples/rootfs/private
-
-          echo "echo hello" > examples/rootfs/bin/hello.sh
-          chmod 755 examples/rootfs/bin/hello.sh
-
-          echo "setuid binary" > examples/rootfs/bin/su_dummy
-          chmod 4755 examples/rootfs/bin/su_dummy
-
-          chmod 2775 examples/rootfs/var/shared
-          chmod 1777 examples/rootfs/tmp
-          chmod 700 examples/rootfs/private
-
-          echo "secret data" > examples/rootfs/private/secret.txt
-          chmod 600 examples/rootfs/private/secret.txt
-
-          # Fast symlink
-          ln -s \
-            hello.sh \
-            examples/rootfs/bin/hello_link
-
-          # Slow symlink
-          ln -s \
-            ../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing \
-            examples/rootfs/bin/slow_link
-
-          # Dangling symlink
-          ln -s \
-            /nonexistent/target \
-            examples/rootfs/etc/dangling_link
-
-      - name: Generate Multi-FS Image
-        run: |
-          ./target/release/rim generate \
-            examples/multi-fs-vm.toml \
-            --output test_multifs.img
-
-          ./target/release/rim inspect test_multifs.img
-
-          ./target/release/rim check \
-            test_multifs.img \
-            --verbose
-
-      - name: Attach Image
-        id: loop
-        shell: bash
-        run: |
-          sudo losetup -P -f test_multifs.img
-
-          LOOPDEV=$(losetup -j test_multifs.img | cut -d: -f1)
-
-          if [ -z "$LOOPDEV" ]; then
-            echo "Could not attach image to loop device"
-            exit 1
-          fi
-
-          echo "loopdev=$LOOPDEV" >> "$GITHUB_OUTPUT"
-
-          echo "Attached image to $LOOPDEV"
-          ls -la "${LOOPDEV}"*
-
-      - name: Native Filesystem Checks
-        shell: bash
-        run: |
-          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
-
-          echo ">>> FAT32"
-          sudo fsck.vfat -v -n "${LOOPDEV}p1"
-
-          echo ">>> EXT4"
-          sudo e2fsck -n -f "${LOOPDEV}p2"
-
-          echo ">>> exFAT"
-          sudo fsck.exfat -n "${LOOPDEV}p3"
-
-          echo ">>> NTFS"
-          sudo ntfsfix -n "${LOOPDEV}p4"
-
-          echo ">>> All native filesystem checks passed"
-
-      - name: Verify EXT4 POSIX Semantics
-        shell: bash
-        run: |
-          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
-          MOUNT_DIR="${RUNNER_TEMP}/rim-ext-test"
-
-          mkdir -p "$MOUNT_DIR"
-
-          cleanup_mount() {
-            sudo umount "$MOUNT_DIR" 2>/dev/null || true
-          }
-
-          trap cleanup_mount EXIT
-
-          sudo mount -o ro "${LOOPDEV}p2" "$MOUNT_DIR"
-
-          echo ">>> Checking permissions"
-
-          test "$(stat -c '%a' "$MOUNT_DIR/private")" = "700"
-
-          test "$(stat -c '%a' \
-            "$MOUNT_DIR/private/secret.txt")" = "600"
-
-          test "$(stat -c '%a' \
-            "$MOUNT_DIR/bin/su_dummy")" = "4755"
-
-          test "$(stat -c '%a' \
-            "$MOUNT_DIR/var/shared")" = "2775"
-
-          test "$(stat -c '%a' \
-            "$MOUNT_DIR/tmp")" = "1777"
-
-          echo ">>> Checking fast symlink"
-
-          test -L "$MOUNT_DIR/bin/hello_link"
-
-          test "$(readlink \
-            "$MOUNT_DIR/bin/hello_link")" = "hello.sh"
-
-          test "$(stat -c '%b' \
-            "$MOUNT_DIR/bin/hello_link")" = "0"
-
-          echo ">>> Checking slow symlink"
-
-          test -L "$MOUNT_DIR/bin/slow_link"
-
-          test "$(readlink \
-            "$MOUNT_DIR/bin/slow_link")" = \
-            "../../var/shared/really_long_target_path_exceeding_fifty_nine_bytes_for_testing"
-
-          echo ">>> Checking dangling symlink"
-
-          test -L "$MOUNT_DIR/etc/dangling_link"
-
-          test "$(readlink \
-            "$MOUNT_DIR/etc/dangling_link")" = \
-            "/nonexistent/target"
-
-          echo ">>> Checking content through symlink"
-
-          OUTPUT=$(cat "$MOUNT_DIR/bin/hello_link")
-          test "$OUTPUT" = "echo hello"
-
-          echo ">>> EXT4 POSIX semantic validation passed"
-
-      - name: Detach Image
-        if: always()
-        shell: bash
-        run: |
-          LOOPDEV="${{ steps.loop.outputs.loopdev }}"
-
-          if [ -n "$LOOPDEV" ]; then
-            sudo losetup -d "$LOOPDEV" 2>/dev/null || true
-          fi
