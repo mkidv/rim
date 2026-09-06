@@ -9,7 +9,7 @@ Designed from the ground up for high reliability, streaming I/O, rootless usersp
 
 ---
 
-## 📦 Modular Ecosystem (15 Crates)
+## 📦 Modular Ecosystem (15 Workspace Crates + Forensic Analyzer)
 
 The project is structured into modular, decoupled crates:
 
@@ -43,6 +43,7 @@ The project is structured into modular, decoupled crates:
   - Identical behavior and deterministic output on **Linux**, **macOS** (Apple Silicon & Intel), and **Windows**.
 - **Universal Logical Filesystem Copy (`rim copy`)**:
   - Direct logical transfers between host filesystems and disk image partitions (or between two disk images) without kernel mounting or root privileges.
+  - Strict 1-based partition addressing (`disk.img:1:/path`) with deterministic multi-partition error reporting.
   - In-memory `--dry-run` simulation using sparse copy-on-write page overlays (`OverlayRimIO`) with zero destination disk writes.
   - Destination-aware case-collision detection, metadata preservation policies, and cross-platform error handling.
 - **Supported Filesystems & Archives**:
@@ -54,11 +55,11 @@ The project is structured into modular, decoupled crates:
   - **ZIP**: Streaming creation, Central Directory parsing, ZIP64, Store/Deflate, and POSIX Unix extensions.
   - **ISO 9660**: Optical and hybrid disk creation with Joliet (UTF-16), Rock Ridge (POSIX permissions & symlinks), and El Torito UEFI/BIOS booting.
 - **Supported Disk & Container Formats**:
-  - Raw images: `.img`, `.raw`
-  - Microsoft VHD: `.vhd` (fixed VHD)
-  - VMware VMDK: `.vmdk` (monolithicFlat)
-  - QEMU QCOW2: `.qcow2` (v2/v3 header)
-  - VirtualBox VDI: `.vdi` (fixed)
+  - Raw images: `.img`, `.raw` (Read & Write)
+  - Microsoft VHD: `.vhd` (fixed VHD, Read & Write)
+  - VMware VMDK: `.vmdk` (monolithicFlat, Read & Write)
+  - VirtualBox VDI: `.vdi` (fixed VDI 1.1, Read & Write)
+  - QEMU QCOW2: `.qcow2` (v2 linear Read & Convert; creation via `rim generate`)
 - **Bare-Metal & Embedded Ready**:
   - `no_std`, `alloc`, **WebAssembly** (`wasm32-unknown-unknown`), and native **UEFI** firmware (`EFI_BLOCK_IO_PROTOCOL`) support.
 
@@ -108,40 +109,47 @@ Generate the disk image (format is auto-detected from output extension):
 # Generate raw disk image
 rim generate layout.toml --output disk.img
 
-# Generate VM disk containers directly (VHD, QCOW2, VMDK, VDI)
+# Generate VMDK or VHD image directly
+rim generate layout.toml --output disk.vmdk
 rim generate layout.toml --output disk.vhd
-rim generate layout.toml --output disk.qcow2
 ```
 
-### 2. Inspecting Disks & Containers (`inspect`)
+### 2. Converting Disk Formats (`convert`)
 
-Deeply inspect container formats, partition tables, and detected filesystems with colorized status badges:
-
-```bash
-rim inspect disk.qcow2
-```
-
-### 3. Converting Between Container Formats (`convert`)
-
-Convert directly between any supported disk image container formats with live ETA and transfer speed reporting:
+Convert between disk container formats with fast streaming I/O and zero intermediate temp files:
 
 ```bash
+# Wrap raw image into a fixed VHD
 rim convert disk.img disk.vhd
-rim convert disk.img disk.qcow2
-rim convert disk.vhd disk.vdi
+
+# Convert VHD to raw image
+rim convert disk.vhd disk.img
+
+# Convert raw image into VirtualBox VDI or VMware VMDK
+rim convert disk.img disk.vdi
+rim convert disk.img disk.vmdk
 ```
 
-### 4. Partition Scheme Inspector (`partition`)
+### 3. Inspecting Disk Images (`inspect`)
 
-Display partition LBA offsets, sizes, kinds, and GUIDs:
+Inspect container metadata, partition tables, and embedded filesystems in a single unified view:
+
+```bash
+rim inspect disk.img
+rim inspect disk.vhd
+```
+
+### 4. Partition Table Inspection (`partition`)
+
+Display partition tables (GPT / MBR) with start/end LBAs, sector counts, partition GUIDs, and human-readable sizes:
 
 ```bash
 rim partition disk.img
 ```
 
-### 5. Filesystem Integrity Checker (`check`)
+### 5. Filesystem Integrity Check (`check`)
 
-Verify GPT structures and filesystem consistency offline:
+Verify structural consistency of filesystems embedded in raw images or disk partitions:
 
 ```bash
 rim check disk.img
@@ -161,11 +169,14 @@ rim copy disk.img:2:/etc/ ./extracted_etc/
 # Transfer logically between partitions or disk images (e.g. FAT to EXT4)
 rim copy disk1.img:1:/data disk2.img:2:/backup
 
-# Dry-run simulation (purely in-memory verification without touching disk)
+# Dry-run simulation (purely in-memory verification without touching destination)
 rim copy ./dist/ disk.img:1:/ --dry-run
 
-# Overwrite policy and metadata handling
-rim copy ./source disk.img:1:/ --overwrite replace --metadata preserve --unsupported warn
+# Overwrite policy and metadata handling for host extraction
+rim copy disk.img:2:/etc/ ./extracted_etc/ --overwrite replace --metadata preserve-all --unsupported warn
+
+# Overwrite policy on image destination (error or skip)
+rim copy ./source/ disk.img:1:/ --overwrite skip --metadata preserve-basic --unsupported warn
 ```
 
 ---

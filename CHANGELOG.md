@@ -8,11 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 *   **Universal Filesystem Copy Engine (`rim copy`)**:
     *   New high-performance subcommand in `rimcli` for logical, streaming transfers between host filesystems and disk image partitions (or between two disk images) without requiring mounting or root privileges.
-    *   Symmetric endpoint addressing supporting host paths (`/path/to/dir`) and image partitions (`disk.img:<part>:/path` or raw filesystems).
+    *   Symmetric endpoint addressing supporting host paths (`/path/to/dir`) and image partitions (`disk.img:<part>:/path` or raw filesystems) with 1-based partition indexing and deterministic multi-partition error reporting.
     *   Comprehensive policy controls:
-        *   `--overwrite <POLICY>`: `error`, `skip`, or `replace` (in-place entry replacement on Host).
-        *   `--metadata <POLICY>`: `best-effort`, `preserve`, or `ignore` (permissions, timestamps, mode).
-        *   `--unsupported <POLICY>`: `warn`, `error`, or `skip` (gracefully handling unsupported filesystem features such as symlinks on FAT).
+        *   `--overwrite <POLICY>`: canonical `replace` (Host only), `error`, `skip` (aliases: `overwrite`, `fail`).
+        *   `--metadata <POLICY>`: canonical `preserve-all`, `preserve-basic`, `strip` (aliases: `preserve`, `all`, `basic`, `best-effort`, `none`, `ignore`).
+        *   `--unsupported <POLICY>`: canonical `warn`, `error`, `ignore` (aliases: `warning`, `fail`, `skip`).
     *   Destination-aware case-collision detection respecting the sensitivity of the destination filesystem (strict collision errors on FAT/NTFS/Windows host; case-preserving coexistence on Ext4/Unix).
     *   Interactive terminal progress reporting with transfer speed, ETA, and copy summary statistics.
 *   **In-Memory Dry-Run Simulation (`--dry-run`)**:
@@ -42,6 +42,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     *   Unified path resolution via `walk_path` across filesystems.
     *   Made `zero_cluster_heap` generic over cluster unit types (`U: Copy + Ord + Into<u64>`).
     *   Implemented `FsHandle` for `()`.
+
+### Fixed
+*   **Ext4 Incremental Directory Injection (`rimfs-ext`)**:
+    *   Fixed directory unpadding in `ExtInjector::set_root_context` when appending files to an existing Ext4 partition, preventing new directory entries from being written past the directory block boundary.
+*   **Truthful Transfer & Skip Accounting (`rimcli`)**:
+    *   Added `files_skipped` to `CopyReport`, ensuring skipped files on host destinations are not counted as copied and their source bytes are not counted as transferred.
+*   **Windows Drive Letter Endpoint Delimitation (`rimcli`)**:
+    *   Resolved delimiter collision on Windows drive letters (`C:\...`, `\\?\C:\...`) during endpoint parsing.
+*   **Deterministic Partition Selection (`rimcli`)**:
+    *   Multi-partition images without an explicit partition selector now fail deterministically listing all available partitions instead of silently defaulting to partition 1.
+*   **Container I/O Symmetry & QCOW2 Policy (`rimcli`)**:
+    *   Routed image reads and writes through `rimimg::open_image_io` without temporary files; explicitly reject destination writes on QCOW2 containers with informative diagnostic guidance.
 
 ### Changed
 *   Bumped workspace crates to version `0.9.0`.

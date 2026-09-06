@@ -93,29 +93,29 @@ pub enum Commands {
 
     /// Copy files or directory trees logically between host and/or filesystem images
     Copy {
-        /// Source endpoint (host directory/file or formatted image/archive)
+        /// Source endpoint: host path or image `<image>:[partition]:<subpath>`
         source: String,
 
-        /// Destination endpoint (host directory or formatted image)
+        /// Destination endpoint: host path or image `<image>:[partition]:<subpath>`
         destination: String,
 
-        /// Source subpath inside source (defaults to root "/")
+        /// Source subpath inside source (deprecated: specify directly in endpoint syntax `<image>:[part]:<path>`)
         #[arg(long, default_value = "/")]
         src_path: String,
 
-        /// Metadata policy: preserve-all, preserve-basic, strip
+        /// Metadata preservation policy: preserve-all, preserve-basic, strip
         #[arg(long, default_value = "preserve-all")]
         metadata: String,
 
-        /// Unsupported feature policy: error, warn, ignore
+        /// Unsupported destination feature policy: warn, error, ignore
         #[arg(long, default_value = "warn")]
         unsupported: String,
 
-        /// Overwrite policy: replace, error, skip (default: replace for Host, error for images)
+        /// Destination conflict overwrite policy: replace (host only), error, skip
         #[arg(long)]
         overwrite: Option<String>,
 
-        /// Perform a trial run without writing any data to the destination
+        /// Perform a simulation run without writing any data to the destination
         #[arg(long)]
         dry_run: bool,
 

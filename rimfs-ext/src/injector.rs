@@ -107,44 +107,48 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         let offset = root_block * self.meta.block_size as u64;
         self.io.read_at(offset, &mut existing)?;
 
-        // Find end of existing entries (look for first rec_len that would exceed block size or inode=0)
-        let mut pos = 0usize;
-        let mut entries_end = 0usize;
-        while pos + 8 <= existing.len() {
-            let entry_inode_bytes: [u8; 4] = existing[pos..pos + 4].try_into().unwrap_or([0; 4]);
-            let entry_inode = u32::from_le_bytes(entry_inode_bytes);
-
-            let rec_len_bytes: [u8; 2] = existing[pos + 4..pos + 6].try_into().unwrap_or([0; 2]);
-            let rec_len = u16::from_le_bytes(rec_len_bytes) as usize;
-
-            if entry_inode == 0 || rec_len == 0 || rec_len > existing.len() - pos {
-                entries_end = pos;
-                break;
-            }
-            pos += rec_len;
-            entries_end = pos;
-        }
-
-        // Keep only the existing entries (. and .. and lost+found)
-        existing.truncate(entries_end);
-
-        // Count existing subdirectories for link count
+        // Reconstruct a packed entries buffer from the existing directory block
+        let mut packed_entries = Vec::new();
         let mut child_dir_count = 0u16;
+        let mut has_lost_found = false;
         let mut pos = 0usize;
+
         while pos + 8 <= existing.len() {
-            let rec_len = u16::from_le_bytes([existing[pos + 4], existing[pos + 5]]) as usize;
-            if rec_len == 0 {
+            let entry_inode =
+                u32::from_le_bytes(existing[pos..pos + 4].try_into().unwrap_or([0; 4]));
+            let rec_len =
+                u16::from_le_bytes(existing[pos + 4..pos + 6].try_into().unwrap_or([0; 2]))
+                    as usize;
+            let name_len = existing[pos + 6] as usize;
+            let file_type = existing[pos + 7];
+
+            if entry_inode == 0
+                || rec_len == 0
+                || rec_len > existing.len() - pos
+                || pos + 8 + name_len > existing.len()
+            {
                 break;
             }
 
-            let file_type = existing[pos + 7];
-            let name_len = existing[pos + 6] as usize;
             let name = &existing[pos + 8..pos + 8 + name_len];
-
-            // Count directories, but ignore "." and ".."
             if file_type == EXT_FT_DIR && name != b"." && name != b".." {
                 child_dir_count += 1;
             }
+            if name == b"lost+found" {
+                has_lost_found = true;
+            }
+
+            let min_rec_len = (8 + name_len).div_ceil(4) * 4;
+            packed_entries.extend_from_slice(&entry_inode.to_le_bytes());
+            packed_entries.extend_from_slice(&(min_rec_len as u16).to_le_bytes());
+            packed_entries.push(name_len as u8);
+            packed_entries.push(file_type);
+            packed_entries.extend_from_slice(name);
+            let written = 8 + name_len;
+            if min_rec_len > written {
+                packed_entries.extend(core::iter::repeat_n(0, min_rec_len - written));
+            }
+
             pos += rec_len;
         }
 
@@ -159,31 +163,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             1,
         );
 
-        let mut ctx = ExtContext::new(handle, existing, extent, attr.clone());
+        let mut ctx = ExtContext::new(handle, packed_entries, extent, attr.clone());
         ctx.child_dir_count = child_dir_count;
         self.stack.push(ctx);
-
-        // Check if `lost+found` exists
-        let mut has_lost_found = false;
-        if let Some(ctx) = self.stack.last() {
-            let mut pos = 0usize;
-            while pos + 8 <= ctx.buf.len() {
-                let rec_len = u16::from_le_bytes([ctx.buf[pos + 4], ctx.buf[pos + 5]]) as usize;
-                if rec_len == 0 {
-                    break;
-                }
-                let name_len = ctx.buf[pos + 6] as usize;
-                let name_start = pos + 8;
-                if name_start + name_len <= ctx.buf.len() {
-                    let name = &ctx.buf[name_start..name_start + name_len];
-                    if name == b"lost+found" {
-                        has_lost_found = true;
-                        break;
-                    }
-                }
-                pos += rec_len;
-            }
-        }
 
         if !has_lost_found {
             let parent = self.stack.last_mut().expect("Root context missing");

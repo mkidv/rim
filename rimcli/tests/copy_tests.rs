@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
 
-use rimcli::copy::options::{CopyOptions, OverwritePolicy, UnsupportedMetadataPolicy};
+use rimcli::copy::options::{
+    CopyOptions, MetadataPolicy, OverwritePolicy, UnsupportedMetadataPolicy,
+};
 use rimcli::copy::report::CopyWarningKind;
 use rimcli::copy::{CopyError, copy_tree};
 
@@ -932,10 +936,8 @@ fn test_dry_run_simulation_leaves_destination_untouched() {
     let mut fat_injector = fat::FatInjector::new(&mut cow_io, &fat_meta).unwrap();
 
     let options = CopyOptions {
-        dry_run: true,
         destination_case_sensitive: false,
         destination_supports_replace: false,
-        destination_supports_symlinks: false,
         ..Default::default()
     };
 
@@ -987,10 +989,8 @@ fn test_dry_run_simulation_leaves_destination_untouched() {
         let mut resolver = StdResolver::new();
         let mut injector = rimcli::copy::DryRunStdInjector::new(&temp_dst);
         let host_opts = CopyOptions {
-            dry_run: true,
             destination_case_sensitive: cfg!(unix) && !cfg!(target_os = "macos"),
             destination_supports_replace: true,
-            destination_supports_symlinks: true,
             ..Default::default()
         };
 
@@ -1013,4 +1013,828 @@ fn test_dry_run_simulation_leaves_destination_untouched() {
     }
 
     let _ = fs::remove_dir_all(&temp_src);
+}
+
+#[test]
+fn test_multi_partition_addressing_and_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("disk.img");
+
+    let layout = rimgen::LayoutConfig {
+        base_dir: PathBuf::from("."),
+        partitions: vec![
+            rimgen::PartitionConfig {
+                name: "PART_FAT".to_string(),
+                size: rimgen::Size::Fixed(32),
+                fs: rimgen::Filesystem::Fat32,
+                mountpoint: None,
+                index: None,
+                bootable: false,
+                kind: None,
+                guid: None,
+                payload: None,
+                label: Some("P1".to_string()),
+                uuid: None,
+            },
+            rimgen::PartitionConfig {
+                name: "PART_EXT".to_string(),
+                size: rimgen::Size::Fixed(32),
+                fs: rimgen::Filesystem::Ext4,
+                mountpoint: None,
+                index: None,
+                bootable: false,
+                kind: None,
+                guid: None,
+                payload: None,
+                label: Some("P2".to_string()),
+                uuid: None,
+            },
+        ],
+        disk: None,
+    };
+
+    let total_sectors = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(&layout);
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&img_path)
+        .unwrap();
+    file.set_len(total_sectors * 512).unwrap();
+    {
+        let mut io = rimio::prelude::StdRimIO::new(&mut file);
+        rimgen::build_config_on_io(&layout, &mut io).unwrap();
+    }
+    drop(file);
+
+    // Populate partition 1 with A.TXT
+    let src_a = dir.path().join("src_a");
+    fs::create_dir_all(&src_a).unwrap();
+    fs::write(src_a.join("A.TXT"), b"Partition 1 FAT32 content").unwrap();
+
+    rimcli::commands::copy::run(
+        src_a.to_str().unwrap().to_string(),
+        format!("{}:1:/", img_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Populate partition 2 with B.TXT
+    let src_b = dir.path().join("src_b");
+    fs::create_dir_all(&src_b).unwrap();
+    fs::write(src_b.join("B.TXT"), b"Partition 2 EXT4 content").unwrap();
+
+    rimcli::commands::copy::run(
+        src_b.to_str().unwrap().to_string(),
+        format!("{}:2:/", img_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Verify disk.img:1:/ resolves A.TXT and NOT B.TXT
+    let out_a = dir.path().join("out_a");
+    rimcli::commands::copy::run(
+        format!("{}:1:/", img_path.display()),
+        out_a.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out_a.join("A.TXT")).unwrap(),
+        b"Partition 1 FAT32 content"
+    );
+    assert!(!out_a.join("B.TXT").exists());
+
+    // Verify disk.img:2:/ resolves B.TXT and NOT A.TXT
+    let out_b = dir.path().join("out_b");
+    rimcli::commands::copy::run(
+        format!("{}:2:/", img_path.display()),
+        out_b.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out_b.join("B.TXT")).unwrap(),
+        b"Partition 2 EXT4 content"
+    );
+    assert!(!out_b.join("A.TXT").exists());
+
+    // Destination selection isolation test:
+    // Snapshot partition 1 bytes
+    let (p1_start, p1_size) = {
+        let mut file = fs::File::open(&img_path).unwrap();
+        let mut io = rimio::prelude::StdRimIO::new(&mut file);
+        let scan = rimpart::scan_disk_with_sector(&mut io, 512).unwrap();
+        (
+            (scan.partitions[0].start_lba * 512) as usize,
+            scan.partitions[0].size_bytes as usize,
+        )
+    };
+
+    let img_bytes_before = fs::read(&img_path).unwrap();
+    let p1_bytes_before = img_bytes_before[p1_start..p1_start + p1_size].to_vec();
+
+    // Inject new payload into partition 2
+    let src_new = dir.path().join("src_new");
+    fs::create_dir_all(&src_new).unwrap();
+    fs::write(src_new.join("NEW.TXT"), b"New payload for partition 2").unwrap();
+
+    rimcli::commands::copy::run(
+        src_new.to_str().unwrap().to_string(),
+        format!("{}:2:/", img_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Verify partition 2 now contains NEW.TXT
+    let out_b2 = dir.path().join("out_b2");
+    rimcli::commands::copy::run(
+        format!("{}:2:/", img_path.display()),
+        out_b2.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out_b2.join("NEW.TXT")).unwrap(),
+        b"New payload for partition 2"
+    );
+
+    // Verify partition 1 remained byte-for-byte identical!
+    let img_bytes_after = fs::read(&img_path).unwrap();
+    let p1_bytes_after = &img_bytes_after[p1_start..p1_start + p1_size];
+    assert_eq!(
+        p1_bytes_before.as_slice(),
+        p1_bytes_after,
+        "Partition 1 bytes must remain identical when writing to partition 2"
+    );
+
+    // Test missing selector on multi-partition image fails deterministically
+    let out_missing = dir.path().join("out_missing");
+    let err_missing = rimcli::commands::copy::run(
+        img_path.display().to_string(),
+        out_missing.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err_missing.contains("contains 2 partitions, but no partition was specified"),
+        "Error should list missing selector: {err_missing}"
+    );
+    assert!(err_missing.contains("[1]"));
+    assert!(err_missing.contains("[2]"));
+
+    // Test nonexistent partition (partition 3 on 2-partition image) fails deterministically
+    let err_p3 = rimcli::commands::copy::run(
+        format!("{}:3:/", img_path.display()),
+        out_missing.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err_p3.contains("Partition 3 does not exist in image"),
+        "Error should report partition 3 nonexistence: {err_p3}"
+    );
+
+    // Test partition 0 fails deterministically
+    let err_p0 = rimcli::commands::copy::run(
+        format!("{}:0:/", img_path.display()),
+        out_missing.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err_p0.contains("Invalid partition number 0"));
+
+    // Test malformed partition selector fails deterministically
+    let err_bad = rimcli::commands::copy::run(
+        format!("{}:abc:/", img_path.display()),
+        out_missing.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err_bad.contains("Invalid partition selector 'abc'"));
+}
+
+#[test]
+fn test_unpartitioned_raw_fs_copy_and_missing_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("rootfs.ext4");
+
+    // Format raw unpartitioned EXT4 filesystem
+    let mut bytes = vec![0u8; 32 * 1024 * 1024];
+    {
+        let len = bytes.len() as u64;
+        let mut io = MemRimIO::new(&mut bytes);
+        let meta = ext::ExtMeta::new(len, Some("ROOTFS")).unwrap();
+        ext::ExtFormatter::new(&mut io, &meta)
+            .format(false)
+            .unwrap();
+    }
+    fs::write(&img_path, &bytes).unwrap();
+
+    // Inject host folder into unpartitioned image: rootfs.ext4:/
+    let src = dir.path().join("src_unpart");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("data.txt"), b"Hello unpartitioned raw disk").unwrap();
+
+    rimcli::commands::copy::run(
+        src.to_str().unwrap().to_string(),
+        format!("{}:/", img_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Read back without partition selector (transparent unpartitioned handling)
+    let out = dir.path().join("out_unpart");
+    rimcli::commands::copy::run(
+        format!("{}:/", img_path.display()),
+        out.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(out.join("data.txt")).unwrap(),
+        b"Hello unpartitioned raw disk"
+    );
+
+    // Specifying partition on unpartitioned image fails deterministically
+    let err_part_on_raw = rimcli::commands::copy::run(
+        format!("{}:1:/", img_path.display()),
+        out.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err_part_on_raw.contains("contains no partition table")
+            || err_part_on_raw.contains("does not have a valid partition table")
+    );
+}
+
+#[test]
+fn test_container_copy_vhd_and_vmdk() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let raw_path = dir.path().join("raw.img");
+    let vhd_path = dir.path().join("disk.vhd");
+    let vmdk_path = dir.path().join("disk.vmdk");
+
+    let layout = rimgen::LayoutConfig {
+        base_dir: PathBuf::from("."),
+        partitions: vec![rimgen::PartitionConfig {
+            name: "DATA".to_string(),
+            size: rimgen::Size::Fixed(16),
+            fs: rimgen::Filesystem::Fat32,
+            mountpoint: None,
+            index: None,
+            bootable: false,
+            kind: None,
+            guid: None,
+            payload: None,
+            label: None,
+            uuid: None,
+        }],
+        disk: None,
+    };
+
+    let total_sectors = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(&layout);
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&raw_path)
+        .unwrap();
+    file.set_len(total_sectors * 512).unwrap();
+    {
+        let mut io = rimio::prelude::StdRimIO::new(&mut file);
+        rimgen::build_config_on_io(&layout, &mut io).unwrap();
+    }
+    drop(file);
+
+    // Convert raw to VHD and VMDK
+    rimcli::commands::convert::run(raw_path.clone(), vhd_path.clone(), 0, true).unwrap();
+
+    rimcli::commands::convert::run(raw_path.clone(), vmdk_path.clone(), 0, true).unwrap();
+
+    // Write to VHD container via rim copy (testing streaming container write)
+    let src = dir.path().join("src_vhd");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("vhd_file.txt"), b"VHD container write payload").unwrap();
+
+    rimcli::commands::copy::run(
+        src.to_str().unwrap().to_string(),
+        format!("{}:1:/", vhd_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Read back from VHD container via rim copy
+    let out = dir.path().join("out_vhd");
+    rimcli::commands::copy::run(
+        format!("{}:1:/", vhd_path.display()),
+        out.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out.join("vhd_file.txt")).unwrap(),
+        b"VHD container write payload"
+    );
+
+    // Write to VMDK container via rim copy
+    let src_vmdk = dir.path().join("src_vmdk");
+    fs::create_dir_all(&src_vmdk).unwrap();
+    fs::write(
+        src_vmdk.join("vmdk_file.txt"),
+        b"VMDK container write payload",
+    )
+    .unwrap();
+
+    rimcli::commands::copy::run(
+        src_vmdk.to_str().unwrap().to_string(),
+        format!("{}:1:/", vmdk_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+
+    // Read back from VMDK container
+    let out_vmdk = dir.path().join("out_vmdk");
+    rimcli::commands::copy::run(
+        format!("{}:1:/", vmdk_path.display()),
+        out_vmdk.to_str().unwrap().to_string(),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(out_vmdk.join("vmdk_file.txt")).unwrap(),
+        b"VMDK container write payload"
+    );
+}
+
+#[test]
+fn test_qcow2_destination_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+    let qcow2_path = dir.path().join("disk.qcow2");
+
+    // Create a dummy QCOW2 header
+    let mut header = [0u8; 512];
+    header[..4].copy_from_slice(&[0x51, 0x46, 0x49, 0xfb]);
+    fs::write(&qcow2_path, header).unwrap();
+
+    let src = dir.path().join("src_dummy");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("dummy.txt"), b"test").unwrap();
+
+    let err = rimcli::commands::copy::run(
+        src.to_str().unwrap().to_string(),
+        format!("{}:1:/", qcow2_path.display()),
+        "/".to_string(),
+        "preserve-all".to_string(),
+        "warn".to_string(),
+        None,
+        false,
+        false,
+        0,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("Writing directly to QCOW2 containers as a destination is not supported"));
+}
+
+#[test]
+fn test_metadata_vocabulary_and_aliases() {
+    // Canonical
+    assert_eq!(
+        MetadataPolicy::from_str("preserve-all").unwrap(),
+        MetadataPolicy::PreserveAll
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("preserve-basic").unwrap(),
+        MetadataPolicy::PreserveBasic
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("strip").unwrap(),
+        MetadataPolicy::Strip
+    );
+
+    // Aliases
+    assert_eq!(
+        MetadataPolicy::from_str("preserve").unwrap(),
+        MetadataPolicy::PreserveAll
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("all").unwrap(),
+        MetadataPolicy::PreserveAll
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("basic").unwrap(),
+        MetadataPolicy::PreserveBasic
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("best-effort").unwrap(),
+        MetadataPolicy::PreserveBasic
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("none").unwrap(),
+        MetadataPolicy::Strip
+    );
+    assert_eq!(
+        MetadataPolicy::from_str("ignore").unwrap(),
+        MetadataPolicy::Strip
+    );
+
+    // Unsupported aliases
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("warn").unwrap(),
+        UnsupportedMetadataPolicy::Warn
+    );
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("warning").unwrap(),
+        UnsupportedMetadataPolicy::Warn
+    );
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("error").unwrap(),
+        UnsupportedMetadataPolicy::Error
+    );
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("fail").unwrap(),
+        UnsupportedMetadataPolicy::Error
+    );
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("ignore").unwrap(),
+        UnsupportedMetadataPolicy::Ignore
+    );
+    assert_eq!(
+        UnsupportedMetadataPolicy::from_str("skip").unwrap(),
+        UnsupportedMetadataPolicy::Ignore
+    );
+
+    // Overwrite aliases
+    assert_eq!(
+        OverwritePolicy::from_str("replace").unwrap(),
+        OverwritePolicy::Replace
+    );
+    assert_eq!(
+        OverwritePolicy::from_str("overwrite").unwrap(),
+        OverwritePolicy::Replace
+    );
+    assert_eq!(
+        OverwritePolicy::from_str("error").unwrap(),
+        OverwritePolicy::Error
+    );
+    assert_eq!(
+        OverwritePolicy::from_str("fail").unwrap(),
+        OverwritePolicy::Error
+    );
+    assert_eq!(
+        OverwritePolicy::from_str("skip").unwrap(),
+        OverwritePolicy::Skip
+    );
+}
+
+#[test]
+fn test_host_overwrite_policies_reporting() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+
+    fs::write(src.join("file.txt"), b"Source new content").unwrap();
+    fs::write(dst.join("file.txt"), b"Existing destination content").unwrap();
+
+    // 1. Error policy: fails
+    let mut resolver = StdResolver::new();
+    let mut injector_err = StdInjector::new(&dst)
+        .unwrap()
+        .with_overwrite_policy(rimfs::core::StdOverwritePolicy::Error);
+    let opts_err = CopyOptions {
+        overwrite_policy: OverwritePolicy::Error,
+        destination_supports_replace: true,
+        ..Default::default()
+    };
+    let src_pat = format!("{}/*", src.display());
+    let err = copy_tree(&mut resolver, &mut injector_err, &src_pat, &opts_err, None).unwrap_err();
+    assert!(format!("{err:?}").contains("Destination file already exists"));
+    assert_eq!(
+        fs::read(dst.join("file.txt")).unwrap(),
+        b"Existing destination content"
+    );
+
+    // 2. Skip policy: skips, file untouched, files_skipped incremented, files_copied NOT incremented
+    let mut resolver2 = StdResolver::new();
+    let mut injector_skip = StdInjector::new(&dst)
+        .unwrap()
+        .with_overwrite_policy(rimfs::core::StdOverwritePolicy::Skip);
+    let opts_skip = CopyOptions {
+        overwrite_policy: OverwritePolicy::Skip,
+        destination_supports_replace: true,
+        ..Default::default()
+    };
+    let report_skip = copy_tree(
+        &mut resolver2,
+        &mut injector_skip,
+        &src_pat,
+        &opts_skip,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report_skip.files_copied, 0);
+    assert_eq!(report_skip.files_skipped, 1);
+    assert_eq!(report_skip.bytes_transferred, 0);
+    assert_eq!(
+        fs::read(dst.join("file.txt")).unwrap(),
+        b"Existing destination content"
+    );
+
+    // 3. Replace policy: replaces, file updated, files_copied incremented
+    let mut resolver3 = StdResolver::new();
+    let mut injector_replace = StdInjector::new(&dst)
+        .unwrap()
+        .with_overwrite_policy(rimfs::core::StdOverwritePolicy::Replace);
+    let opts_replace = CopyOptions {
+        overwrite_policy: OverwritePolicy::Replace,
+        destination_supports_replace: true,
+        ..Default::default()
+    };
+    let report_replace = copy_tree(
+        &mut resolver3,
+        &mut injector_replace,
+        &src_pat,
+        &opts_replace,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report_replace.files_copied, 1);
+    assert_eq!(report_replace.files_skipped, 0);
+    assert_eq!(
+        report_replace.bytes_transferred,
+        b"Source new content".len() as u64
+    );
+    assert_eq!(
+        fs::read(dst.join("file.txt")).unwrap(),
+        b"Source new content"
+    );
+}
+
+#[test]
+fn test_std_injector_confinement_redteam() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("confinement_root");
+    fs::create_dir_all(&root).unwrap();
+
+    let mut injector = StdInjector::new(&root).unwrap();
+    let attr = FileAttributes::new_file();
+    let mut payload = VecRimIO::new(b"evil".to_vec());
+
+    // 1. Rejects ".."
+    assert!(
+        injector
+            .write_file("../escape.txt", &mut payload, 4, &attr)
+            .is_err()
+    );
+
+    // 2. Rejects path separators
+    assert!(
+        injector
+            .write_file("sub/nested.txt", &mut payload, 4, &attr)
+            .is_err()
+    );
+    assert!(
+        injector
+            .write_file(r"sub\nested.txt", &mut payload, 4, &attr)
+            .is_err()
+    );
+
+    // 3. Rejects NUL
+    assert!(
+        injector
+            .write_file("null\0byte.txt", &mut payload, 4, &attr)
+            .is_err()
+    );
+
+    // 4. Rejects Windows colon / NTFS Alternate Data Streams (ADS)
+    assert!(
+        injector
+            .write_file("file.txt:evil_stream", &mut payload, 4, &attr)
+            .is_err()
+    );
+    assert!(
+        injector
+            .write_file("C:drive_escape.txt", &mut payload, 4, &attr)
+            .is_err()
+    );
+
+    // 5. Rejects empty entry
+    assert!(injector.write_file("", &mut payload, 4, &attr).is_err());
+}
+
+#[test]
+fn test_case_collision_readme_txt_matrix() {
+    // Populate an EXT4 filesystem with both "Readme.TXT" and "README.txt"
+    let mut ext_bytes = build_empty_fs(FsKind::Ext);
+    {
+        let mut ext_io = MemRimIO::new(&mut ext_bytes);
+        let ext_meta = ext::ExtMeta::from_io(&mut ext_io).unwrap();
+        let mut ext_injector = ext::ExtInjector::new(&mut ext_io, &ext_meta).unwrap();
+        let mut tree = FsNode::new_container(vec![
+            FsNode::new_file_from_source(
+                "Readme.TXT",
+                Box::new(VecRimIO::new(b"First file".to_vec())),
+                FileAttributes::new_file(),
+            ),
+            FsNode::new_file_from_source(
+                "README.txt",
+                Box::new(VecRimIO::new(b"Colliding file".to_vec())),
+                FileAttributes::new_file(),
+            ),
+        ]);
+        ext_injector.inject_tree(&mut tree).unwrap();
+    }
+
+    // 1. FAT32: Case-insensitive destination errors on collision
+    {
+        let mut fat_bytes = build_empty_fs(FsKind::Fat);
+        let mut fat_io = MemRimIO::new(&mut fat_bytes);
+        let fat_meta = fat::FatMeta::from_io(&mut fat_io).unwrap();
+        let mut fat_injector = fat::FatInjector::new(&mut fat_io, &fat_meta).unwrap();
+
+        let mut ext_io = MemRimIO::new(&mut ext_bytes);
+        let ext_meta = ext::ExtMeta::from_io(&mut ext_io).unwrap();
+        let mut ext_resolver = ext::ExtResolver::new(&mut ext_io, &ext_meta);
+
+        let options = CopyOptions {
+            overwrite_policy: OverwritePolicy::Error,
+            detect_case_collisions: true,
+            destination_case_sensitive: false,
+            ..Default::default()
+        };
+
+        let err =
+            copy_tree(&mut ext_resolver, &mut fat_injector, "/*", &options, None).unwrap_err();
+        match err {
+            CopyError::CaseCollision {
+                entry, existing, ..
+            } => {
+                assert_eq!(entry.to_lowercase(), existing.to_lowercase());
+            }
+            other => panic!("Expected CaseCollision error, got: {:?}", other),
+        }
+    }
+
+    // 2. EXT4: Case-sensitive destination allows both files to co-exist
+    {
+        let mut ext_dst_bytes = build_empty_fs(FsKind::Ext);
+        let mut ext_dst_io = MemRimIO::new(&mut ext_dst_bytes);
+        let ext_dst_meta = ext::ExtMeta::from_io(&mut ext_dst_io).unwrap();
+        let mut ext_dst_injector = ext::ExtInjector::new(&mut ext_dst_io, &ext_dst_meta).unwrap();
+
+        let mut ext_io = MemRimIO::new(&mut ext_bytes);
+        let ext_meta = ext::ExtMeta::from_io(&mut ext_io).unwrap();
+        let mut ext_resolver = ext::ExtResolver::new(&mut ext_io, &ext_meta);
+
+        let ext_options = CopyOptions {
+            overwrite_policy: OverwritePolicy::Error,
+            detect_case_collisions: true,
+            destination_case_sensitive: true,
+            ..Default::default()
+        };
+
+        let report = copy_tree(
+            &mut ext_resolver,
+            &mut ext_dst_injector,
+            "/*",
+            &ext_options,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.files_copied, 2);
+    }
 }

@@ -19,9 +19,9 @@ impl FromStr for MetadataPolicy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "preserve-all" | "all" => Ok(Self::PreserveAll),
-            "preserve-basic" | "basic" => Ok(Self::PreserveBasic),
-            "strip" | "none" => Ok(Self::Strip),
+            "preserve-all" | "all" | "preserve" => Ok(Self::PreserveAll),
+            "preserve-basic" | "basic" | "best-effort" => Ok(Self::PreserveBasic),
+            "strip" | "none" | "ignore" => Ok(Self::Strip),
             other => Err(format!(
                 "Unknown metadata policy '{other}'. Supported: preserve-all, preserve-basic, strip"
             )),
@@ -46,11 +46,11 @@ impl FromStr for UnsupportedMetadataPolicy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "error" | "fail" => Ok(Self::Error),
             "warn" | "warning" => Ok(Self::Warn),
+            "error" | "fail" => Ok(Self::Error),
             "ignore" | "skip" => Ok(Self::Ignore),
             other => Err(format!(
-                "Unknown unsupported feature policy '{other}'. Supported: error, warn, ignore"
+                "Unknown unsupported feature policy '{other}'. Supported: warn, error, ignore"
             )),
         }
     }
@@ -92,18 +92,12 @@ pub struct CopyOptions {
     pub unsupported_policy: UnsupportedMetadataPolicy,
     /// Overwrite behavior for destination conflicts.
     pub overwrite_policy: OverwritePolicy,
-    /// Buffer size for streaming file I/O chunks (default 64 KiB).
-    pub buffer_size: usize,
     /// Whether to check sibling entries for case-insensitive collisions.
     pub detect_case_collisions: bool,
     /// Whether the destination filesystem is case-sensitive (e.g. EXT4, Tar, Zip vs FAT, exFAT, NTFS).
     pub destination_case_sensitive: bool,
     /// Whether the destination injector supports in-place replacement (true only for Host / StdInjector).
     pub destination_supports_replace: bool,
-    /// Whether the destination injector supports symbolic links (true for EXT4, Tar, Zip, Host; false for FAT, exFAT, ISO).
-    pub destination_supports_symlinks: bool,
-    /// Whether this copy operation is a dry run (simulation only, no writes to destination).
-    pub dry_run: bool,
 }
 
 impl Default for CopyOptions {
@@ -112,12 +106,9 @@ impl Default for CopyOptions {
             metadata_policy: MetadataPolicy::default(),
             unsupported_policy: UnsupportedMetadataPolicy::default(),
             overwrite_policy: OverwritePolicy::default(),
-            buffer_size: 64 * 1024,
             detect_case_collisions: true,
             destination_case_sensitive: true,
             destination_supports_replace: false,
-            destination_supports_symlinks: true,
-            dry_run: false,
         }
     }
 }

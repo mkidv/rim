@@ -40,10 +40,11 @@ impl CopyWarning {
 }
 
 /// Execution report of a logical copy operation.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CopyReport {
     pub directories_created: u64,
     pub files_copied: u64,
+    pub files_skipped: u64,
     pub symlinks_created: u64,
     pub bytes_transferred: u64,
     pub warnings: Vec<CopyWarning>,

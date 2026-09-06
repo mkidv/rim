@@ -18,16 +18,18 @@ use super::options::{CopyOptions, MetadataPolicy, OverwritePolicy, UnsupportedMe
 use super::progress::CopyEvent;
 use super::report::{CopyReport, CopyWarning, CopyWarningKind};
 
-/// Streaming adapter that intercepts `read_at` calls to trigger progress updates.
+/// Streaming adapter that intercepts `read_at` calls to trigger progress updates and track bytes read.
 struct ProgressReader<'a, R: RimRead + ?Sized, F: FnMut(u64, u64)> {
     inner: &'a mut R,
     total_size: u64,
+    bytes_read: u64,
     on_chunk: F,
 }
 
 impl<'a, R: RimRead + ?Sized, F: FnMut(u64, u64)> RimRead for ProgressReader<'a, R, F> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
         self.inner.read_at(offset, buf)?;
+        self.bytes_read += buf.len() as u64;
         let current_pos = offset.saturating_add(buf.len() as u64).min(self.total_size);
         (self.on_chunk)(current_pos, self.total_size);
         Ok(())
@@ -35,6 +37,24 @@ impl<'a, R: RimRead + ?Sized, F: FnMut(u64, u64)> RimRead for ProgressReader<'a,
 
     fn total_size(&mut self) -> RimIOResult<u64> {
         Ok(self.total_size)
+    }
+}
+
+/// Simple reader that tracks total bytes read without progress events.
+struct CountingReader<'a, R: RimRead + ?Sized> {
+    inner: &'a mut R,
+    bytes_read: u64,
+}
+
+impl<'a, R: RimRead + ?Sized> RimRead for CountingReader<'a, R> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        self.inner.read_at(offset, buf)?;
+        self.bytes_read += buf.len() as u64;
+        Ok(())
+    }
+
+    fn total_size(&mut self) -> RimIOResult<u64> {
+        self.inner.total_size()
     }
 }
 
@@ -144,6 +164,7 @@ pub fn copy_tree<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInjector<H> +
                                 p(CopyEvent::Warning { warning: &warning });
                             }
                             report.warnings.push(warning);
+                            report.files_skipped += 1;
                             continue;
                         }
                         OverwritePolicy::Replace => {
@@ -278,6 +299,7 @@ fn copy_entry_recursive<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInject
                                     p(CopyEvent::Warning { warning: &warning });
                                 }
                                 report.warnings.push(warning);
+                                report.files_skipped += 1;
                                 continue;
                             }
                             OverwritePolicy::Replace => {
@@ -410,10 +432,11 @@ fn copy_file_entry<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInjector<H>
 
     let file_attr = apply_metadata_policy(attr, options.metadata_policy);
 
-    if let Some(p) = progress {
+    let bytes_read = if let Some(p) = progress {
         let mut progress_reader = ProgressReader {
             inner: reader.as_mut(),
             total_size: size,
+            bytes_read: 0,
             on_chunk: |written, total| {
                 p(CopyEvent::FileProgress {
                     path,
@@ -428,20 +451,42 @@ fn copy_file_entry<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInjector<H>
                 path: path.to_string(),
                 source: e,
             })?;
+        progress_reader.bytes_read
     } else {
+        let mut counting_reader = CountingReader {
+            inner: reader.as_mut(),
+            bytes_read: 0,
+        };
         injector
-            .write_file(name, reader.as_mut(), size, &file_attr)
+            .write_file(name, &mut counting_reader, size, &file_attr)
             .map_err(|e| CopyError::Injector {
                 path: path.to_string(),
                 source: e,
             })?;
+        counting_reader.bytes_read
+    };
+
+    if size > 0 && bytes_read == 0 {
+        // The injector skipped writing this file without reading bytes
+        report.files_skipped += 1;
+        let warning = CopyWarning::new(
+            CopyWarningKind::SkippedFile {
+                path: path.to_string(),
+                reason: "Destination file already exists and overwrite policy is skip".to_string(),
+            },
+            format!("Skipped '{path}': already exists at destination"),
+        );
+        if let Some(p) = progress {
+            p(CopyEvent::Warning { warning: &warning });
+        }
+        report.warnings.push(warning);
+    } else {
+        if let Some(p) = progress {
+            p(CopyEvent::FinishedFile { path, size });
+        }
+        report.files_copied += 1;
+        report.bytes_transferred += size;
     }
 
-    if let Some(p) = progress {
-        p(CopyEvent::FinishedFile { path, size });
-    }
-
-    report.files_copied += 1;
-    report.bytes_transferred += size;
     Ok(())
 }

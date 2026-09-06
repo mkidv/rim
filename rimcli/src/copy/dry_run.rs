@@ -17,6 +17,7 @@ pub struct DryRunStdInjector {
     root_path: PathBuf,
     dir_stack: Vec<PathBuf>,
     overwrite_policy: StdOverwritePolicy,
+    skipped_count: u64,
 }
 
 impl DryRunStdInjector {
@@ -28,6 +29,7 @@ impl DryRunStdInjector {
             root_path: canonical_root.clone(),
             dir_stack: vec![canonical_root],
             overwrite_policy: StdOverwritePolicy::default(),
+            skipped_count: 0,
         }
     }
 
@@ -40,6 +42,11 @@ impl DryRunStdInjector {
     /// Sets the overwrite policy.
     pub fn set_overwrite_policy(&mut self, policy: StdOverwritePolicy) {
         self.overwrite_policy = policy;
+    }
+
+    /// Returns the number of files and symlinks skipped due to overwrite policy.
+    pub fn skipped_count(&self) -> u64 {
+        self.skipped_count
     }
 
     /// Returns the canonical root path.
@@ -166,6 +173,7 @@ impl FsTreeInjector<()> for DryRunStdInjector {
                     return Err(FsInjectorError::Invalid("Destination file already exists"));
                 }
                 StdOverwritePolicy::Skip => {
+                    self.skipped_count += 1;
                     return Ok(());
                 }
                 StdOverwritePolicy::Replace => {}
@@ -204,7 +212,10 @@ impl FsTreeInjector<()> for DryRunStdInjector {
                 StdOverwritePolicy::Error => {
                     return Err(FsInjectorError::Invalid("Destination entry already exists"));
                 }
-                StdOverwritePolicy::Skip => return Ok(()),
+                StdOverwritePolicy::Skip => {
+                    self.skipped_count += 1;
+                    return Ok(());
+                }
                 StdOverwritePolicy::Replace => {}
             }
         }
