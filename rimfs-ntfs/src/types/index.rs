@@ -126,43 +126,54 @@ impl NtfsIndexEntry {
         self.name.is_empty()
     }
 
-    pub fn from_raw(raw: Vec<u8>) -> Self {
-        // Create entry from raw bytes (used for sorting existing entries)
-        let now = current_ntfs_time();
-        Self {
-            file_ref: 0,
-            parent_ref: 0,
-            name: Vec::new(),
-            file_attr: NtfsFileAttributes::empty(),
-            flags: IndexEntryFlags::empty(),
-            vcn: None,
-            data_size: 0,
-            allocated_size: 0,
-            creation_time: now,
-            modification_time: now,
-            mft_modification_time: now,
-            access_time: now,
-            namespace: NtfsFileNameNamespace::Win32AndDos,
-            raw: Some(raw),
+    pub fn from_raw(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 16 {
+            return None;
         }
-    }
+        let (header, _) = IndexEntryHeader::read_from_prefix(raw).ok()?;
+        let mut flags = IndexEntryFlags::from_bits_truncate(header.flags);
+        if flags.contains(IndexEntryFlags::LAST_ENTRY) {
+            return None;
+        }
+        flags.remove(IndexEntryFlags::HAS_SUBNODES);
 
-    pub fn name_from_raw(&self) -> Vec<u16> {
-        if let Some(ref raw) = self.raw
-            && raw.len() > 16
-            && let Ok((fn_attr, _)) = FileNameAttribute::read_from_prefix(&raw[16..])
-        {
-            let name_len = fn_attr.filename_length as usize;
-            let name_offset = 16 + core::mem::size_of::<FileNameAttribute>();
-            if raw.len() >= name_offset + name_len * 2 {
-                let name_bytes = &raw[name_offset..name_offset + name_len * 2];
-                return name_bytes
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-            }
+        let content_len = header.content_length as usize;
+        let fn_attr_size = core::mem::size_of::<FileNameAttribute>();
+        if content_len < fn_attr_size || raw.len() < 16 + content_len {
+            return None;
         }
-        self.name.clone()
+
+        let fn_bytes = &raw[16..16 + content_len];
+        let (fn_attr, _) = FileNameAttribute::read_from_prefix(fn_bytes).ok()?;
+        let name_len = fn_attr.filename_length as usize;
+        let name_offset = fn_attr_size;
+        if fn_bytes.len() < name_offset + name_len * 2 {
+            return None;
+        }
+        let name_bytes = &fn_bytes[name_offset..name_offset + name_len * 2];
+        let name: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+
+        let namespace = NtfsFileNameNamespace::from_raw(fn_attr.namespace);
+
+        Some(Self {
+            file_ref: header.mft_reference,
+            parent_ref: fn_attr.parent_directory,
+            name,
+            file_attr: NtfsFileAttributes::from_bits_truncate(fn_attr.file_attributes),
+            flags,
+            vcn: None,
+            data_size: fn_attr.data_size,
+            allocated_size: fn_attr.allocated_size,
+            creation_time: fn_attr.creation_time,
+            modification_time: fn_attr.modification_time,
+            mft_modification_time: fn_attr.mft_modification_time,
+            access_time: fn_attr.access_time,
+            namespace,
+            raw: None,
+        })
     }
 
     /// Serialize this entry using RimIO

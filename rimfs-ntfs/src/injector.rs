@@ -29,6 +29,7 @@ struct DirContext {
     name: alloc::string::String,
     buf: Vec<NtfsIndexEntry>,
     timestamp: u64,
+    file_attrs: NtfsFileAttributes,
 }
 
 /// NTFS node injector
@@ -47,7 +48,9 @@ pub struct NtfsInjector<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
     /// Create a new NTFS injector
     pub fn new(io: &'a mut IO, meta: &'a NtfsMeta) -> FsInjectorResult<Self> {
-        let mft_allocator = mft::MftAllocator::new(meta, crate::constant::MFT_RECORD_USNJRNL + 1);
+        let mft_allocator = mft::MftAllocator::from_io(io, meta).unwrap_or_else(|_| {
+            mft::MftAllocator::new(meta, crate::constant::MFT_RECORD_USNJRNL + 1)
+        });
         let allocator = NtfsAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
         Ok(Self {
             io,
@@ -67,109 +70,142 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
             .map_err(FsInjectorError::Allocator)
     }
 
-    /// Read existing index entries from the root directory's $INDEX_ROOT attribute.
-    fn read_existing_root_entries(&mut self) -> FsInjectorResult<Vec<NtfsIndexEntry>> {
-        use crate::constant::{ATTR_INDEX_ROOT, MFT_RECORD_ROOT};
+    /// Read existing index entries from a directory MFT record (both $INDEX_ROOT and $INDEX_ALLOCATION).
+    fn read_existing_directory_entries(
+        &mut self,
+        record_number: u64,
+    ) -> FsInjectorResult<Vec<NtfsIndexEntry>> {
+        use crate::constant::{ATTR_INDEX_ALLOCATION, ATTR_INDEX_ROOT};
         use crate::view::attr_view::AttrView;
         use crate::view::mft_view::MftRecordView;
 
-        // Read root MFT record (record 5)
         let record =
-            mft::read_record(self.io, self.meta, MFT_RECORD_ROOT).map_err(FsInjectorError::IO)?;
-
-        // Find $INDEX_ROOT attribute
+            mft::read_record(self.io, self.meta, record_number).map_err(FsInjectorError::IO)?;
         let view = MftRecordView::new(&record)
-            .map_err(|_| FsInjectorError::Invalid("Failed to read root MFT record"))?;
+            .map_err(|_| FsInjectorError::Invalid("Failed to read directory MFT record"))?;
 
-        let attr_ref = view
-            .find(ATTR_INDEX_ROOT)
-            .map_err(|_| FsInjectorError::Invalid("Failed to find $INDEX_ROOT attribute"))?
-            .ok_or(FsInjectorError::Invalid(
-                "Root directory has no $INDEX_ROOT",
-            ))?;
-
-        let attr_view = attr_ref
-            .as_view()
-            .map_err(|_| FsInjectorError::Invalid("Malformed $INDEX_ROOT attribute"))?;
-
-        let content = match attr_view {
-            AttrView::Resident { value, .. } => value,
-            AttrView::NonResident { .. } => {
-                return Err(FsInjectorError::Invalid(
-                    "$INDEX_ROOT is unexpectedly non-resident",
-                ));
-            }
-        };
-
-        // Parse Index Root structure:
-        // - IndexRootHeader: 16 bytes
-        // - IndexNodeHeader: 16 bytes (entries_offset, index_length, etc.)
-        // - Index entries...
-
-        if content.len() < 32 {
-            return Ok(Vec::new()); // Too small, no entries
-        }
-
-        let node_header_offset = 16; // After IndexRootHeader
-        let node_header = &content[node_header_offset..];
-
-        if node_header.len() < 16 {
-            return Ok(Vec::new());
-        }
-
-        // Read IndexNodeHeader fields
-        let entries_offset = u32::from_le_bytes([
-            node_header[0],
-            node_header[1],
-            node_header[2],
-            node_header[3],
-        ]) as usize;
-        let index_length = u32::from_le_bytes([
-            node_header[4],
-            node_header[5],
-            node_header[6],
-            node_header[7],
-        ]) as usize;
-
-        // Calculate absolute offsets within the content
-        let entries_start = node_header_offset + entries_offset;
-        let entries_end = node_header_offset + index_length;
-
-        if entries_start >= content.len() || entries_end > content.len() {
-            return Ok(Vec::new());
-        }
-
-        // Extract entries, but EXCLUDE the END marker entry
-        let entries_data = &content[entries_start..entries_end];
         let mut result = Vec::new();
-        let mut offset = 0;
 
-        while offset < entries_data.len() {
-            if offset + 16 > entries_data.len() {
-                break;
+        // 1. Read resident entries from $INDEX_ROOT
+        if let Ok(Some(attr_ref)) = view.find_named(ATTR_INDEX_ROOT, Some("$I30"))
+            && let Ok(AttrView::Resident { value, .. }) = attr_ref.as_view()
+            && value.len() >= 32
+        {
+            let node_header = &value[16..];
+            let entries_offset = u32::from_le_bytes([
+                node_header[0],
+                node_header[1],
+                node_header[2],
+                node_header[3],
+            ]) as usize;
+            let index_length = u32::from_le_bytes([
+                node_header[4],
+                node_header[5],
+                node_header[6],
+                node_header[7],
+            ]) as usize;
+
+            let entries_start = 16 + entries_offset;
+            let entries_end = 16 + index_length;
+            if entries_start < value.len() && entries_end <= value.len() {
+                let entries_data = &value[entries_start..entries_end];
+                let mut offset = 0;
+                while offset + 16 <= entries_data.len() {
+                    let entry_header = &entries_data[offset..];
+                    let entry_length =
+                        u16::from_le_bytes([entry_header[8], entry_header[9]]) as usize;
+                    let flags = u16::from_le_bytes([entry_header[12], entry_header[13]]);
+                    if (flags & 0x02) != 0 {
+                        break;
+                    }
+                    if entry_length < 16 || offset + entry_length > entries_data.len() {
+                        break;
+                    }
+                    let raw_entry = &entries_data[offset..offset + entry_length];
+                    if let Some(entry) = NtfsIndexEntry::from_raw(raw_entry)
+                        && !result.iter().any(|e: &NtfsIndexEntry| e.name == entry.name)
+                    {
+                        result.push(entry);
+                    }
+                    offset += entry_length;
+                }
             }
+        }
 
-            let entry_header = &entries_data[offset..];
-            let entry_length = u16::from_le_bytes([entry_header[8], entry_header[9]]) as usize;
-            let flags = u16::from_le_bytes([entry_header[12], entry_header[13]]);
+        // 2. Read non-resident entries from $INDEX_ALLOCATION
+        if let Ok(Some(attr_ref)) = view.find_named(ATTR_INDEX_ALLOCATION, Some("$I30"))
+            && let Ok(AttrView::NonResident { runlist, .. }) = attr_ref.as_view()
+        {
+            let block_size = self.meta.index_record_size as usize;
+            let cluster_bytes = self.meta.bytes_per_cluster as usize;
 
-            // Stop at END marker (flag 0x02)
-            if (flags & 0x02) != 0 {
-                break;
+            for run in runlist.iter() {
+                if let Some(lcn) = run.lcn {
+                    let offset = self.meta.lcn_to_offset(lcn);
+                    let run_bytes = run.len as usize * cluster_bytes;
+                    let mut buf = alloc::vec![0u8; run_bytes];
+                    self.io
+                        .read_at(offset, &mut buf)
+                        .map_err(FsInjectorError::IO)?;
+
+                    for chunk in buf.chunks_exact_mut(block_size) {
+                        if chunk.len() < 4 || &chunk[0..4] != b"INDX" {
+                            continue;
+                        }
+                        if !crate::utils::decode_usa_fixup(
+                            chunk,
+                            self.meta.bytes_per_sector as usize,
+                        ) {
+                            continue;
+                        }
+
+                        if chunk.len() < 40 {
+                            continue;
+                        }
+
+                        let node_header = &chunk[24..];
+                        let entries_offset = u32::from_le_bytes([
+                            node_header[0],
+                            node_header[1],
+                            node_header[2],
+                            node_header[3],
+                        ]) as usize;
+                        let index_length = u32::from_le_bytes([
+                            node_header[4],
+                            node_header[5],
+                            node_header[6],
+                            node_header[7],
+                        ]) as usize;
+
+                        let entries_start = 24 + entries_offset;
+                        let entries_end = 24 + index_length;
+                        if entries_start < chunk.len() && entries_end <= chunk.len() {
+                            let entries_data = &chunk[entries_start..entries_end];
+                            let mut offset = 0;
+                            while offset + 16 <= entries_data.len() {
+                                let entry_header = &entries_data[offset..];
+                                let entry_length =
+                                    u16::from_le_bytes([entry_header[8], entry_header[9]]) as usize;
+                                let flags =
+                                    u16::from_le_bytes([entry_header[12], entry_header[13]]);
+                                if (flags & 0x02) != 0 {
+                                    break;
+                                }
+                                if entry_length < 16 || offset + entry_length > entries_data.len() {
+                                    break;
+                                }
+                                let raw_entry = &entries_data[offset..offset + entry_length];
+                                if let Some(entry) = NtfsIndexEntry::from_raw(raw_entry)
+                                    && !result.iter().any(|e: &NtfsIndexEntry| e.name == entry.name)
+                                {
+                                    result.push(entry);
+                                }
+                                offset += entry_length;
+                            }
+                        }
+                    }
+                }
             }
-
-            if entry_length < 16 || offset + entry_length > entries_data.len() {
-                break;
-            }
-
-            // Copy this entry to result
-            // Parse entry into object
-            let raw_entry = entries_data[offset..offset + entry_length].to_vec();
-            let mut entry = NtfsIndexEntry::from_raw(raw_entry);
-            entry.name = entry.name_from_raw();
-            result.push(entry);
-
-            offset += entry_length;
         }
 
         Ok(result)
@@ -201,59 +237,6 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         }
         None
     }
-
-    /// Flush the MFT record allocation bitmap ($MFT::$BITMAP) to disk.
-    pub fn flush_mft_bitmap(&mut self) -> FsInjectorResult<()> {
-        let rec0 = mft::read_record(self.io, self.meta, 0).map_err(FsInjectorError::IO)?;
-        let view = crate::view::mft_view::MftRecordView::new(&rec0)
-            .map_err(|_| FsInjectorError::Invalid("Failed to parse Record 0"))?;
-        let attr = view
-            .find(crate::constant::ATTR_BITMAP)
-            .map_err(|_| FsInjectorError::Invalid("Failed to find $BITMAP in Record 0"))?
-            .ok_or(FsInjectorError::Invalid("Record 0 has no $BITMAP"))?;
-
-        let attr_view = attr
-            .as_view()
-            .map_err(|_| FsInjectorError::Invalid("Malformed $BITMAP in Record 0"))?;
-
-        let runlist = match attr_view {
-            crate::view::attr_view::AttrView::NonResident { runlist, .. } => runlist,
-            _ => {
-                return Err(FsInjectorError::Invalid(
-                    "$BITMAP in Record 0 is unexpectedly resident",
-                ));
-            }
-        };
-
-        let mut first_lcn = None;
-        for run in runlist.iter() {
-            if let Some(lcn) = run.lcn {
-                first_lcn = Some(lcn);
-                break;
-            }
-        }
-        let lcn = first_lcn.ok_or(FsInjectorError::Invalid("$BITMAP has no valid cluster run"))?;
-        let offset = self.meta.lcn_to_offset(lcn);
-
-        let cluster_bytes = self.meta.bytes_per_cluster as usize;
-        let mut buf = alloc::vec![0u8; cluster_bytes];
-        self.io
-            .read_at(offset, &mut buf)
-            .map_err(FsInjectorError::IO)?;
-
-        let used_records = self.mft_allocator.used_units() as u64;
-        for rec in (crate::constant::MFT_RECORD_USNJRNL + 1)..used_records {
-            let byte_idx = (rec / 8) as usize;
-            if byte_idx < buf.len() {
-                buf[byte_idx] |= 1 << (rec % 8);
-            }
-        }
-
-        self.io
-            .write_at(offset, &buf)
-            .map_err(FsInjectorError::IO)?;
-        Ok(())
-    }
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO> {
@@ -264,27 +247,33 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
         // Read existing allocation runs from Record 5 if any
         self.root_existing_runs = self.read_existing_allocation_runs(5);
 
-        // Populate with the canonical 12 system entries for Root ($MFT, $LogFile, etc.)
-        let mut entries = crate::features::root::NtfsRootDirFeature::build_root_entries(
-            self.meta,
-            crate::utils::current_ntfs_time(),
-        );
-
-        // Also check if any existing user entries were present in the root directory
-        let existing_user_entries = self.read_existing_root_entries().unwrap_or_default();
-        for entry in existing_user_entries {
-            if !entries.iter().any(|e| e.name == entry.name) {
-                entries.push(entry);
-            }
+        // Read existing entries from disk if possible (both resident and non-resident INDX)
+        let mut entries = self.read_existing_directory_entries(5).unwrap_or_default();
+        if entries.is_empty() {
+            entries = crate::features::root::NtfsRootDirFeature::build_root_entries(
+                self.meta,
+                crate::utils::current_ntfs_time(),
+            );
         }
 
-        let timestamp = crate::utils::current_ntfs_time();
+        // If "." entry exists in entries, use its creation time as timestamp
+        let dot_name: Vec<u16> = ".".encode_utf16().collect();
+        let timestamp = entries
+            .iter()
+            .find(|e| e.name == dot_name)
+            .map(|e| e.creation_time)
+            .unwrap_or_else(crate::utils::current_ntfs_time);
+
         self.stack.push(FsContext::new(
             handle,
             DirContext {
                 name: ".".into(),
                 buf: entries,
                 timestamp,
+                file_attrs: NtfsFileAttributes::DIRECTORY
+                    | NtfsFileAttributes::HIDDEN
+                    | NtfsFileAttributes::SYSTEM
+                    | NtfsFileAttributes::I30_INDEX,
             },
         ));
         Ok(())
@@ -294,6 +283,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
         let timestamp = crate::utils::current_ntfs_time();
         let mft_num = self.allocate_mft_record()?;
         let mft_ref = system_file_mft_reference(mft_num);
+        let dir_file_name_attrs =
+            attr.as_ntfs_attr() | NtfsFileAttributes::DIRECTORY | NtfsFileAttributes::I30_INDEX;
 
         // Add to parent index immediately
         if let Some(parent_ctx) = self.stack.last_mut() {
@@ -306,7 +297,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 mft_ref,
                 parent_ref,
                 name_utf16,
-                attr.as_ntfs_attr() | NtfsFileAttributes::DIRECTORY | NtfsFileAttributes::I30_INDEX,
+                dir_file_name_attrs,
                 IndexEntryFlags::empty(),
                 None,
             )
@@ -324,6 +315,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 name: name.into(),
                 buf: Vec::new(),
                 timestamp,
+                file_attrs: dir_file_name_attrs,
             },
         ));
         Ok(())
@@ -454,18 +446,19 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             let mft_num = ctx.handle.start_lcn;
             let is_root = mft_num == 5;
 
+            let file_name_attrs = if is_root {
+                (NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM)
+                    | NtfsFileAttributes::I30_INDEX
+            } else {
+                ctx.buf.file_attrs
+            };
+
             let attrs = if is_root {
                 NtfsFileAttributes::HIDDEN
                     | NtfsFileAttributes::SYSTEM
                     | NtfsFileAttributes::DIRECTORY
             } else {
-                NtfsFileAttributes::DIRECTORY
-            };
-
-            let file_name_attrs = if is_root {
-                (attrs - NtfsFileAttributes::DIRECTORY) | NtfsFileAttributes::I30_INDEX
-            } else {
-                attrs | NtfsFileAttributes::I30_INDEX
+                ctx.buf.file_attrs - NtfsFileAttributes::I30_INDEX
             };
 
             let parent_ref = if let Some(p) = self.stack.last() {
@@ -602,7 +595,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             self.flush_current()?;
         }
 
-        self.flush_mft_bitmap()?;
+        self.mft_allocator
+            .flush(self.io)
+            .map_err(FsInjectorError::Allocator)?;
         self.allocator
             .flush(self.io)
             .map_err(FsInjectorError::Allocator)?;

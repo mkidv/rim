@@ -119,12 +119,60 @@ impl NtfsMeta {
         let mft_lcn = boot.mft_lcn;
         let mft_mirr_lcn = boot.mft_mirr_lcn;
 
-        let reserved_mft_records = 16;
         let bitmap_size_bytes = total_clusters.div_ceil(8);
         let mirr_clusters = (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
-        let logfile_lcn = mft_mirr_lcn + mirr_clusters;
-        let bitmap_lcn = mft_lcn
-            + (reserved_mft_records * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
+        let mut logfile_lcn = mft_mirr_lcn + mirr_clusters;
+        let log_clusters = (2 * 1024 * 1024u64)
+            .min(volume_size_bytes / 10)
+            .div_ceil(bytes_per_cluster as u64);
+        let mut bitmap_lcn = logfile_lcn + log_clusters;
+        let mut reserved_mft_records = crate::constant::NTFS_RESERVED_MFT_RECORDS;
+
+        // Try to read actual locations and sizes from MFT records 0 ($MFT), 2 ($LogFile), and 6 ($Bitmap)
+        let mft_base = mft_lcn * bytes_per_cluster as u64;
+        let mut rec_buf = alloc::vec![0u8; mft_record_size as usize];
+
+        // Read Record 0 ($MFT) to find allocated size of $MFT
+        if io.read_at(mft_base, &mut rec_buf).is_ok()
+            && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
+            && let Ok(view0) = crate::view::mft_view::MftRecordView::new(&rec_buf)
+            && let Ok(Some(data_attr)) = view0.find(crate::constant::ATTR_DATA)
+            && let Ok(crate::view::attr_view::AttrView::NonResident { allocated_size, .. }) =
+                data_attr.as_view()
+        {
+            let count = allocated_size / mft_record_size as u64;
+            if count > 0 {
+                reserved_mft_records = count;
+            }
+        }
+
+        // Read Record 2 ($LogFile) to find actual logfile_lcn
+        if io
+            .read_at(mft_base + 2 * mft_record_size as u64, &mut rec_buf)
+            .is_ok()
+            && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
+            && let Ok(view2) = crate::view::mft_view::MftRecordView::new(&rec_buf)
+            && let Ok(Some(data_attr)) = view2.find(crate::constant::ATTR_DATA)
+            && let Ok(crate::view::attr_view::AttrView::NonResident { runlist, .. }) =
+                data_attr.as_view()
+            && let Some(lcn) = runlist.iter().find_map(|r| r.lcn)
+        {
+            logfile_lcn = lcn;
+        }
+
+        // Read Record 6 ($Bitmap) to find actual bitmap_lcn
+        if io
+            .read_at(mft_base + 6 * mft_record_size as u64, &mut rec_buf)
+            .is_ok()
+            && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
+            && let Ok(view6) = crate::view::mft_view::MftRecordView::new(&rec_buf)
+            && let Ok(Some(data_attr)) = view6.find(crate::constant::ATTR_DATA)
+            && let Ok(crate::view::attr_view::AttrView::NonResident { runlist, .. }) =
+                data_attr.as_view()
+            && let Some(lcn) = runlist.iter().find_map(|r| r.lcn)
+        {
+            bitmap_lcn = lcn;
+        }
 
         Ok(Self {
             volume_label: [0u16; 128],
