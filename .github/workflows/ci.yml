@@ -300,8 +300,8 @@ jobs:
           Write-Host "Testing direct rim copy injection into VHD..."
           New-Item -ItemType Directory -Force win_payload | Out-Null
           Set-Content win_payload\test_win.txt "Hello from Windows CI Kernel Test!"
-          & $rim copy win_payload test_multifs.vhd:3:/
-          & $rim copy win_payload test_multifs.vhd:4:/
+          & $rim copy win_payload test_multifs.vhd:3:/win_payload
+          & $rim copy win_payload test_multifs.vhd:4:/win_payload
           Write-Host "rim copy succeeded into partitions 3 (exFAT) and 4 (NTFS)"
 
           # 3. Remount VHD, run CHKDSK to verify integrity after injection, and verify content via Windows kernel
@@ -336,9 +336,11 @@ jobs:
 
                       # Partitions 3 (exFAT) and 4 (NTFS) should have win_payload/test_win.txt
                       if ($p.PartitionNumber -in @(3, 4)) {
+                          Write-Host "Listing files on ${driveLetter}:"
+                          Get-ChildItem -Recurse "${driveLetter}:\" | ForEach-Object { Write-Host "  $($_.FullName)" }
                           $testFile = "${driveLetter}:\win_payload\test_win.txt"
                           if (Test-Path $testFile) {
-                              $content = Get-Content $testFile -Raw
+                              $content = (Get-Content $testFile -Raw).Trim()
                               Write-Host ">>> Verified content on ${driveLetter}: $content"
                           } else {
                               throw "Expected test file not found at $testFile"
