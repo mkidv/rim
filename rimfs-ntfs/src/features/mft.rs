@@ -333,11 +333,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
 
         // 7. Remaining reserved: write empty records (skipping quota/objid/reparse)
         for i in MFT_RECORD_USER_START..NTFS_RESERVED_MFT_RECORDS {
-            if i == MFT_RECORD_OBJID
-                || i == MFT_RECORD_QUOTA
-                || i == MFT_RECORD_REPARSE
-                || i == MFT_RECORD_USNJRNL
-            {
+            if i == MFT_RECORD_OBJID || i == MFT_RECORD_QUOTA || i == MFT_RECORD_REPARSE {
                 continue;
             }
             let record = NtfsMftRecord::new(i as u32, false, false);

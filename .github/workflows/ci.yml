@@ -329,6 +329,7 @@ jobs:
                   if ($driveLetter) {
                       Write-Host ">>> Post-copy CHKDSK on ${driveLetter}:"
                       $output = chkdsk "${driveLetter}:"
+                      $output | ForEach-Object { Write-Host "  $_" }
                       if ($LASTEXITCODE -ne 0) {
                           throw "Post-copy CHKDSK failed on ${driveLetter}: with exit code $LASTEXITCODE"
                       }
