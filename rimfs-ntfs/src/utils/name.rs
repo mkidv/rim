@@ -5,14 +5,13 @@ use core::cmp::Ordering;
 
 use crate::upcase::UpcaseHandle;
 
-/// Determine the NTFS filename namespace based on whether the name fits DOS 8.3 constraints.
-/// Names fitting DOS 8.3 use Win32AndDos; other names (long, unicode) use Win32.
-pub fn determine_file_name_namespace(name: &str) -> crate::types::record::NtfsFileNameNamespace {
-    if is_valid_dos_8_3(name) {
-        crate::types::record::NtfsFileNameNamespace::Win32AndDos
-    } else {
-        crate::types::record::NtfsFileNameNamespace::Win32
-    }
+/// Determine the NTFS filename namespace for an entry.
+///
+/// Injected entries have a single `$FILE_NAME` attribute without a secondary DOS 8.3 alias.
+/// Using `Win32AndDos` (3) ensures the Windows kernel and CHKDSK accept the name directly
+/// without expecting a paired secondary DOS 8.3 name in namespace 2.
+pub fn determine_file_name_namespace(_name: &str) -> crate::types::record::NtfsFileNameNamespace {
+    crate::types::record::NtfsFileNameNamespace::Win32AndDos
 }
 
 /// Determine if a filename complies with DOS 8.3 constraints (case-preserving for Win32AndDos).

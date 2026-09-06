@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::NtfsFileNameNamespace;
 use crate::upcase::UpcaseHandle;
 use core::cmp::Ordering;
 
@@ -82,5 +83,22 @@ fn test_compare_names_upcase() {
             &"B".encode_utf16().collect::<Vec<_>>(),
             &upcase
         ) == Ordering::Less
+    );
+}
+
+#[test]
+fn test_dos_8_3_and_namespace() {
+    assert!(is_valid_dos_8_3("FILE.TXT"));
+    assert!(is_valid_dos_8_3("test_win.txt"));
+    assert!(!is_valid_dos_8_3("win_payload"));
+    assert!(!is_valid_dos_8_3("long_filename.extension"));
+
+    assert_eq!(
+        determine_file_name_namespace("FILE.TXT"),
+        NtfsFileNameNamespace::Win32AndDos
+    );
+    assert_eq!(
+        determine_file_name_namespace("win_payload"),
+        NtfsFileNameNamespace::Win32AndDos
     );
 }
