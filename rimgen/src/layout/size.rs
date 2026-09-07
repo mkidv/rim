@@ -60,23 +60,31 @@ impl core::fmt::Display for Size {
 
 pub fn parse_size_mb(size: &str) -> LayoutResult<u64> {
     let lower = size.trim().to_lowercase();
+    let lower = lower.trim_end_matches('b');
+    let lower = lower.trim_end_matches('i');
 
-    if let Some(num) = lower.strip_suffix("k") {
+    if let Some(num) = lower.strip_suffix('k') {
         let kb = num
             .trim()
             .parse::<u64>()
             .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
         Ok(kb.div_ceil(1024))
-    } else if let Some(num) = lower.strip_suffix("m") {
+    } else if let Some(num) = lower.strip_suffix('m') {
         num.trim()
             .parse::<u64>()
             .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))
-    } else if let Some(num) = lower.strip_suffix("g") {
+    } else if let Some(num) = lower.strip_suffix('g') {
         let gb = num
             .trim()
             .parse::<u64>()
             .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
         Ok(gb * 1024)
+    } else if let Some(num) = lower.strip_suffix('t') {
+        let tb = num
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| LayoutError::InvalidSizeFormat(size.to_string()))?;
+        Ok(tb * 1024 * 1024)
     } else {
         crate::bail!(LayoutError::InvalidSizeFormat(size.to_string()));
     }
@@ -114,3 +122,27 @@ pub fn calculate_needed_bytes<P: AsRef<Path>>(dir: P) -> GenResult<u64> {
 
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_size_mb_suffixes() {
+        assert_eq!(parse_size_mb("64M").unwrap(), 64);
+        assert_eq!(parse_size_mb("64MB").unwrap(), 64);
+        assert_eq!(parse_size_mb("64MiB").unwrap(), 64);
+        assert_eq!(parse_size_mb("64mib").unwrap(), 64);
+        assert_eq!(parse_size_mb("1G").unwrap(), 1024);
+        assert_eq!(parse_size_mb("1GB").unwrap(), 1024);
+        assert_eq!(parse_size_mb("1GiB").unwrap(), 1024);
+        assert_eq!(parse_size_mb("2T").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_size_mb("2TB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_size_mb("2TiB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_size_mb("512K").unwrap(), 1);
+        assert_eq!(parse_size_mb("2048K").unwrap(), 2);
+        assert_eq!(parse_size_mb("2048KB").unwrap(), 2);
+        assert_eq!(parse_size_mb("2048KiB").unwrap(), 2);
+    }
+}
+

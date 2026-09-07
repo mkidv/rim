@@ -322,4 +322,6 @@ impl core::fmt::Display for LayoutConfig {
 pub struct DiskConfig {
     pub alignment: Option<String>,
     pub guid: Option<uuid::Uuid>,
+    pub size: Option<Size>,
+    pub table: Option<String>,
 }

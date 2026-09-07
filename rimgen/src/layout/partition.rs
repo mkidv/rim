@@ -8,11 +8,12 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 pub struct PartitionConfig {
     pub name: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", alias = "partition_type", alias = "partition-type")]
     pub kind: Option<PartitionKind>,
-    #[serde(default)]
+    #[serde(default, alias = "mount_point", alias = "mount-point")]
     pub mountpoint: Option<String>,
     pub size: Size,
+    #[serde(alias = "filesystem")]
     pub fs: Filesystem,
     #[serde(default)]
     pub bootable: bool,
