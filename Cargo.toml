@@ -30,7 +30,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Killian Massa (Mki) <contact@mki.dev>"]
 repository = "https://github.com/mkidv/rim"
-homepage = "https://github.com/mkidv/rim"
+homepage = "https://mki.dev/rim"
 keywords = ["filesystem", "disk-image", "ext4", "ntfs", "gpt"]
 categories = ["filesystem", "embedded", "no-std", "development-tools"]
 
