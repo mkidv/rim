@@ -2,6 +2,10 @@
 
 `rimgen` is a library-first declarative disk storage synthesis engine for the **RIM** ecosystem.
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-mki.dev%2Frim-ff4081?style=flat-square&logo=googlechrome&logoColor=white)](https://mki.dev/rim)
+
+> 🚀 **Try `rimgen` in your browser:** [mki.dev/rim](https://mki.dev/rim) — Interactive layout playground with client-side WebAssembly synthesis!
+
 It automates the pipeline of partitioning, formatting, and file injection from a declarative layout description (`DiskLayout`).
 
 ## Key Features

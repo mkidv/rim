@@ -6,6 +6,12 @@ Designed from the ground up for high reliability, streaming I/O, rootless usersp
 
 [![CI](https://github.com/mkidv/rim/actions/workflows/ci.yml/badge.svg)](https://github.com/mkidv/rim/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-mki.dev%2Frim-ff4081?style=flat-square&logo=googlechrome&logoColor=white)](https://mki.dev/rim)
+[![WASM Playground](https://img.shields.io/badge/WASM%20Playground-Try%20it%20Online-00e5ff?style=flat-square&logo=webassembly&logoColor=white)](https://mki.dev/rim)
+
+> 🚀 **Try RIM live in your browser — zero install, 100% client-side WebAssembly:**
+> Test the interactive `layout.toml` playground with real-time partition visualizer, instant disk downloads, and in-browser UEFI x86_64 VM booting:
+> 👉 **[mki.dev/rim](https://mki.dev/rim)**
 
 ---
 
@@ -85,6 +91,8 @@ Declare your disk layout in a `layout.toml` file:
 
 ```toml
 [disk]
+size = "1G"
+table = "gpt"
 alignment = "1M"
 
 [[partitions]]
@@ -93,14 +101,14 @@ fs = "fat32"
 size = "64M"
 bootable = true
 type = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" # EFI System Partition GUID
-mountpoint = "efi/*" # Local folder to inject
+mountpoint = "efi" # Local folder to inject
 
 [[partitions]]
 name = "ROOTFS"
 fs = "ext4"
-size = "500M"
-label = "ROOTFS"
-mountpoint = "rootfs/*"
+size = "auto" # Automatically occupies remaining disk space
+label = "rootfs"
+mountpoint = "rootfs"
 ```
 
 Generate the disk image (format is auto-detected from output extension):
