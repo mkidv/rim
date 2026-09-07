@@ -99,6 +99,15 @@ fn test_dos_8_3_and_namespace() {
     );
     assert_eq!(
         determine_file_name_namespace("win_payload"),
-        NtfsFileNameNamespace::Win32AndDos
+        NtfsFileNameNamespace::Win32
     );
+
+    assert_eq!(generate_dos_8_3_name("win_payload"), "WIN_PA~1");
+    assert_eq!(generate_dos_8_3_name("from_windows"), "FROM_W~1");
+    assert_eq!(
+        generate_dos_8_3_name("long_filename.extension"),
+        "LONG_F~1.EXT"
+    );
+    assert_eq!(generate_dos_8_3_name("document.tar.gz"), "DOCUME~1.GZ");
+    assert_eq!(generate_dos_8_3_name("a+b=c[1].txt"), "ABC1~1.TXT");
 }

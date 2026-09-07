@@ -4,7 +4,7 @@
 //! Responsible for adding files and directories to an existing NTFS volume.
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use rimio::{RimIO, RimRead};
 
@@ -13,7 +13,7 @@ use crate::attr::NtfsFileAttributesExt;
 use crate::attr::{AttributeType, NtfsFileNameNamespace};
 use crate::constant::SECURITY_ID_EVERYONE;
 use crate::core::allocator::FsAllocator;
-use crate::core::injector::{FsContext, FsTreeInjector};
+use crate::core::injector::FsTreeInjector;
 use crate::core::resolver::attr::FileAttributes;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::NtfsMeta;
@@ -25,11 +25,122 @@ use crate::types::{
 };
 use crate::utils::*;
 
-struct DirContext {
+/// NTFS directory context tracking open directory state and child entries
+struct NtfsContext {
+    handle: NtfsHandle,
     name: alloc::string::String,
-    buf: Vec<NtfsIndexEntry>,
+    entries: Vec<NtfsIndexEntry>,
     timestamp: u64,
     file_attrs: NtfsFileAttributes,
+}
+
+impl NtfsContext {
+    fn new(
+        handle: NtfsHandle,
+        name: alloc::string::String,
+        entries: Vec<NtfsIndexEntry>,
+        timestamp: u64,
+        file_attrs: NtfsFileAttributes,
+    ) -> Self {
+        Self {
+            handle,
+            name,
+            entries,
+            timestamp,
+            file_attrs,
+        }
+    }
+
+    #[inline]
+    fn mft_num(&self) -> u64 {
+        self.handle.start_lcn
+    }
+
+    /// Add a child directory entry (or dual entries with DOS 8.3 alias if name exceeds DOS 8.3)
+    fn push_dir_entry(
+        &mut self,
+        child_mft: u64,
+        name: &str,
+        attrs: NtfsFileAttributes,
+        timestamp: u64,
+    ) {
+        let child_ref = system_file_mft_reference(child_mft);
+        let parent_ref = system_file_mft_reference(self.mft_num());
+
+        if is_valid_dos_8_3(name) {
+            let name_utf16: Vec<u16> = name.encode_utf16().collect();
+            let entry = NtfsIndexEntry::new(
+                child_ref,
+                parent_ref,
+                name_utf16,
+                attrs,
+                IndexEntryFlags::empty(),
+                None,
+            )
+            .with_timestamps(timestamp)
+            .with_namespace(NtfsFileNameNamespace::Win32AndDos)
+            .with_sizes(0, 0);
+            self.entries.push(entry);
+        } else {
+            let dos_name = generate_dos_8_3_name(name);
+            let dos_utf16: Vec<u16> = dos_name.encode_utf16().collect();
+            let dos_entry = NtfsIndexEntry::new(
+                child_ref,
+                parent_ref,
+                dos_utf16,
+                attrs,
+                IndexEntryFlags::empty(),
+                None,
+            )
+            .with_timestamps(timestamp)
+            .with_namespace(NtfsFileNameNamespace::Dos)
+            .with_sizes(0, 0);
+            self.entries.push(dos_entry);
+
+            let win32_utf16: Vec<u16> = name.encode_utf16().collect();
+            let win32_entry = NtfsIndexEntry::new(
+                child_ref,
+                parent_ref,
+                win32_utf16,
+                attrs,
+                IndexEntryFlags::empty(),
+                None,
+            )
+            .with_timestamps(timestamp)
+            .with_namespace(NtfsFileNameNamespace::Win32)
+            .with_sizes(0, 0);
+            self.entries.push(win32_entry);
+        }
+    }
+
+    /// Add a child file entry
+    fn push_file_entry(
+        &mut self,
+        child_mft: u64,
+        name: &str,
+        attrs: NtfsFileAttributes,
+        size: u64,
+        allocated_size: u64,
+        timestamp: u64,
+    ) {
+        let child_ref = system_file_mft_reference(child_mft);
+        let parent_ref = system_file_mft_reference(self.mft_num());
+        let ns = determine_file_name_namespace(name);
+        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+
+        let entry = NtfsIndexEntry::new(
+            child_ref,
+            parent_ref,
+            name_utf16,
+            attrs,
+            IndexEntryFlags::empty(),
+            None,
+        )
+        .with_timestamps(timestamp)
+        .with_namespace(ns)
+        .with_sizes(size, allocated_size);
+        self.entries.push(entry);
+    }
 }
 
 /// NTFS node injector
@@ -39,8 +150,7 @@ pub struct NtfsInjector<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     allocator: NtfsAllocator<'a>,
     meta: &'a NtfsMeta,
-    // Stack holds (Handle, Directory Context including name and accumulated entries)
-    stack: Vec<FsContext<NtfsHandle, DirContext>>,
+    stack: Vec<NtfsContext>,
     mft_allocator: mft::MftAllocator<'a>,
     root_existing_runs: Option<rimio::run::RunList>,
 }
@@ -237,6 +347,42 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         }
         None
     }
+
+    /// Build file $DATA attribute (resident or non-resident) and return it along with allocated byte size.
+    fn build_file_data_attribute(
+        &mut self,
+        source: &mut dyn RimRead,
+        size: u64,
+    ) -> FsInjectorResult<(NtfsAttribute<'static>, u64)> {
+        if size == 0 {
+            return Ok((NtfsAttribute::data_empty(), 0));
+        }
+
+        let resident_max = (self.meta.mft_record_size as usize).saturating_sub(400);
+        if (size as usize) < resident_max {
+            let mut data = vec![0u8; size as usize];
+            source.read_at(0, &mut data).map_err(FsInjectorError::IO)?;
+            Ok((NtfsAttribute::data_resident(data), size))
+        } else {
+            let clusters = size.div_ceil(self.meta.bytes_per_cluster as u64);
+            let allocated_size = clusters * self.meta.bytes_per_cluster as u64;
+            let handle = self
+                .allocator
+                .allocate_contiguous(self.io, clusters as usize)?;
+
+            crate::core::utils::stream_copy::write_stream_to_run_list(
+                self.io,
+                self.meta,
+                source,
+                &handle.runs,
+                size,
+            )
+            .map_err(FsInjectorError::IO)?;
+            let attr =
+                NtfsAttribute::non_resident(AttributeType::Data, "", self.meta, &handle.runs, size);
+            Ok((attr, allocated_size))
+        }
+    }
 }
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO> {
@@ -264,17 +410,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             .map(|e| e.creation_time)
             .unwrap_or_else(crate::utils::current_ntfs_time);
 
-        self.stack.push(FsContext::new(
+        self.stack.push(NtfsContext::new(
             handle,
-            DirContext {
-                name: ".".into(),
-                buf: entries,
-                timestamp,
-                file_attrs: NtfsFileAttributes::DIRECTORY
-                    | NtfsFileAttributes::HIDDEN
-                    | NtfsFileAttributes::SYSTEM
-                    | NtfsFileAttributes::I30_INDEX,
-            },
+            ".".into(),
+            entries,
+            timestamp,
+            NtfsFileAttributes::DIRECTORY
+                | NtfsFileAttributes::HIDDEN
+                | NtfsFileAttributes::SYSTEM
+                | NtfsFileAttributes::I30_INDEX,
         ));
         Ok(())
     }
@@ -282,41 +426,22 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
         let timestamp = crate::utils::current_ntfs_time();
         let mft_num = self.allocate_mft_record()?;
-        let mft_ref = system_file_mft_reference(mft_num);
         let dir_file_name_attrs =
-            attr.as_ntfs_attr() | NtfsFileAttributes::DIRECTORY | NtfsFileAttributes::I30_INDEX;
+            (attr.as_ntfs_attr() - NtfsFileAttributes::DIRECTORY) | NtfsFileAttributes::I30_INDEX;
 
         // Add to parent index immediately
         if let Some(parent_ctx) = self.stack.last_mut() {
-            let parent_mft = parent_ctx.handle.start_lcn;
-            let parent_ref = system_file_mft_reference(parent_mft);
-            let ns = determine_file_name_namespace(name);
-
-            let name_utf16: Vec<u16> = name.encode_utf16().collect();
-            let entry = NtfsIndexEntry::new(
-                mft_ref,
-                parent_ref,
-                name_utf16,
-                dir_file_name_attrs,
-                IndexEntryFlags::empty(),
-                None,
-            )
-            .with_timestamps(timestamp)
-            .with_namespace(ns)
-            .with_sizes(0, 0);
-            parent_ctx.buf.buf.push(entry);
+            parent_ctx.push_dir_entry(mft_num, name, dir_file_name_attrs, timestamp);
         }
 
         // Push child context
         let handle = NtfsHandle::new(mft_num);
-        self.stack.push(FsContext::new(
+        self.stack.push(NtfsContext::new(
             handle,
-            DirContext {
-                name: name.into(),
-                buf: Vec::new(),
-                timestamp,
-                file_attrs: dir_file_name_attrs,
-            },
+            name.into(),
+            Vec::new(),
+            timestamp,
+            dir_file_name_attrs,
         ));
         Ok(())
     }
@@ -330,17 +455,13 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
     ) -> FsInjectorResult {
         let timestamp = crate::utils::current_ntfs_time();
         let mft_num = self.allocate_mft_record()?;
-        let mft_ref = system_file_mft_reference(mft_num);
-
         let parent_mft = self
             .stack
             .last()
             .ok_or(FsInjectorError::StackUnderflow)?
-            .handle
-            .start_lcn;
+            .mft_num();
         let parent_ref = system_file_mft_reference(parent_mft);
 
-        // Use Builder!
         let mut record = NtfsMftRecord::new(mft_num as u32, false, true);
         let ntfs_attr = attr.as_ntfs_attr();
 
@@ -350,43 +471,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             timestamp,
         ));
 
-        let mut allocated_size = 0u64;
-        let data_attr;
-
-        if size > 0 {
-            let resident_max = (self.meta.mft_record_size as usize).saturating_sub(400);
-            if (size as usize) < resident_max {
-                allocated_size = size;
-                let mut data = vec![0u8; size as usize];
-                source.read_at(0, &mut data).map_err(FsInjectorError::IO)?;
-                data_attr = NtfsAttribute::data_resident(data);
-            } else {
-                let clusters = size.div_ceil(self.meta.bytes_per_cluster as u64);
-                allocated_size = clusters * self.meta.bytes_per_cluster as u64;
-                let handle = self
-                    .allocator
-                    .allocate_contiguous(self.io, clusters as usize)?;
-
-                crate::core::utils::stream_copy::write_stream_to_run_list(
-                    self.io,
-                    self.meta,
-                    source,
-                    &handle.runs,
-                    size,
-                )
-                .map_err(FsInjectorError::IO)?;
-                data_attr = NtfsAttribute::non_resident(
-                    AttributeType::Data,
-                    "",
-                    self.meta,
-                    &handle.runs,
-                    size,
-                );
-            }
-        } else {
-            data_attr = NtfsAttribute::data_empty();
-        }
-
+        let (data_attr, allocated_size) = self.build_file_data_attribute(source, size)?;
         let ns = determine_file_name_namespace(name);
 
         // Attr 0x30 ($FILE_NAME) MUST come before Attr 0x80 ($DATA)
@@ -412,20 +497,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             .stack
             .last_mut()
             .ok_or(FsInjectorError::StackUnderflow)?;
-
-        let name_utf16: Vec<u16> = name.encode_utf16().collect();
-        let entry = NtfsIndexEntry::new(
-            mft_ref,
-            parent_ref,
-            name_utf16,
-            ntfs_attr,
-            IndexEntryFlags::empty(),
-            None,
-        )
-        .with_timestamps(timestamp)
-        .with_namespace(ns)
-        .with_sizes(size, allocated_size);
-        ctx.buf.buf.push(entry);
+        ctx.push_file_entry(mft_num, name, ntfs_attr, size, allocated_size, timestamp);
 
         Ok(())
     }
@@ -443,14 +515,14 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
 
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(ctx) = self.stack.pop() {
-            let mft_num = ctx.handle.start_lcn;
+            let mft_num = ctx.mft_num();
             let is_root = mft_num == 5;
 
             let file_name_attrs = if is_root {
                 (NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM)
                     | NtfsFileAttributes::I30_INDEX
             } else {
-                ctx.buf.file_attrs
+                ctx.file_attrs
             };
 
             let attrs = if is_root {
@@ -458,16 +530,16 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                     | NtfsFileAttributes::SYSTEM
                     | NtfsFileAttributes::DIRECTORY
             } else {
-                ctx.buf.file_attrs - NtfsFileAttributes::I30_INDEX
+                ctx.file_attrs - NtfsFileAttributes::I30_INDEX
             };
 
             let parent_ref = if let Some(p) = self.stack.last() {
-                system_file_mft_reference(p.handle.start_lcn)
+                system_file_mft_reference(p.mft_num())
             } else {
                 system_file_mft_reference(5) // Root self-ref (record 5, sequence 5)
             };
 
-            let timestamp = ctx.buf.timestamp;
+            let timestamp = ctx.timestamp;
             let mut record = NtfsMftRecord::new(mft_num as u32, true, true);
             if is_root {
                 record.add_attribute(NtfsAttribute::standard_info_basic(attrs, timestamp));
@@ -479,23 +551,32 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 ));
             }
 
-            if is_root {
+            if is_root || is_valid_dos_8_3(&ctx.name) {
                 record.add_attribute(NtfsAttribute::file_name_custom(
                     parent_ref,
-                    &ctx.buf.name,
+                    &ctx.name,
                     0,
                     file_name_attrs,
                     NtfsFileNameNamespace::Win32AndDos,
                     timestamp,
                 ));
             } else {
-                let ns = determine_file_name_namespace(&ctx.buf.name);
+                let dos_name = generate_dos_8_3_name(&ctx.name);
+                record.header.link_count = 2;
                 record.add_attribute(NtfsAttribute::file_name_custom(
                     parent_ref,
-                    &ctx.buf.name,
+                    &dos_name,
                     0,
                     file_name_attrs,
-                    ns,
+                    NtfsFileNameNamespace::Dos,
+                    timestamp,
+                ));
+                record.add_attribute(NtfsAttribute::file_name_custom(
+                    parent_ref,
+                    &ctx.name,
+                    0,
+                    file_name_attrs,
+                    NtfsFileNameNamespace::Win32,
                     timestamp,
                 ));
             }
@@ -507,7 +588,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             }
 
             // Build Index ($I30) using unified DirectoryIndexResult
-            let index_res = IndexTreeBuilder::build_directory_index(self.meta, ctx.buf.buf)
+            let index_res = IndexTreeBuilder::build_directory_index(self.meta, ctx.entries)
                 .map_err(FsInjectorError::IO)?;
 
             let clusters_per_index = self.meta.clusters_per_index_record_raw();

@@ -5,13 +5,66 @@ use core::cmp::Ordering;
 
 use crate::upcase::UpcaseHandle;
 
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::{format, string::String};
+
 /// Determine the NTFS filename namespace for an entry.
 ///
-/// Injected entries have a single `$FILE_NAME` attribute without a secondary DOS 8.3 alias.
-/// Using `Win32AndDos` (3) ensures the Windows kernel and CHKDSK accept the name directly
-/// without expecting a paired secondary DOS 8.3 name in namespace 2.
-pub fn determine_file_name_namespace(_name: &str) -> crate::types::record::NtfsFileNameNamespace {
-    crate::types::record::NtfsFileNameNamespace::Win32AndDos
+/// If the name fits DOS 8.3 constraints, use `Win32AndDos` (3).
+/// Otherwise, use `Win32` (1) accompanied by an alias in `Dos` (2).
+pub fn determine_file_name_namespace(name: &str) -> crate::types::record::NtfsFileNameNamespace {
+    if is_valid_dos_8_3(name) {
+        crate::types::record::NtfsFileNameNamespace::Win32AndDos
+    } else {
+        crate::types::record::NtfsFileNameNamespace::Win32
+    }
+}
+
+/// Generate a DOS 8.3 short filename alias for a long filename.
+///
+/// Follows Windows NTFS / DOS conventions:
+/// - Strips characters illegal in DOS 8.3 (`" * + , / : ; < = > ? [ \ ] | .` and spaces)
+/// - Converts lowercase ASCII to uppercase ASCII
+/// - Base name: up to 6 uppercase valid characters, followed by `~1`
+/// - Extension: up to 3 uppercase valid characters
+pub fn generate_dos_8_3_name(name: &str) -> String {
+    let (base_part, ext_part) = match name.rfind('.') {
+        Some(dot_idx) if dot_idx > 0 => (&name[..dot_idx], Some(&name[dot_idx + 1..])),
+        _ => (name, None),
+    };
+
+    let is_valid_dos_char =
+        |b: u8| -> bool { (0x21..=0x7E).contains(&b) && !b"\"*+,/:;<=>?[\\]|.".contains(&b) };
+
+    let mut clean_base = String::new();
+    for b in base_part.bytes() {
+        if is_valid_dos_char(b) {
+            clean_base.push((b as char).to_ascii_uppercase());
+        }
+    }
+
+    if clean_base.is_empty() {
+        clean_base.push('F');
+    }
+
+    let base_truncated: String = clean_base.chars().take(6).collect();
+    let mut result = format!("{}~1", base_truncated);
+
+    if let Some(ext) = ext_part {
+        let mut clean_ext = String::new();
+        for b in ext.bytes() {
+            if is_valid_dos_char(b) {
+                clean_ext.push((b as char).to_ascii_uppercase());
+            }
+        }
+        let ext_truncated: String = clean_ext.chars().take(3).collect();
+        if !ext_truncated.is_empty() {
+            result.push('.');
+            result.push_str(&ext_truncated);
+        }
+    }
+
+    result
 }
 
 /// Determine if a filename complies with DOS 8.3 constraints (case-preserving for Win32AndDos).
