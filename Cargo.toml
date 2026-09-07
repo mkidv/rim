@@ -31,7 +31,7 @@ license = "MIT"
 authors = ["Killian Massa (Mki) <contact@mki.dev>"]
 repository = "https://github.com/mkidv/rim"
 homepage = "https://github.com/mkidv/rim"
-keywords = ["fat", "exfat", "ext", "ntfs", "mbr", "gpt", "disk-image"]
+keywords = ["filesystem", "disk-image", "ext4", "ntfs", "gpt"]
 categories = ["filesystem", "embedded", "no-std", "development-tools"]
 
 [workspace.dependencies]

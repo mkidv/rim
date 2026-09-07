@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["disk-image", "generator", "layout", "builder", "no-std"]
 categories.workspace = true
 
 [lib]

@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["fat", "fat32", "fat16", "filesystem", "no-std"]
 categories.workspace = true
 
 [features]

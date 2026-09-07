@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["io", "no-std", "uefi", "mmap", "storage"]
 categories.workspace = true
 
 [features]

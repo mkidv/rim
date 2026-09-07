@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["filesystem", "ext4", "ntfs", "fat32", "no-std"]
 categories.workspace = true
 
 [features]
