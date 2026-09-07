@@ -8,6 +8,7 @@ use ::core::time::Duration;
 use alloc::string::String;
 use alloc::vec::Vec;
 use rimfs::core::allocator::FsHandle;
+use rimfs::core::errors::*;
 use rimfs::core::injector::FsTreeInjector;
 use rimfs::core::resolver::*;
 #[cfg(feature = "exfat")]
@@ -46,6 +47,7 @@ struct PartitionSpan {
     size_bytes: u64,
 }
 
+#[allow(dead_code)]
 fn merge_counts(dst: &mut FsNodeCounts, src: FsNodeCounts) {
     dst.dirs += src.dirs;
     dst.files += src.files;
@@ -53,6 +55,7 @@ fn merge_counts(dst: &mut FsNodeCounts, src: FsNodeCounts) {
     dst.bytes += src.bytes;
 }
 
+#[allow(dead_code)]
 fn inject_partition_sources<Handle, Injector>(
     injector: &mut Injector,
     part: &mut Partition<'_>,

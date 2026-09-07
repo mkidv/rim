@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1.0.98"
-rimgen = { workspace = true, features = ["std"] }
+rimgen = { workspace = true, default-features = true }
 rimimg = { workspace = true, features = ["std"] }
 rimio = { workspace = true, features = ["std"] }
 tempfile = "3.20.0"
