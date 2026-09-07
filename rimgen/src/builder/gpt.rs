@@ -65,6 +65,9 @@ pub fn size_to_sectors(size: &Size) -> u64 {
 
 /// Calculate total disk sectors needed for a layout config.
 pub fn calculate_total_disk_sectors_from_config(layout: &LayoutConfig) -> u64 {
+    if let Some(Size::Fixed(mb)) = layout.disk.as_ref().and_then(|d| d.size.as_ref()) {
+        return (mb * 1024 * 1024) / DEFAULT_SECTOR_SIZE;
+    }
     layout
         .partitions
         .iter()
@@ -75,6 +78,9 @@ pub fn calculate_total_disk_sectors_from_config(layout: &LayoutConfig) -> u64 {
 
 /// Calculate total disk sectors needed for a layout.
 pub fn calculate_total_disk_sectors(layout: &Layout<'_>) -> u64 {
+    if let Some(total) = layout.total_disk_sectors {
+        return total;
+    }
     layout
         .partitions
         .iter()

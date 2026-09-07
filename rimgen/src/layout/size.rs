@@ -145,4 +145,3 @@ mod tests {
         assert_eq!(parse_size_mb("2048KiB").unwrap(), 2);
     }
 }
-

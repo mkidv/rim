@@ -128,6 +128,121 @@ fn test_build_without_partition_table() {
     assert!(rimpart::gpt::read_gpt_with_sector(&mut io, 512).is_err());
 }
 
+#[test]
+fn test_disk_config_size_and_table_none() {
+    let toml = r#"
+[disk]
+size = "64M"
+table = "none"
+
+[[partitions]]
+name = "RAW_FS"
+fs = "fat16"
+size = "auto"
+"#;
+    let layout = LayoutConfig::from_str(toml, None).unwrap();
+    assert_eq!(
+        layout.effective_partition_table(),
+        rimgen::PartitionTable::None
+    );
+    assert_eq!(layout.partitions[0].size, Size::Fixed(64));
+
+    let total_sectors = rimgen::calculate_total_disk_sectors_from_config_with_options(
+        &layout,
+        rimgen::BuildOptions {
+            partition_table: layout.effective_partition_table(),
+        },
+    )
+    .unwrap();
+    assert_eq!(total_sectors, (64 * 1024 * 1024) / 512);
+
+    let raw_len = total_sectors * 512;
+    let mut buffer = vec![0u8; raw_len as usize];
+    let mut io = MemRimIO::new(&mut buffer);
+
+    let report = rimgen::build_config_on_io(&layout, &mut io).unwrap();
+    assert_eq!(report.total_bytes, 64 * 1024 * 1024);
+    assert_eq!(report.partitions.len(), 1);
+    assert_eq!(report.partitions[0].start_lba, 0);
+    assert_eq!(report.partitions[0].size_bytes, 64 * 1024 * 1024);
+    assert!(rimpart::gpt::read_gpt_with_sector(&mut io, 512).is_err());
+}
+
+#[test]
+fn test_disk_config_size_and_table_gpt_auto_remaining() {
+    let toml = r#"
+[disk]
+size = "64M"
+table = "gpt"
+
+[[partitions]]
+name = "BOOT"
+fs = "fat16"
+size = "16M"
+bootable = true
+
+[[partitions]]
+name = "ROOT"
+fs = "fat16"
+size = "auto"
+"#;
+    let layout = LayoutConfig::from_str(toml, None).unwrap();
+    assert_eq!(
+        layout.effective_partition_table(),
+        rimgen::PartitionTable::Gpt
+    );
+    assert_eq!(layout.partitions[0].size, Size::Fixed(16));
+    // 64MB total - 16MB BOOT - 2MB GPT overhead = 46MB ROOT
+    assert_eq!(layout.partitions[1].size, Size::Fixed(46));
+
+    let total_sectors = rimgen::calculate_total_disk_sectors_from_config_with_options(
+        &layout,
+        rimgen::BuildOptions {
+            partition_table: layout.effective_partition_table(),
+        },
+    )
+    .unwrap();
+    assert_eq!(total_sectors, (64 * 1024 * 1024) / 512);
+
+    let raw_len = total_sectors * 512;
+    let mut buffer = vec![0u8; raw_len as usize];
+    let mut io = MemRimIO::new(&mut buffer);
+
+    let report = rimgen::build_config_on_io(&layout, &mut io).unwrap();
+    assert_eq!(report.total_bytes, 64 * 1024 * 1024);
+    assert_eq!(report.partitions.len(), 2);
+
+    // Full disk GPT + protective MBR validation
+    rimpart::validate_full_disk(&mut io).expect("Full disk validation must pass");
+
+    // Scan partitions
+    let scan = rimpart::scan_disk_with_sector(&mut io, 512).unwrap();
+    assert_eq!(scan.partitions.len(), 2);
+    assert_eq!(scan.partitions[0].name, "BOOT");
+    assert_eq!(scan.partitions[1].name, "ROOT");
+}
+
+#[test]
+fn test_disk_config_overflow_detected() {
+    let toml = r#"
+[disk]
+size = "30M"
+table = "gpt"
+
+[[partitions]]
+name = "P1"
+fs = "fat16"
+size = "20M"
+
+[[partitions]]
+name = "P2"
+fs = "fat16"
+size = "20M"
+"#;
+    let res = LayoutConfig::from_str(toml, None);
+    assert!(res.is_err(), "Exceeding disk size must return an error");
+}
+
 fn build_config_to_file(layout: &LayoutConfig, output: &Path, format: ImageFormat) {
     let raw_len = rimgen::builder::gpt::calculate_total_disk_sectors_from_config(layout) * 512;
     let file = OpenOptions::new()

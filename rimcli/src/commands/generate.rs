@@ -41,7 +41,7 @@ pub fn run(
         partition_table: if no_gpt {
             PartitionTable::None
         } else {
-            PartitionTable::Gpt
+            layout.effective_partition_table()
         },
     };
 
@@ -60,14 +60,16 @@ pub fn run(
             print_layout_table(&layout);
         }
 
-        if no_gpt {
+        if build_options.partition_table == PartitionTable::None {
             println!("Generating without GPT or protective MBR.");
         }
     }
 
     if host {
-        if no_gpt {
-            return Err(anyhow!("--no-gpt cannot be combined with --host"));
+        if build_options.partition_table == PartitionTable::None {
+            return Err(anyhow!(
+                "--no-gpt or table = 'none' cannot be combined with --host"
+            ));
         }
 
         if !quiet {

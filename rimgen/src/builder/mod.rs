@@ -88,7 +88,14 @@ pub fn build_on_io_with_options(
 /// Resolve a layout config with host files and build it onto an open `RimIO` stream.
 #[cfg(feature = "std")]
 pub fn build_config_on_io(layout: &LayoutConfig, io: &mut dyn RimIO) -> GenResult<BuildReport> {
-    build_config_on_io_with_options_and_events(layout, io, BuildOptions::default(), |_| {})
+    build_config_on_io_with_options_and_events(
+        layout,
+        io,
+        BuildOptions {
+            partition_table: layout.effective_partition_table(),
+        },
+        |_| {},
+    )
 }
 
 /// Resolve a layout config with host files and build it onto an open `RimIO` stream.
@@ -108,7 +115,14 @@ pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     io: &mut dyn RimIO,
     on_event: F,
 ) -> GenResult<BuildReport> {
-    build_config_on_io_with_options_and_events(layout, io, BuildOptions::default(), on_event)
+    build_config_on_io_with_options_and_events(
+        layout,
+        io,
+        BuildOptions {
+            partition_table: layout.effective_partition_table(),
+        },
+        on_event,
+    )
 }
 
 /// Resolve a layout config with host files and build it onto an open `RimIO` stream.
@@ -162,7 +176,8 @@ pub fn build_on_io_with_options_and_events<F: for<'a> FnMut(BuildEvent<'a>)>(
         PartitionTable::Gpt => layout.alignment_sectors,
         PartitionTable::None => 0,
     };
-    let partition_entries = plan_partition_entries(layout, first_lba, total_sectors)?;
+    let partition_entries =
+        plan_partition_entries(layout, first_lba, total_sectors, options.partition_table)?;
 
     on_event(BuildEvent::LayoutPlanned {
         total_bytes,
@@ -237,6 +252,9 @@ pub fn calculate_total_disk_sectors_from_config_with_options(
 }
 
 fn calculate_total_content_sectors(layout: &Layout<'_>) -> u64 {
+    if let Some(total) = layout.total_disk_sectors {
+        return total;
+    }
     if layout.partitions.is_empty() {
         return 0;
     }
@@ -255,15 +273,21 @@ fn plan_partition_entries(
     layout: &Layout<'_>,
     first_lba: u64,
     total_sectors: u64,
+    partition_table: PartitionTable,
 ) -> GenResult<Vec<rimpart::gpt::GptEntry>> {
     let align_sectors = layout.alignment_sectors;
     let mut start = first_lba;
     let mut partition_entries = Vec::with_capacity(layout.partitions.len());
 
+    let max_usable = match partition_table {
+        PartitionTable::Gpt => total_sectors.saturating_sub(33),
+        PartitionTable::None => total_sectors,
+    };
+
     for part in &layout.partitions {
         let sectors = part.size_sectors;
         let end = start + sectors - 1;
-        if end >= total_sectors {
+        if end >= max_usable {
             return Err(GenError::PartitionDoesNotFit {
                 name: part.name.clone(),
                 end_lba: end,

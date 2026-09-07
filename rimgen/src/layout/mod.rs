@@ -123,6 +123,7 @@ pub struct Layout<'a> {
     pub disk_guid: [u8; 16],
     pub alignment_sectors: u64,
     pub partitions: Vec<Partition<'a>>,
+    pub total_disk_sectors: Option<u64>,
 }
 
 impl<'a> Layout<'a> {
@@ -131,11 +132,17 @@ impl<'a> Layout<'a> {
             disk_guid,
             alignment_sectors: rimpart::gpt::align_lba_1m(DEFAULT_SECTOR_SIZE),
             partitions: Vec::new(),
+            total_disk_sectors: None,
         }
     }
 
     pub fn with_alignment_sectors(mut self, align: u64) -> Self {
         self.alignment_sectors = align;
+        self
+    }
+
+    pub fn with_total_disk_sectors(mut self, total: u64) -> Self {
+        self.total_disk_sectors = Some(total);
         self
     }
 
@@ -179,15 +186,96 @@ impl LayoutConfig {
 
     #[cfg(feature = "std")]
     pub fn resolve_partition(&mut self) -> GenResult<()> {
-        for part in &mut self.partitions {
-            if let Size::Auto = part.size {
-                let source_path = self.base_dir.join(part.mountpoint.as_deref().unwrap_or(""));
-                let size_bytes = calculate_needed_bytes(&source_path)?;
-                let size_mb = ((size_bytes as f64 * 1.1) / (1024.0 * 1024.0))
-                    .ceil()
-                    .max(DEFAULT_AUTO_SIZE_MB as f64) as u64;
-                part.size = Size::Fixed(size_mb);
+        let mut auto_indices = Vec::new();
+        let mut fixed_sum_mb: u64 = 0;
+
+        for (i, part) in self.partitions.iter().enumerate() {
+            match part.size {
+                Size::Auto => auto_indices.push(i),
+                Size::Fixed(mb) => fixed_sum_mb = fixed_sum_mb.saturating_add(mb),
             }
+        }
+
+        let disk_size_mb = self.disk.as_ref().and_then(|d| match d.size {
+            Some(Size::Fixed(mb)) => Some(mb),
+            _ => None,
+        });
+
+        if let Some(total_mb) = disk_size_mb {
+            let overhead_mb = match self.effective_partition_table() {
+                crate::builder::PartitionTable::Gpt => 2,
+                crate::builder::PartitionTable::None => 0,
+            };
+
+            let available_mb = total_mb.saturating_sub(overhead_mb);
+            if available_mb < fixed_sum_mb {
+                return Err(LayoutError::InvalidConfig(
+                    "Partitions total size exceeds [disk] size",
+                )
+                .into());
+            }
+
+            let mut remaining_mb = available_mb - fixed_sum_mb;
+
+            for (idx_in_auto, &part_idx) in auto_indices.iter().enumerate() {
+                let is_last_auto = idx_in_auto == auto_indices.len() - 1;
+                let part = &mut self.partitions[part_idx];
+
+                let source_path = if let Some(mp) = &part.mountpoint {
+                    Some(self.base_dir.join(mp))
+                } else if let Some(payload) = &part.payload {
+                    Some(self.base_dir.join(payload))
+                } else {
+                    None
+                };
+                let needed_bytes = if let Some(path) = &source_path {
+                    if path.exists() {
+                        calculate_needed_bytes(path)?
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let needed_mb = if needed_bytes > 0 {
+                    ((needed_bytes as f64 * 1.1) / (1024.0 * 1024.0)).ceil() as u64
+                } else {
+                    0
+                };
+
+                if is_last_auto {
+                    if remaining_mb < needed_mb {
+                        return Err(LayoutError::InvalidConfig(
+                            "Remaining [disk] space is smaller than files in auto partition",
+                        )
+                        .into());
+                    }
+                    part.size = Size::Fixed(remaining_mb);
+                } else {
+                    let allocated_mb = if needed_mb > 0 {
+                        needed_mb.min(remaining_mb)
+                    } else {
+                        DEFAULT_AUTO_SIZE_MB.min(remaining_mb)
+                    };
+                    remaining_mb = remaining_mb.saturating_sub(allocated_mb);
+                    part.size = Size::Fixed(allocated_mb);
+                }
+            }
+        } else {
+            for part in &mut self.partitions {
+                if let Size::Auto = part.size {
+                    let source_path = self.base_dir.join(part.mountpoint.as_deref().unwrap_or(""));
+                    let size_bytes = calculate_needed_bytes(&source_path)?;
+                    let size_mb = ((size_bytes as f64 * 1.1) / (1024.0 * 1024.0))
+                        .ceil()
+                        .max(DEFAULT_AUTO_SIZE_MB as f64) as u64;
+                    part.size = Size::Fixed(size_mb);
+                }
+            }
+        }
+
+        for part in &mut self.partitions {
             if part.kind.is_none() {
                 part.kind = Some(part.effective_kind());
             }
@@ -204,7 +292,17 @@ impl LayoutConfig {
         }
     }
 
+    pub fn effective_partition_table(&self) -> crate::builder::PartitionTable {
+        self.disk
+            .as_ref()
+            .map(|d| d.effective_partition_table())
+            .unwrap_or(crate::builder::PartitionTable::Gpt)
+    }
+
     pub fn validate(&self) -> GenResult<()> {
+        if let Some(disk) = &self.disk {
+            disk.validate()?;
+        }
         for p in &self.partitions {
             p.validate()?;
         }
@@ -258,10 +356,21 @@ impl LayoutConfig {
             });
         }
 
+        let total_disk_sectors = if let Some(disk) = &self.disk {
+            if let Some(Size::Fixed(mb)) = disk.size {
+                Some((mb * 1024 * 1024) / DEFAULT_SECTOR_SIZE)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Layout {
             disk_guid,
             alignment_sectors,
             partitions: resolved_parts,
+            total_disk_sectors,
         })
     }
 }
@@ -270,6 +379,12 @@ impl core::fmt::Display for LayoutConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if let Some(disk) = &self.disk {
             writeln!(f, "Disk Configuration:")?;
+            if let Some(size) = &disk.size {
+                writeln!(f, "  Size: {size}")?;
+            }
+            if let Some(table) = &disk.table {
+                writeln!(f, "  Partition Table: {table}")?;
+            }
             if let Some(align) = &disk.alignment {
                 writeln!(f, "  Alignment: {align}")?;
             }
@@ -318,10 +433,47 @@ impl core::fmt::Display for LayoutConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct DiskConfig {
+    #[serde(default, alias = "align")]
     pub alignment: Option<String>,
+    #[serde(default, alias = "disk_guid", alias = "disk-guid")]
     pub guid: Option<uuid::Uuid>,
+    #[serde(default)]
     pub size: Option<Size>,
+    #[serde(
+        default,
+        alias = "partition_table",
+        alias = "partition-table",
+        alias = "type"
+    )]
     pub table: Option<String>,
+}
+
+impl DiskConfig {
+    pub fn effective_partition_table(&self) -> crate::builder::PartitionTable {
+        if let Some(table) = &self.table {
+            let trimmed = table.trim().to_lowercase();
+            if trimmed == "none" || trimmed == "raw" {
+                return crate::builder::PartitionTable::None;
+            }
+        }
+        crate::builder::PartitionTable::Gpt
+    }
+
+    pub fn validate(&self) -> GenResult<()> {
+        if let Some(table) = &self.table {
+            let t = table.trim().to_lowercase();
+            if t != "gpt" && t != "none" && t != "raw" {
+                return Err(LayoutError::InvalidConfig(
+                    "Unsupported partition table in [disk]. Supported values: 'gpt', 'none', 'raw'",
+                )
+                .into());
+            }
+        }
+        if let Some(align) = &self.alignment {
+            crate::builder::gpt::parse_alignment_sectors(align)?;
+        }
+        Ok(())
+    }
 }
