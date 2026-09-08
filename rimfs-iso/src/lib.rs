@@ -337,4 +337,32 @@ mod tests {
 
         assert!(total_bytes.load(Ordering::SeqCst) < 10 * ISO_SECTOR_SIZE);
     }
+
+    #[test]
+    fn test_iso_fallible_try_new_and_unsupported_incremental_mutation() {
+        let meta = IsoMeta::default();
+        let mut empty_buf = [0u8; 100 * ISO_SECTOR_SIZE];
+        let mut io = MemRimIO::new(&mut empty_buf);
+
+        // try_new should fail on an unformatted ISO image
+        let res = IsoResolver::try_new(&mut io, &meta);
+        assert!(res.is_err());
+
+        // write_file / write_dir / set_root_context must return Unsupported
+        let mut injector = IsoInjector::new(&mut io, &meta).unwrap();
+        let file_attrs = rimfs_core::resolver::attr::FileAttributes::new_file();
+        let mut dummy = rimio::SliceRimIO::new(b"data");
+        assert!(matches!(
+            injector.write_file("file.txt", &mut dummy, 4, &file_attrs),
+            Err(rimfs_core::FsInjectorError::Unsupported(_))
+        ));
+        assert!(matches!(
+            injector.write_dir("dir", &file_attrs),
+            Err(rimfs_core::FsInjectorError::Unsupported(_))
+        ));
+        assert!(matches!(
+            injector.set_root_context(&file_attrs),
+            Err(rimfs_core::FsInjectorError::Unsupported(_))
+        ));
+    }
 }

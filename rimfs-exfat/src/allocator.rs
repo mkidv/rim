@@ -164,11 +164,17 @@ impl<'a> FsAllocator<ExFatHandle> for ExFatAllocator<'a> {
             self.next_free_hint = self.meta.first_data_unit();
         }
 
-        // Return handle and write FAT chain
-        let chain: Vec<u32> = (0..count).map(|i| start_cluster + i as u32).collect();
-        FatDriver::new(self.meta).write_chain(io, &chain)?;
+        // Return handle and write FAT chain directly from RunList (O4)
+        let mut chain = RunList::new();
+        if count > 0 {
+            chain.push(Run {
+                start: start_cluster as u64,
+                length: count as u64,
+            });
+        }
+        FatDriver::new(self.meta).write_run_list(io, &chain)?;
 
-        Ok(ExFatHandle::from(chain))
+        Ok(ExFatHandle::from_chain(chain))
     }
 
     fn used_units(&self) -> usize {

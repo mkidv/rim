@@ -215,7 +215,17 @@ impl RimWrite for FileRimIO {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
         use std::os::windows::fs::FileExt;
         let abs_offset = checked_add_offset(self.partition_offset, offset)?;
-        self.file.seek_write(data, abs_offset)?;
+        let mut written = 0;
+        while written < data.len() {
+            let n = self.file.seek_write(
+                &data[written..],
+                checked_add_offset(abs_offset, written as u64)?,
+            )?;
+            if n == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            written += n;
+        }
         Ok(())
     }
 
@@ -270,9 +280,15 @@ impl From<Error> for RimIOError {
     #[cold]
     #[inline(never)]
     fn from(e: Error) -> Self {
-        // Leak the string to produce a 'static str. Acceptable for error mapping.
-        let leaked_str: &'static str = Box::leak(e.to_string().into_boxed_str());
-        RimIOError::Other(leaked_str)
+        match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => RimIOError::OutOfBounds,
+            std::io::ErrorKind::WriteZero => RimIOError::OutOfBounds,
+            std::io::ErrorKind::PermissionDenied => RimIOError::Other("Permission denied"),
+            std::io::ErrorKind::NotFound => RimIOError::Other("Not found"),
+            std::io::ErrorKind::AlreadyExists => RimIOError::Other("Already exists"),
+            std::io::ErrorKind::Unsupported => RimIOError::Unsupported,
+            _ => RimIOError::Other("I/O error"),
+        }
     }
 }
 

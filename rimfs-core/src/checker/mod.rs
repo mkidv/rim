@@ -25,18 +25,25 @@ pub trait FsChecker {
     #[must_use = "check result must be examined"]
     fn check_with(&mut self, opt: &Self::Options) -> FsCheckerResult<VerifyReport> {
         let mut rep = VerifyReport::default();
-        self.run_phase(opt, &mut rep, VerifyPhases::BOOT, Self::check_boot)?;
-        self.run_phase(opt, &mut rep, VerifyPhases::GEOMETRY, Self::check_geometry)?;
-        self.run_phase(opt, &mut rep, VerifyPhases::CHAIN, Self::check_chain)?;
-        self.run_phase(opt, &mut rep, VerifyPhases::ROOT, Self::check_root)?;
-        self.run_phase(
-            opt,
-            &mut rep,
-            VerifyPhases::CROSSREF,
-            Self::check_cross_reference,
-        )?;
-        self.run_phase(opt, &mut rep, VerifyPhases::CONTENT, Self::check_content)?;
-        self.run_phase(opt, &mut rep, VerifyPhases::CUSTOM, Self::check_custom)?;
+        let phases = [
+            (
+                VerifyPhases::BOOT,
+                Self::check_boot
+                    as fn(&mut Self, &Self::Options, &mut VerifyReport) -> FsCheckerResult<()>,
+            ),
+            (VerifyPhases::GEOMETRY, Self::check_geometry),
+            (VerifyPhases::CHAIN, Self::check_chain),
+            (VerifyPhases::ROOT, Self::check_root),
+            (VerifyPhases::CROSSREF, Self::check_cross_reference),
+            (VerifyPhases::CONTENT, Self::check_content),
+            (VerifyPhases::CUSTOM, Self::check_custom),
+        ];
+        for (phase, check_fn) in phases {
+            if opt.fail_fast() && rep.has_error() {
+                break;
+            }
+            self.run_phase(opt, &mut rep, phase, check_fn)?;
+        }
         Ok(rep)
     }
 
@@ -102,12 +109,81 @@ pub trait FsChecker {
     where
         F: Fn(&mut Self, &Self::Options, &mut VerifyReport) -> FsCheckerResult<()>,
     {
+        if opt.fail_fast() && rep.has_error() {
+            return Ok(());
+        }
         if opt.phases().contains(phase) {
             f(self, opt, rep)?;
-            if opt.fail_fast() && rep.has_error() {
-                return Ok(());
-            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checker::types::CoreVerifyOptions;
+
+    struct DummyChecker {
+        boot_ran: bool,
+        geom_ran: bool,
+    }
+
+    impl FsChecker for DummyChecker {
+        type Options = CoreVerifyOptions;
+
+        fn check_boot(
+            &mut self,
+            _opt: &Self::Options,
+            rep: &mut VerifyReport,
+        ) -> FsCheckerResult<()> {
+            self.boot_ran = true;
+            rep.push(Finding::err("BOOT_ERR", "boot error"));
+            Ok(())
+        }
+
+        fn check_geometry(
+            &mut self,
+            _opt: &Self::Options,
+            rep: &mut VerifyReport,
+        ) -> FsCheckerResult<()> {
+            self.geom_ran = true;
+            rep.push(Finding::err("GEOM_ERR", "geometry error"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_checker_fail_fast_stops_subsequent_phases() {
+        // Without fail_fast: both phases should run
+        let mut checker = DummyChecker {
+            boot_ran: false,
+            geom_ran: false,
+        };
+        let opt_no_ff = CoreVerifyOptions {
+            phases: VerifyPhases::ALL,
+            fail_fast: false,
+        };
+        let rep = checker.check_with(&opt_no_ff).unwrap();
+        assert!(checker.boot_ran);
+        assert!(checker.geom_ran);
+        assert_eq!(rep.count(Severity::Error), 2);
+
+        // With fail_fast: geometry phase must be skipped after boot error
+        let mut checker_ff = DummyChecker {
+            boot_ran: false,
+            geom_ran: false,
+        };
+        let opt_ff = CoreVerifyOptions {
+            phases: VerifyPhases::ALL,
+            fail_fast: true,
+        };
+        let rep_ff = checker_ff.check_with(&opt_ff).unwrap();
+        assert!(checker_ff.boot_ran);
+        assert!(
+            !checker_ff.geom_ran,
+            "Subsequent phase must NOT run when fail_fast is enabled"
+        );
+        assert_eq!(rep_ff.count(Severity::Error), 1);
     }
 }

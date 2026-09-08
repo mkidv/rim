@@ -45,7 +45,7 @@ impl UpcaseHandle {
         self.0.as_bytes()
     }
 
-    pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsResolverResult<Self> {
+    pub fn from_io<IO: RimRead + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsResolverResult<Self> {
         let len = meta.upcase_size_bytes as usize;
 
         if len == 0 {

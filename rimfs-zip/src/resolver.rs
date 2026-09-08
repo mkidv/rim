@@ -33,6 +33,7 @@ pub struct ZipResolver<'a, IO: RimRead + ?Sized> {
     _meta: &'a ZipMeta,
     entries: BTreeMap<String, ZipEntry>,
     dir_children: BTreeMap<String, Vec<String>>,
+    status: FsResolverResult<()>,
 }
 
 impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
@@ -42,9 +43,17 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
             _meta: meta,
             entries: BTreeMap::new(),
             dir_children: BTreeMap::new(),
+            status: Ok(()),
         };
-        let _ = resolver.load_central_directory();
+        resolver.status = resolver.load_central_directory();
         resolver
+    }
+
+    /// Try to construct a new ZipResolver, returning an error if central directory is invalid
+    pub fn try_new(io: &'a mut IO, meta: &'a ZipMeta) -> FsResolverResult<Self> {
+        let resolver = Self::new(io, meta);
+        resolver.status?;
+        Ok(resolver)
     }
 
     /// Locates and parses the End of Central Directory (EOCD) and Central Directory table.
@@ -328,6 +337,9 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
 
 impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
     fn exists(&mut self, path: &str) -> bool {
+        if self.status.is_err() {
+            return false;
+        }
         let clean = normalize_fs_path(path);
         if clean.is_empty() {
             return true;
@@ -336,6 +348,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
     }
 
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
+        self.status?;
         let clean = normalize_fs_path(path);
         if let Some(children) = self.dir_children.get(clean) {
             return Ok(children.clone());
@@ -347,6 +360,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
     }
 
     fn open_file<'c>(&'c mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'c>> {
+        self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
             .entries
@@ -374,8 +388,28 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
                 .map_err(|_| FsResolverError::Invalid("Compressed entry is too large"))?;
             let mut raw_bytes = vec![0u8; raw_len];
             self.io.read_at(data_offset, &mut raw_bytes)?;
-            let decompressed = miniz_oxide::inflate::decompress_to_vec(&raw_bytes)
-                .map_err(|_| FsResolverError::Invalid("Deflate decompression failed"))?;
+
+            let budget = usize::try_from(entry.uncompressed_size)
+                .map_err(|_| FsResolverError::Invalid("Uncompressed size too large"))?
+                .min(1024 * 1024 * 1024); // 1GB memory limit
+
+            let decompressed =
+                miniz_oxide::inflate::decompress_to_vec_with_limit(&raw_bytes, budget).map_err(
+                    |_| FsResolverError::Invalid("Deflate decompression failed or exceeded budget"),
+                )?;
+
+            if decompressed.len() as u64 != entry.uncompressed_size {
+                return Err(FsResolverError::Invalid("Decompressed size mismatch"));
+            }
+
+            if entry.crc32 != 0 {
+                let mut hasher = crc32fast::Hasher::new();
+                hasher.update(&decompressed);
+                if hasher.finalize() != entry.crc32 {
+                    return Err(FsResolverError::Invalid("CRC32 checksum mismatch"));
+                }
+            }
+
             return Ok(Box::new(VecRimIO::new(decompressed)));
         }
 
@@ -384,6 +418,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
     }
 
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
+        self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
             .entries
@@ -401,12 +436,52 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
         let mut raw_bytes = vec![0; raw_len];
         self.io.read_at(data_offset, &mut raw_bytes)?;
 
-        let target_str = core::str::from_utf8(&raw_bytes)
+        let target_bytes = if entry.compression_method == METHOD_STORE {
+            raw_bytes
+        } else if entry.compression_method == METHOD_DEFLATE {
+            #[cfg(feature = "deflate")]
+            {
+                let budget = usize::try_from(entry.uncompressed_size)
+                    .map_err(|_| FsResolverError::Invalid("Symlink target too large"))?
+                    .min(65536);
+                let decompressed =
+                    miniz_oxide::inflate::decompress_to_vec_with_limit(&raw_bytes, budget)
+                        .map_err(|_| {
+                            FsResolverError::Invalid(
+                                "Deflate decompression of symlink target failed",
+                            )
+                        })?;
+                if decompressed.len() as u64 != entry.uncompressed_size {
+                    return Err(FsResolverError::Invalid(
+                        "Decompressed symlink size mismatch",
+                    ));
+                }
+                if entry.crc32 != 0 {
+                    let mut hasher = crc32fast::Hasher::new();
+                    hasher.update(&decompressed);
+                    if hasher.finalize() != entry.crc32 {
+                        return Err(FsResolverError::Invalid("Symlink CRC32 checksum mismatch"));
+                    }
+                }
+                decompressed
+            }
+            #[cfg(not(feature = "deflate"))]
+            return Err(FsResolverError::Invalid(
+                "Deflate decompression not enabled",
+            ));
+        } else {
+            return Err(FsResolverError::Invalid(
+                "Unsupported compression method for symlink",
+            ));
+        };
+
+        let target_str = core::str::from_utf8(&target_bytes)
             .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 symlink target"))?;
         Ok(target_str.to_string())
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
+        self.status?;
         let clean = normalize_fs_path(path);
         if clean.is_empty() {
             return Ok(FileAttributes::new_dir());

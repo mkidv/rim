@@ -26,7 +26,7 @@ parentCID=ffffffff
 createType="monolithicFlat"
 
 # Extent description
-RW {sectors} FLAT "{filename}" 0
+RW {sectors} FLAT "{filename}" {offset}
 
 # The Disk Data Base
 #DDB
@@ -51,6 +51,7 @@ fn generate_descriptor(disk_size: u64, filename: &str, cid: u32) -> Vec<u8> {
         .replace("{cid}", &cid)
         .replace("{sectors}", &sectors.to_string())
         .replace("{filename}", filename)
+        .replace("{offset}", &DESCRIPTOR_SECTORS.to_string())
         .replace("{cylinders}", &cylinders.to_string());
 
     let mut bytes = descriptor.into_bytes();
@@ -95,6 +96,11 @@ pub fn unwrap_vmdk_io_with_progress<F: FnMut(u64, u64)>(
         return Err(RimImgError::InvalidHeader(
             "VMDK file too small (header truncated)",
         ));
+    }
+    let mut header = [0u8; 22];
+    src.read_at(0, &mut header)?;
+    if !header.starts_with(b"# Disk DescriptorFile") {
+        return Err(RimImgError::InvalidHeader("Invalid VMDK descriptor"));
     }
     let raw_len = vmdk_len - data_offset;
 

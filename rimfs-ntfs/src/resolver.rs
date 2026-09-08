@@ -29,6 +29,7 @@ pub struct NtfsResolver<'a, IO: RimRead + ?Sized> {
     upcase: UpcaseHandle,
     dir_cache: BTreeMap<u64, Vec<(String, u64, FileAttributes)>>,
     mft_cache: BTreeMap<u64, Vec<u8>>,
+    mft_runs: Vec<crate::view::runlist::NtfsRun>,
 }
 
 impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
@@ -40,6 +41,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             upcase,
             dir_cache: BTreeMap::new(),
             mft_cache: BTreeMap::new(),
+            mft_runs: Vec::new(),
         }
     }
 
@@ -48,7 +50,26 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
         if let Some(cached) = self.mft_cache.get(&record_number) {
             return Ok(cached.clone());
         }
-        let record = mft::read_record(self.io, self.meta, record_number)?;
+
+        // Bootstrap MFT runs from record 0 if not yet loaded
+        if self.mft_runs.is_empty()
+            && let Ok(rec0) = mft::read_record_direct(self.io, self.meta, 0)
+        {
+            if let Ok(runs) = mft::extract_mft_runs(&rec0) {
+                self.mft_runs = runs;
+            }
+            self.mft_cache.insert(0, rec0.clone());
+            if record_number == 0 {
+                return Ok(rec0);
+            }
+        }
+
+        let record = if !self.mft_runs.is_empty() {
+            mft::read_record_from_runs(self.io, self.meta, record_number, &self.mft_runs)?
+        } else {
+            mft::read_record_direct(self.io, self.meta, record_number)?
+        };
+
         self.mft_cache.insert(record_number, record.clone());
         Ok(record)
     }
@@ -100,6 +121,13 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
         &self,
         attr: AttrRef<'b>,
     ) -> FsResolverResult<&'b [u8]> {
+        if (attr.header.flags
+            & (AttributeFlags::COMPRESSED.bits() | AttributeFlags::ENCRYPTED.bits()))
+            != 0
+        {
+            return Err(FsResolverError::Unsupported);
+        }
+
         let view = attr
             .as_view()
             .map_err(|_| FsResolverError::Invalid("Malformed attribute"))?;
@@ -117,14 +145,24 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
         &mut self,
         attr: AttrRef,
     ) -> FsResolverResult<Vec<u8>> {
+        if (attr.header.flags
+            & (AttributeFlags::COMPRESSED.bits() | AttributeFlags::ENCRYPTED.bits()))
+            != 0
+        {
+            return Err(FsResolverError::Unsupported);
+        }
+
         let view = attr
             .as_view()
             .map_err(|_| FsResolverError::Invalid("Malformed attribute"))?;
 
-        let (runlist, data_size) = match view {
+        let (runlist, data_size, initialized_size) = match view {
             AttrView::NonResident {
-                runlist, data_size, ..
-            } => (runlist, data_size),
+                runlist,
+                data_size,
+                initialized_size,
+                ..
+            } => (runlist, data_size, initialized_size),
             AttrView::Resident { .. } => {
                 return Err(FsResolverError::Invalid("Attribute is resident"));
             }
@@ -147,37 +185,51 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                 .ok_or(FsResolverError::Invalid("Run length overflow"))?;
             let remaining = data_size - content.len() as u64;
             let read_bytes = run_bytes.min(remaining);
-            let read_len = usize::try_from(read_bytes)
-                .map_err(|_| FsResolverError::Invalid("Run is too large"))?;
+            let current_pos = content.len() as u64;
 
             match run.lcn {
                 Some(lcn) => {
-                    let offset = self.meta.lcn_to_offset(lcn);
-                    let end = offset
-                        .checked_add(read_bytes)
-                        .ok_or(FsResolverError::Invalid("Run offset overflow"))?;
-                    if total_len.is_some_and(|total| end > total) {
-                        return Err(FsResolverError::Invalid("Run exceeds volume bounds"));
+                    if current_pos >= initialized_size {
+                        let new_len = content.len() + read_bytes as usize;
+                        content.resize(new_len, 0);
+                    } else {
+                        let valid_in_run = (initialized_size - current_pos).min(read_bytes);
+                        let valid_len = usize::try_from(valid_in_run)
+                            .map_err(|_| FsResolverError::Invalid("Run is too large"))?;
+
+                        let offset = self.meta.lcn_to_offset(lcn);
+                        let end = offset
+                            .checked_add(valid_in_run)
+                            .ok_or(FsResolverError::Invalid("Run offset overflow"))?;
+                        if total_len.is_some_and(|total| end > total) {
+                            return Err(FsResolverError::Invalid("Run exceeds volume bounds"));
+                        }
+
+                        let mut buf = vec![0u8; valid_len];
+                        self.io
+                            .read_at(offset, &mut buf)
+                            .map_err(FsResolverError::IO)?;
+
+                        content.extend_from_slice(&buf);
+
+                        if read_bytes > valid_in_run {
+                            let zero_len = (read_bytes - valid_in_run) as usize;
+                            let new_len = content.len() + zero_len;
+                            content.resize(new_len, 0);
+                        }
                     }
-
-                    let mut buf = vec![0u8; read_len];
-                    self.io
-                        .read_at(offset, &mut buf)
-                        .map_err(FsResolverError::IO)?;
-
-                    content.extend_from_slice(&buf);
                 }
                 None => {
                     let new_len = content
                         .len()
-                        .checked_add(read_len)
+                        .checked_add(read_bytes as usize)
                         .ok_or(FsResolverError::Invalid("Sparse run length overflow"))?;
                     content.resize(new_len, 0);
                 }
             }
         }
 
-        content.truncate(data_len);
+        content.resize(data_len, 0);
         Ok(content)
     }
 
@@ -248,11 +300,42 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                 self.get_non_resident_attribute_content(attr)?
             };
 
+            // Look for $BITMAP for $I30 to filter active index blocks
+            let bitmap_bytes =
+                match self.find_attribute_named(&record, ATTR_BITMAP, Some("$I30"))? {
+                    Some(b_attr) => {
+                        if let Ok(res) = self.get_resident_attribute_content(b_attr) {
+                            Some(res.to_vec())
+                        } else {
+                            self.get_non_resident_attribute_content(b_attr).ok()
+                        }
+                    }
+                    None => match self.find_attribute(&record, ATTR_BITMAP)? {
+                        Some(b_attr) => {
+                            if let Ok(res) = self.get_resident_attribute_content(b_attr) {
+                                Some(res.to_vec())
+                            } else {
+                                self.get_non_resident_attribute_content(b_attr).ok()
+                            }
+                        }
+                        None => None,
+                    },
+                };
+
             // Iterate over blocks (Index Records)
             let block_size = self.meta.index_record_size as usize;
-            for chunk in content.chunks(block_size) {
+            for (block_idx, chunk) in content.chunks(block_size).enumerate() {
                 if chunk.len() < block_size {
                     continue;
+                }
+
+                // If bitmap is present, skip blocks whose bit is 0
+                if let Some(ref bm) = bitmap_bytes {
+                    let byte_idx = block_idx / 8;
+                    let bit_idx = block_idx % 8;
+                    if byte_idx >= bm.len() || (bm[byte_idx] & (1 << bit_idx)) == 0 {
+                        continue;
+                    }
                 }
 
                 // Verify "INDX" signature
@@ -642,5 +725,42 @@ mod tests {
         assert!(!read_attr.is_dir());
         assert!(read_attr.created.is_some());
         assert!(read_attr.modified.is_some());
+    }
+
+    #[test]
+    fn test_ntfs_compressed_attribute_rejection() {
+        use crate::flags::AttributeFlags;
+        use crate::types::AttributeHeader;
+        use zerocopy::IntoBytes;
+
+        let meta = NtfsMeta::new(10 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0u8; 10 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+
+        crate::formatter::NtfsFormatter::new(&mut io, &meta)
+            .format(true)
+            .unwrap();
+
+        let resolver = NtfsResolver::new(&mut io, &meta);
+        let fake_header = AttributeHeader {
+            attr_type: crate::constant::ATTR_DATA,
+            length: 24,
+            non_resident: 0,
+            name_length: 0,
+            name_offset: 0,
+            flags: AttributeFlags::COMPRESSED.bits(),
+            attr_id: 1,
+        };
+        let mut raw = vec![0u8; 64];
+        raw[..core::mem::size_of::<AttributeHeader>()].copy_from_slice(fake_header.as_bytes());
+
+        let attr_ref = crate::view::attr_view::AttrRef {
+            raw: &raw,
+            header: fake_header,
+        };
+        assert!(matches!(
+            resolver.get_resident_attribute_content(attr_ref),
+            Err(FsResolverError::Unsupported)
+        ));
     }
 }

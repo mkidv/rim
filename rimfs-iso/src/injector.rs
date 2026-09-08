@@ -586,13 +586,17 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
             if let Some(bios_lba) = plan.bios_boot_image_lba {
                 catalog[32] = 0x88; // Bootable
                 catalog[33] = 0x00; // No emulation
-                let sector_count = (plan.bios_boot_image_sectors * 4) as u16; // In 512B sectors
+                let sector_count = (plan.bios_boot_image_sectors * 4)
+                    .min(u16::MAX as u32)
+                    .max(1) as u16; // In 512B sectors
                 catalog[38..40].copy_from_slice(&sector_count.to_le_bytes());
                 catalog[40..44].copy_from_slice(&bios_lba.to_le_bytes());
             } else if let Some(efi_lba) = plan.efi_boot_image_lba {
                 catalog[32] = 0x88;
                 catalog[33] = 0x00;
-                let sector_count = (plan.efi_boot_image_sectors * 4) as u16;
+                let sector_count = (plan.efi_boot_image_sectors * 4)
+                    .min(u16::MAX as u32)
+                    .max(1) as u16;
                 catalog[38..40].copy_from_slice(&sector_count.to_le_bytes());
                 catalog[40..44].copy_from_slice(&efi_lba.to_le_bytes());
             }
@@ -608,7 +612,9 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                 // Section Entry (offset 96..128)
                 catalog[96] = 0x88; // Bootable
                 catalog[97] = 0x00; // No emulation
-                let sector_count = (plan.efi_boot_image_sectors * 4) as u16;
+                let sector_count = (plan.efi_boot_image_sectors * 4)
+                    .min(u16::MAX as u32)
+                    .max(1) as u16;
                 catalog[102..104].copy_from_slice(&sector_count.to_le_bytes());
                 catalog[104..108].copy_from_slice(&efi_lba.to_le_bytes());
             }
@@ -725,7 +731,9 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
     fn write_dir(&mut self, _name: &str, _attr: &FileAttributes) -> FsInjectorResult {
-        Ok(())
+        Err(FsInjectorError::Unsupported(
+            "ISO 9660 does not support individual incremental directory mutations; use inject_tree or inject_tree_from_resolver",
+        ))
     }
 
     fn write_file(
@@ -735,11 +743,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<IsoHandle> for IsoInjector<'a, IO> {
         _size: u64,
         _attr: &FileAttributes,
     ) -> FsInjectorResult {
-        Ok(())
+        Err(FsInjectorError::Unsupported(
+            "ISO 9660 does not support individual incremental file mutations; use inject_tree or inject_tree_from_resolver",
+        ))
     }
 
     fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
-        Ok(())
+        Err(FsInjectorError::Unsupported(
+            "ISO 9660 does not support individual incremental root mutations; use inject_tree or inject_tree_from_resolver",
+        ))
     }
 
     fn inject_tree(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {

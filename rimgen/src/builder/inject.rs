@@ -21,6 +21,7 @@ use rimfs::fat::*;
 use rimfs::ntfs::NtfsChecker;
 #[cfg(feature = "ntfs")]
 use rimfs::ntfs::{NtfsFormatter, NtfsHandle, NtfsInjector, NtfsMeta};
+use rimio::mem::BoundedRimIO;
 use rimio::{RimIO, RimWriteExt};
 use rimpart::gpt::GptEntry;
 #[cfg(feature = "std")]
@@ -163,7 +164,8 @@ pub fn format_inject_fat(
     let t0 = Instant::now();
 
     let span = PartitionSpan::from_entry(entry);
-    io.set_offset(span.offset);
+    io.set_offset(0);
+    let mut bounded = BoundedRimIO::new(io, span.offset, span.size_bytes);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
     let mut meta = match part.fs {
@@ -188,15 +190,15 @@ pub fn format_inject_fat(
         }
     }
 
-    let mut formatter = FatFormatter::new(io, &meta);
+    let mut formatter = FatFormatter::new(&mut bounded, &meta);
     formatter.format(false)?;
 
-    let mut injector = FatInjector::new(io, &meta)?;
+    let mut injector = FatInjector::new(&mut bounded, &meta)?;
     let counts = inject_partition_sources::<FatHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
-        let mut checker = FatChecker::new(io, &meta);
+        let mut checker = FatChecker::new(&mut bounded, &meta);
         let _ = checker.check_all()?;
     }
 
@@ -219,7 +221,8 @@ pub fn format_inject_exfat(
     let t0 = Instant::now();
 
     let span = PartitionSpan::from_entry(entry);
-    io.set_offset(span.offset);
+    io.set_offset(0);
+    let mut bounded = BoundedRimIO::new(io, span.offset, span.size_bytes);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
     let mut meta = ExFatMeta::new(span.size_bytes, Some(label))?;
@@ -237,15 +240,15 @@ pub fn format_inject_exfat(
         }
     }
 
-    let mut formatter = ExFatFormatter::new(io, &meta);
+    let mut formatter = ExFatFormatter::new(&mut bounded, &meta);
     formatter.format(false)?;
 
-    let mut injector = ExFatInjector::new(io, &meta)?;
+    let mut injector = ExFatInjector::new(&mut bounded, &meta)?;
     let counts = inject_partition_sources::<ExFatHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
-        let mut checker = ExFatChecker::new(io, &meta);
+        let mut checker = ExFatChecker::new(&mut bounded, &meta);
         let _ = checker.check_all()?;
     }
 
@@ -268,7 +271,8 @@ pub fn format_inject_ext4(
     let t0 = Instant::now();
 
     let span = PartitionSpan::from_entry(entry);
-    io.set_offset(span.offset);
+    io.set_offset(0);
+    let mut bounded = BoundedRimIO::new(io, span.offset, span.size_bytes);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
     let mut meta = ExtMeta::new(span.size_bytes, Some(label))?;
@@ -283,15 +287,15 @@ pub fn format_inject_ext4(
         }
     }
 
-    let mut formatter = ExtFormatter::new(io, &meta);
+    let mut formatter = ExtFormatter::new(&mut bounded, &meta);
     formatter.format(false)?;
 
-    let mut injector = ExtInjector::new(io, &meta)?;
+    let mut injector = ExtInjector::new(&mut bounded, &meta)?;
     let counts = inject_partition_sources::<ExtHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
-        let mut checker = ExtChecker::new(io, &meta);
+        let mut checker = ExtChecker::new(&mut bounded, &meta);
         let _ = checker.check_all()?;
     }
 
@@ -314,7 +318,8 @@ pub fn format_inject_ntfs(
     let t0 = Instant::now();
 
     let span = PartitionSpan::from_entry(entry);
-    io.set_offset(span.offset);
+    io.set_offset(0);
+    let mut bounded = BoundedRimIO::new(io, span.offset, span.size_bytes);
 
     let label = part.label.as_deref().unwrap_or(&part.name);
     let mut meta = NtfsMeta::new(span.size_bytes, Some(label))?;
@@ -335,15 +340,15 @@ pub fn format_inject_ntfs(
         }
     }
 
-    let mut formatter = NtfsFormatter::new(io, &meta);
+    let mut formatter = NtfsFormatter::new(&mut bounded, &meta);
     formatter.format(false)?;
 
-    let mut injector = NtfsInjector::new(io, &meta)?;
+    let mut injector = NtfsInjector::new(&mut bounded, &meta)?;
     let counts = inject_partition_sources::<NtfsHandle, _>(&mut injector, part)?;
 
     #[cfg(feature = "std")]
     {
-        let mut checker = NtfsChecker::new(io, &meta);
+        let mut checker = NtfsChecker::new(&mut bounded, &meta);
         let _ = checker.check_all()?;
     }
 
@@ -369,7 +374,8 @@ pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
     let max_size =
         usize::try_from(span.size_bytes).map_err(|_| GenError::Other("partition too large"))?;
 
-    io.set_offset(span.offset);
+    io.set_offset(0);
+    let mut bounded = BoundedRimIO::new(io, span.offset, span.size_bytes);
 
     let mut files_written = 0;
 
@@ -385,7 +391,7 @@ pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
         }
 
         let mut scratch = [0u8; 64 * 1024];
-        rimio::copy_range(src.as_mut(), io, 0, 0, raw_size, &mut scratch)?;
+        rimio::copy_range(src.as_mut(), &mut bounded, 0, 0, raw_size, &mut scratch)?;
 
         on_event(BuildEvent::PayloadProgress {
             current_bytes: raw_size,
@@ -394,7 +400,7 @@ pub fn format_raw<F: for<'a> FnMut(BuildEvent<'a>)>(
 
         files_written = 1;
     } else {
-        io.zero_fill(0, max_size)?;
+        bounded.zero_fill(0, max_size)?;
     }
 
     #[cfg(feature = "std")]

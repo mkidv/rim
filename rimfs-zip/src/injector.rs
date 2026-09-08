@@ -93,20 +93,30 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
 
         let name_bytes = name.as_bytes();
         header[26..28].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-        header[28..30].copy_from_slice(&(extra.len() as u16).to_le_bytes());
+
+        let mut local_extra = extra.to_vec();
+        if comp_size >= 0xFFFF_FFFF || uncomp_size >= 0xFFFF_FFFF {
+            local_extra.extend_from_slice(&EXTRA_ZIP64_ID.to_le_bytes());
+            let zip64_len: u16 = 16;
+            local_extra.extend_from_slice(&zip64_len.to_le_bytes());
+            local_extra.extend_from_slice(&uncomp_size.to_le_bytes());
+            local_extra.extend_from_slice(&comp_size.to_le_bytes());
+        }
+        header[28..30].copy_from_slice(&(local_extra.len() as u16).to_le_bytes());
 
         self.io.write_at(lfh_offset, &header)?;
         self.io
             .write_at(lfh_offset + LOCAL_FILE_HEADER_FIXED_SIZE as u64, name_bytes)?;
-        if !extra.is_empty() {
+        if !local_extra.is_empty() {
             self.io.write_at(
                 lfh_offset + LOCAL_FILE_HEADER_FIXED_SIZE as u64 + name_bytes.len() as u64,
-                extra,
+                &local_extra,
             )?;
         }
 
-        self.current_offset +=
-            LOCAL_FILE_HEADER_FIXED_SIZE as u64 + name_bytes.len() as u64 + extra.len() as u64;
+        self.current_offset += LOCAL_FILE_HEADER_FIXED_SIZE as u64
+            + name_bytes.len() as u64
+            + local_extra.len() as u64;
         Ok(lfh_offset)
     }
 
@@ -132,6 +142,33 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
         self.io.write_at(lfh_offset + 18, &comp_32.to_le_bytes())?;
         self.io
             .write_at(lfh_offset + 22, &uncomp_32.to_le_bytes())?;
+
+        if comp_size >= 0xFFFF_FFFF || uncomp_size >= 0xFFFF_FFFF {
+            let mut lengths = [0u8; 4];
+            self.io.read_at(lfh_offset + 26, &mut lengths)?;
+            let name_len = u16::from_le_bytes([lengths[0], lengths[1]]) as u64;
+            let extra_len = u16::from_le_bytes([lengths[2], lengths[3]]) as usize;
+            let extra_offset = lfh_offset + LOCAL_FILE_HEADER_FIXED_SIZE as u64 + name_len;
+
+            let mut extra_buf = alloc::vec![0u8; extra_len];
+            self.io.read_at(extra_offset, &mut extra_buf)?;
+
+            let mut offset = 0;
+            while offset + 4 <= extra_buf.len() {
+                let id = u16::from_le_bytes([extra_buf[offset], extra_buf[offset + 1]]);
+                let sz =
+                    u16::from_le_bytes([extra_buf[offset + 2], extra_buf[offset + 3]]) as usize;
+                if id == EXTRA_ZIP64_ID && sz >= 16 && offset + 4 + sz <= extra_buf.len() {
+                    let field_data_offset = extra_offset + (offset + 4) as u64;
+                    self.io
+                        .write_at(field_data_offset, &uncomp_size.to_le_bytes())?;
+                    self.io
+                        .write_at(field_data_offset + 8, &comp_size.to_le_bytes())?;
+                    break;
+                }
+                offset += 4 + sz;
+            }
+        }
         Ok(())
     }
 }

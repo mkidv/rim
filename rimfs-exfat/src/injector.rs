@@ -93,10 +93,32 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, IO> {
     fn set_root_context(&mut self, _: &FileAttributes) -> FsInjectorResult {
-        let offset = self.meta.unit_offset(self.meta.root_unit());
+        let root = self.meta.root_unit();
+        let mut driver = FatDriver::new(self.meta);
+        let mut clusters = Vec::new();
+        let mut cur = root;
+        while cur >= 2 && cur <= self.meta.last_data_unit() && !self.meta.is_eoc(cur) {
+            clusters.push(cur);
+            if clusters.len() >= 100_000 {
+                break;
+            }
+            match driver.get(self.io, cur) {
+                Ok(next) => cur = next,
+                Err(_) => break,
+            }
+        }
+        let chain_clusters = if clusters.is_empty() {
+            vec![root]
+        } else {
+            clusters
+        };
 
-        let mut buf = vec![0u8; self.meta.unit_size()];
-        self.io.read_at(offset, &mut buf)?;
+        let cs = self.meta.unit_size();
+        let mut buf = vec![0u8; chain_clusters.len() * cs];
+        for (i, &c) in chain_clusters.iter().enumerate() {
+            let offset = self.meta.unit_offset(c);
+            self.io.read_at(offset, &mut buf[i * cs..(i + 1) * cs])?;
+        }
 
         // Find the last non-empty entry to determine where to start adding new entries
         // Keep existing entries (Volume Label, Allocation Bitmap, Upcase Table, etc.)
@@ -108,7 +130,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
         // Truncate to remove the end-of-directory marker and any trailing empty entries
         buf.truncate(eod_pos * 32);
 
-        let handle = ExFatHandle::new(self.meta.root_unit());
+        let handle = ExFatHandle::from_chain(RunList::from_units(&chain_clusters));
         self.stack.push(FsContext::new(handle, buf));
         self.pending_dirs.push(None);
         Ok(())
@@ -139,22 +161,16 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
             ExFatEntries::file(name, 0, 0, attr, &self.upcase)
         } else {
             let cs = self.meta.unit_size();
-            let need = (size as usize).div_ceil(cs);
+            let need = size.div_ceil(cs as u64) as usize;
             let handle: ExFatHandle = self.allocator.allocate(self.io, need)?;
 
             use crate::core::utils::stream_copy::write_stream_to_run_list;
             write_stream_to_run_list(self.io, self.meta, source, &handle.cluster_chain, size)?;
 
             if handle.cluster_chain.is_contiguous() {
-                ExFatEntries::file_contiguous(
-                    name,
-                    handle.cluster_id,
-                    size as u32,
-                    attr,
-                    &self.upcase,
-                )
+                ExFatEntries::file_contiguous(name, handle.cluster_id, size, attr, &self.upcase)
             } else {
-                ExFatEntries::file(name, handle.cluster_id, size as u32, attr, &self.upcase)
+                ExFatEntries::file(name, handle.cluster_id, size, attr, &self.upcase)
             }
         }
         .map_err(FsResolverError::Parsing)?;

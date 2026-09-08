@@ -16,7 +16,7 @@ pub mod stats;
 pub mod utils;
 
 // Backend modules
-mod mem;
+pub mod mem;
 #[cfg(feature = "alloc")]
 mod sparse;
 
@@ -282,6 +282,12 @@ pub trait RimReadExt: RimRead {
     /// Reads `buf.len()` bytes from `offset` in chunks of `chunk_size` or less.
     #[inline(always)]
     fn read_in_chunks(&mut self, offset: u64, buf: &mut [u8], chunk_size: usize) -> RimIOResult {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if chunk_size == 0 {
+            return Err(RimIOError::InvalidBuffer);
+        }
         let mut remaining = buf.len();
         let mut off = offset;
         let mut pos = 0;
@@ -367,6 +373,12 @@ pub trait RimWriteExt: RimWrite {
     /// Writes `buf.len()` bytes at `offset` in chunks of `chunk_size` or less.
     #[inline(always)]
     fn write_in_chunks(&mut self, offset: u64, buf: &[u8], chunk_size: usize) -> RimIOResult {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if chunk_size == 0 {
+            return Err(RimIOError::InvalidBuffer);
+        }
         let mut remaining = buf.len();
         let mut off = offset;
         let mut pos = 0;

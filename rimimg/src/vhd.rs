@@ -82,9 +82,12 @@ impl VhdFooter {
         !sum
     }
 
-    /// Validates the cookie and checksum.
+    /// Validates the cookie, checksum, and disk type (fixed disk = 2).
     pub fn validate(&self) -> bool {
         if &self.cookie != b"conectix" {
+            return false;
+        }
+        if self.disk_type.get() != 2 {
             return false;
         }
         let mut tmp = *self;
@@ -146,8 +149,14 @@ pub fn unwrap_vhd_io_with_progress<F: FnMut(u64, u64)>(
     }
 
     let footer: VhdFooter = src.read_struct(vhd_len - VHD_FOOTER_SIZE)?;
-    if !footer.validate() {
-        return Err(RimImgError::Corrupted("Invalid VHD footer"));
+    if &footer.cookie != b"conectix" {
+        return Err(RimImgError::InvalidHeader("Invalid VHD cookie"));
+    }
+    if footer.compute_checksum() != footer.checksum.get() {
+        return Err(RimImgError::Corrupted("Invalid VHD footer checksum"));
+    }
+    if footer.disk_type.get() != 2 {
+        return Err(RimImgError::UnsupportedFormat);
     }
 
     let raw_len = vhd_len - VHD_FOOTER_SIZE;

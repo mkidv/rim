@@ -36,8 +36,15 @@ fn is_valid_sfn_char(b: u8) -> bool {
 
 /// Suggest a short 8.3 name from input, return (short_name, is_lfn)
 pub fn to_short_name(name: &str) -> ([u8; 11], bool) {
-    let mut raw = [b' '; 11];
+    to_short_name_unique(name, |_| false)
+}
 
+/// Generate a short 8.3 name from input with numeric tail (~1, ~2, etc.) collision avoidance.
+/// Returns (short_name, is_lfn).
+pub fn to_short_name_unique<F>(name: &str, is_taken: F) -> ([u8; 11], bool)
+where
+    F: Fn(&[u8; 11]) -> bool,
+{
     // Split extension (on the right)
     let parts: Vec<&str> = name.rsplitn(2, '.').collect();
     let (base, ext) = if parts.len() == 2 {
@@ -46,11 +53,6 @@ pub fn to_short_name(name: &str) -> ([u8; 11], bool) {
         (name, "")
     };
 
-    // Strict LFN conditions:
-    // - length > 8/3
-    // - presence of space
-    // - presence of non-ASCII char
-    // - presence of ASCII char forbidden in SFN
     let base_bytes = base.as_bytes();
     let ext_bytes = ext.as_bytes();
 
@@ -59,41 +61,99 @@ pub fn to_short_name(name: &str) -> ([u8; 11], bool) {
     let has_non_ascii =
         base.chars().any(|c| c as u32 > 0x7F) || ext.chars().any(|c| c as u32 > 0x7F);
 
-    // We upper-case ASCII and replace invalid characters with '_'
+    let mut clean_base: Vec<u8> = Vec::with_capacity(base_bytes.len());
     let mut base_ok = true;
-    for (i, ch) in base_bytes.iter().take(8).enumerate() {
+    for &ch in base_bytes {
+        if ch == b'.' || ch == b' ' {
+            base_ok = false;
+            continue;
+        }
         let up = ch.to_ascii_uppercase();
-        let out = if is_valid_sfn_char(up) {
-            up
+        if is_valid_sfn_char(up) {
+            clean_base.push(up);
         } else {
             base_ok = false;
-            b'_'
-        };
-        raw[i] = out;
+            clean_base.push(b'_');
+        }
     }
+
+    let mut clean_ext: Vec<u8> = Vec::with_capacity(ext_bytes.len());
     let mut ext_ok = true;
-    for (i, ch) in ext_bytes.iter().take(3).enumerate() {
+    for &ch in ext_bytes {
+        if ch == b' ' {
+            ext_ok = false;
+            continue;
+        }
         let up = ch.to_ascii_uppercase();
-        let out = if is_valid_sfn_char(up) {
-            up
+        if is_valid_sfn_char(up) {
+            clean_ext.push(up);
         } else {
             ext_ok = false;
-            b'_'
-        };
-        raw[8 + i] = out;
+            clean_ext.push(b'_');
+        }
     }
 
-    // If all was empty → no valid SFN name
-    let all_spaces = !raw.iter().any(|&b| b != b' ');
-    // LFN required if any of the following conditions are true
-    let is_lfn = too_long || has_space || has_non_ascii || !base_ok || !ext_ok || all_spaces;
+    let all_spaces = clean_base.is_empty();
+    let needs_lfn = too_long || has_space || has_non_ascii || !base_ok || !ext_ok || all_spaces;
 
-    // Rule 0xE5 => 0x05 (if the 1st byte of SFN is 0xE5)
+    // If it's already a valid SFN, check if the clean name is taken
+    if !needs_lfn {
+        let mut raw = [b' '; 11];
+        for (i, &b) in clean_base.iter().take(8).enumerate() {
+            raw[i] = b;
+        }
+        for (i, &b) in clean_ext.iter().take(3).enumerate() {
+            raw[8 + i] = b;
+        }
+        if raw[0] == 0xE5 {
+            raw[0] = 0x05;
+        }
+        if !is_taken(&raw) {
+            return (raw, false);
+        }
+    }
+
+    // Generate numeric tail (~1, ~2, ...)
+    let mut ext_part = [b' '; 3];
+    for (i, &b) in clean_ext.iter().take(3).enumerate() {
+        ext_part[i] = b;
+    }
+
+    // Try suffixes ~1 through ~9999
+    for i in 1..=9999 {
+        let mut raw = [b' '; 11];
+        let suffix = format!("~{}", i);
+        let suffix_bytes = suffix.as_bytes();
+        let max_base_len = 8usize.saturating_sub(suffix_bytes.len());
+        let base_len = clean_base.len().min(max_base_len);
+
+        for (j, &b) in clean_base.iter().take(base_len).enumerate() {
+            raw[j] = b;
+        }
+        for (j, &b) in suffix_bytes.iter().enumerate() {
+            raw[base_len + j] = b;
+        }
+        raw[8..11].copy_from_slice(&ext_part);
+
+        if raw[0] == 0xE5 {
+            raw[0] = 0x05;
+        }
+
+        if !is_taken(&raw) {
+            return (raw, true);
+        }
+    }
+
+    // Fallback: simple ~1
+    let mut raw = [b' '; 11];
+    let base_len = clean_base.len().min(6);
+    raw[..base_len].copy_from_slice(&clean_base[..base_len]);
+    raw[base_len..base_len + 2].copy_from_slice(b"~1");
+    raw[8..11].copy_from_slice(&ext_part);
     if raw[0] == 0xE5 {
         raw[0] = 0x05;
     }
-
-    (raw, is_lfn)
+    (raw, true)
 }
 
 /// Decode SFN (8.3) entry to a filename

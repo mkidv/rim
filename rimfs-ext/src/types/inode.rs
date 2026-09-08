@@ -153,9 +153,13 @@ impl ExtInode {
         self.i_block[12..24].copy_from_slice(extent.as_bytes());
     }
 
-    /// Set multiple extents (up to 4)
+    /// Set multiple extents (up to 4 inline in inode body)
     pub fn set_extents(&mut self, extents: &[ExtExtent]) {
-        let count = extents.len().min(4) as u16;
+        assert!(
+            extents.len() <= 4,
+            "ExtInode::set_extents: cannot store more than 4 extents inline in inode body; use extent index tree"
+        );
+        let count = extents.len() as u16;
 
         let header = ExtExtentHeader {
             eh_entries: count,
@@ -166,7 +170,7 @@ impl ExtInode {
         self.i_block[0..12].copy_from_slice(header.as_bytes());
 
         // Write extents
-        for (i, extent) in extents.iter().take(4).enumerate() {
+        for (i, extent) in extents.iter().enumerate() {
             let offset = 12 + i * 12;
             self.i_block[offset..offset + 12].copy_from_slice(extent.as_bytes());
         }

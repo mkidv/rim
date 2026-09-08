@@ -42,6 +42,10 @@ where
         src_offset += to_copy;
     }
 
+    if remaining > 0 {
+        return Err(RimIOError::OutOfBounds);
+    }
+
     Ok(())
 }
 

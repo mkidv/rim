@@ -54,15 +54,22 @@ impl ExtExtent {
         ((self.ee_start_hi as u64) << 32) | (self.ee_start_lo as u64)
     }
 
-    /// Check if extent is uninitialized / preallocated (bit 15 of ee_len is set)
+    /// Check if extent is uninitialized / preallocated (ee_len > 32768)
     #[inline(always)]
     pub fn is_uninit(&self) -> bool {
-        (self.ee_len & 0x8000) != 0 || self.ee_len > 32768
+        self.ee_len > 32768
     }
 
-    /// Get extent block length (clearing uninitialized bit if present)
+    /// Get extent block length.
+    /// Per ext4 spec: if ee_len <= 32768, length is ee_len.
+    /// If ee_len > 32768, extent is uninitialized and length is ee_len - 32768.
+    #[inline(always)]
     pub fn len(&self) -> u16 {
-        self.ee_len & 0x7FFF
+        if self.ee_len > 32768 {
+            self.ee_len - 32768
+        } else {
+            self.ee_len
+        }
     }
 
     /// Check if extent length is 0
@@ -108,5 +115,28 @@ impl ExtExtentIndex {
     #[inline(always)]
     pub fn leaf_physical_block(&self) -> u64 {
         ((self.ei_leaf_hi as u64) << 32) | (self.ei_leaf_lo as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extent_init_vs_uninit_boundary() {
+        // Initialized extent with exactly 32768 blocks (maximum initialized extent length)
+        let ext_32768 = ExtExtent::new(0, 100, 32768);
+        assert!(!ext_32768.is_uninit());
+        assert_eq!(ext_32768.len(), 32768);
+
+        // Standard small initialized extent
+        let ext_small = ExtExtent::new(0, 100, 10);
+        assert!(!ext_small.is_uninit());
+        assert_eq!(ext_small.len(), 10);
+
+        // Uninitialized extent: ee_len = 32768 + 2 = 32770
+        let ext_uninit = ExtExtent::new(0, 100, 32770);
+        assert!(ext_uninit.is_uninit());
+        assert_eq!(ext_uninit.len(), 2);
     }
 }

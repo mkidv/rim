@@ -165,13 +165,31 @@ impl FatMeta {
     pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
         let vbr: FatVbr = io.read_struct(0)?;
 
+        if vbr.signature != FAT_SIGNATURE {
+            return Err(FsError::Invalid("Invalid FAT VBR signature"));
+        }
+
+        let jmp = vbr.bpb.jump_boot;
+        if !((jmp[0] == 0xEB && jmp[2] == 0x90) || jmp[0] == 0xE9) {
+            return Err(FsError::Invalid("Invalid FAT boot jump instruction"));
+        }
+
         let bytes_per_sector = vbr.bpb.bytes_per_sector;
-        if bytes_per_sector == 0 {
-            return Err(FsError::Invalid("Invalid VBR: bytes_per_sector is 0"));
+        if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
+            return Err(FsError::Invalid("Invalid FAT bytes_per_sector"));
         }
         let sectors_per_cluster = vbr.bpb.sectors_per_cluster as u32;
+        if !sectors_per_cluster.is_power_of_two() || sectors_per_cluster > 128 {
+            return Err(FsError::Invalid("Invalid FAT sectors_per_cluster"));
+        }
         let reserved_sectors = vbr.bpb.reserved_sectors as u32;
+        if reserved_sectors == 0 {
+            return Err(FsError::Invalid("Invalid FAT reserved_sectors"));
+        }
         let num_fats = vbr.bpb.num_fats;
+        if num_fats == 0 || num_fats > 4 {
+            return Err(FsError::Invalid("Invalid FAT num_fats"));
+        }
         let root_entry_count = vbr.bpb.root_entry_count;
 
         let total_sectors = if vbr.bpb.total_sectors_16 != 0 {
@@ -179,6 +197,9 @@ impl FatMeta {
         } else {
             vbr.bpb.total_sectors_32 as u64
         };
+        if total_sectors == 0 {
+            return Err(FsError::Invalid("Invalid FAT total_sectors"));
+        }
 
         let fat_size_sectors = vbr.fat_size_sectors();
 
@@ -190,6 +211,9 @@ impl FatMeta {
             .saturating_sub(root_dir_sectors as u64);
 
         let cluster_count = (data_sectors / sectors_per_cluster as u64) as u32;
+        if cluster_count == 0 {
+            return Err(FsError::Invalid("Invalid FAT: zero data clusters"));
+        }
 
         // Microsoft FAT bit depth formula
         // Note: We prioritize the structural indicator (fat_size_16 == 0 => FAT32)
@@ -213,6 +237,9 @@ impl FatMeta {
 
         let (volume_id, volume_label, root_cluster) = if vbr.is_fat32() {
             let e = vbr.f32();
+            if e.root_cluster < FAT_FIRST_CLUSTER {
+                return Err(FsError::Invalid("Invalid FAT32 root_cluster"));
+            }
             (e.volume_id, e.volume_label, e.root_cluster)
         } else {
             let e = vbr.f16();
@@ -409,7 +436,7 @@ impl FsMeta<u32> for FatMeta {
                     * self.bytes_per_sector as u64)
         } else {
             self.cluster_heap_offset_bytes
-                + ((cluster - Self::FIRST_CLUSTER) as u64 * self.unit_size() as u64)
+                + (cluster.saturating_sub(Self::FIRST_CLUSTER) as u64 * self.unit_size() as u64)
         }
     }
 

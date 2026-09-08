@@ -37,20 +37,44 @@ struct WasmState {
 
 static STATE: core::sync::atomic::AtomicPtr<WasmState> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static STATE_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-fn get_state() -> &'static mut WasmState {
-    let ptr = STATE.load(core::sync::atomic::Ordering::Acquire);
+fn with_state<R>(f: impl FnOnce(&mut WasmState) -> R) -> R {
+    while STATE_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    struct UnlockGuard;
+    impl Drop for UnlockGuard {
+        fn drop(&mut self) {
+            STATE_LOCK.store(false, core::sync::atomic::Ordering::Release);
+        }
+    }
+    let _guard = UnlockGuard;
+
+    let mut ptr = STATE.load(core::sync::atomic::Ordering::Acquire);
     if ptr.is_null() {
-        let new_state = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(WasmState {
+        let boxed = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(WasmState {
             image: Vec::new(),
             report: Vec::new(),
             error: Vec::new(),
         }));
-        STATE.store(new_state, core::sync::atomic::Ordering::Release);
-        unsafe { &mut *new_state }
-    } else {
-        unsafe { &mut *ptr }
+        STATE.store(boxed, core::sync::atomic::Ordering::Release);
+        ptr = boxed;
     }
+
+    // SAFETY: The spinlock guarantees exclusive access to the dereferenced WasmState
+    // for the entire duration of the closure `f`.
+    let state = unsafe { &mut *ptr };
+    f(state)
 }
 
 /// Performs the complete in-memory synthesis and internal validation.
@@ -235,21 +259,23 @@ pub extern "C" fn wasm_synth_version() -> u32 {
 /// Triggers fast demo image synthesis. Returns 0 on success, -1 on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_build_demo_image() -> i32 {
-    let state = get_state();
-    state.error.clear();
-    match synthesize_demo_image() {
-        Ok((image, report)) => {
-            state.image = image;
-            state.report = report.into_bytes();
-            0
+    let result = synthesize_demo_image();
+    with_state(|state| {
+        state.error.clear();
+        match result {
+            Ok((image, report)) => {
+                state.image = image;
+                state.report = report.into_bytes();
+                0
+            }
+            Err(err) => {
+                state.image.clear();
+                state.report.clear();
+                state.error = err.into_bytes();
+                -1
+            }
         }
-        Err(err) => {
-            state.image.clear();
-            state.report.clear();
-            state.error = err.into_bytes();
-            -1
-        }
-    }
+    })
 }
 
 /// Triggers bootable Alpine Linux disk synthesis from payload TAR bytes.
@@ -260,28 +286,30 @@ pub extern "C" fn wasm_build_demo_image() -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_build_alpine_from_tar(tar_ptr: *const u8, tar_len: usize) -> i32 {
     if tar_ptr.is_null() || tar_len == 0 {
-        let state = get_state();
-        state.error = "Invalid TAR payload pointer or length".as_bytes().to_vec();
+        with_state(|state| {
+            state.error = "Invalid TAR payload pointer or length".as_bytes().to_vec();
+        });
         return -1;
     }
 
     let tar_slice = unsafe { core::slice::from_raw_parts(tar_ptr, tar_len) };
-    let state = get_state();
-    state.error.clear();
-
-    match synthesize_alpine_image(tar_slice) {
-        Ok((image, report)) => {
-            state.image = image;
-            state.report = report.into_bytes();
-            0
+    let result = synthesize_alpine_image(tar_slice);
+    with_state(|state| {
+        state.error.clear();
+        match result {
+            Ok((image, report)) => {
+                state.image = image;
+                state.report = report.into_bytes();
+                0
+            }
+            Err(err) => {
+                state.image.clear();
+                state.report.clear();
+                state.error = err.into_bytes();
+                -1
+            }
         }
-        Err(err) => {
-            state.image.clear();
-            state.report.clear();
-            state.error = err.into_bytes();
-            -1
-        }
-    }
+    })
 }
 
 /// Triggers bare-metal RIM.efi boot disk synthesis from payload TAR bytes.
@@ -292,28 +320,30 @@ pub unsafe extern "C" fn wasm_build_alpine_from_tar(tar_ptr: *const u8, tar_len:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_build_uefi_from_tar(tar_ptr: *const u8, tar_len: usize) -> i32 {
     if tar_ptr.is_null() || tar_len == 0 {
-        let state = get_state();
-        state.error = "Invalid TAR payload pointer or length".as_bytes().to_vec();
+        with_state(|state| {
+            state.error = "Invalid TAR payload pointer or length".as_bytes().to_vec();
+        });
         return -1;
     }
 
     let tar_slice = unsafe { core::slice::from_raw_parts(tar_ptr, tar_len) };
-    let state = get_state();
-    state.error.clear();
-
-    match synthesize_uefi_image(tar_slice) {
-        Ok((image, report)) => {
-            state.image = image;
-            state.report = report.into_bytes();
-            0
+    let result = synthesize_uefi_image(tar_slice);
+    with_state(|state| {
+        state.error.clear();
+        match result {
+            Ok((image, report)) => {
+                state.image = image;
+                state.report = report.into_bytes();
+                0
+            }
+            Err(err) => {
+                state.image.clear();
+                state.report.clear();
+                state.error = err.into_bytes();
+                -1
+            }
         }
-        Err(err) => {
-            state.image.clear();
-            state.report.clear();
-            state.error = err.into_bytes();
-            -1
-        }
-    }
+    })
 }
 
 /// Inspects a raw disk image from WASM memory. Returns 0 on success, -1 on failure.
@@ -324,78 +354,75 @@ pub unsafe extern "C" fn wasm_build_uefi_from_tar(tar_ptr: *const u8, tar_len: u
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_inspect_image(image_ptr: *const u8, image_len: usize) -> i32 {
     if image_ptr.is_null() || image_len == 0 {
-        let state = get_state();
-        state.error = "Invalid image pointer or length".as_bytes().to_vec();
+        with_state(|state| {
+            state.error = "Invalid image pointer or length".as_bytes().to_vec();
+        });
         return -1;
     }
 
     let image_slice = unsafe { core::slice::from_raw_parts(image_ptr, image_len) };
-    let state = get_state();
-    state.error.clear();
-
-    match inspect_disk_image(image_slice) {
-        Ok(report) => {
-            state.report = report.into_bytes();
-            0
+    let result = inspect_disk_image(image_slice);
+    with_state(|state| {
+        state.error.clear();
+        match result {
+            Ok(report) => {
+                state.report = report.into_bytes();
+                0
+            }
+            Err(err) => {
+                state.report.clear();
+                state.error = err.into_bytes();
+                -1
+            }
         }
-        Err(err) => {
-            state.report.clear();
-            state.error = err.into_bytes();
-            -1
-        }
-    }
+    })
 }
 
 /// Returns a pointer to the generated image buffer in WASM linear memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_image_ptr() -> *const u8 {
-    let state = get_state();
-    state.image.as_ptr()
+    with_state(|state| state.image.as_ptr())
 }
 
 /// Returns the size in bytes of the generated image buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_image_len() -> usize {
-    let state = get_state();
-    state.image.len()
+    with_state(|state| state.image.len())
 }
 
 /// Returns a pointer to the JSON summary report in WASM linear memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_report_ptr() -> *const u8 {
-    let state = get_state();
-    state.report.as_ptr()
+    with_state(|state| state.report.as_ptr())
 }
 
 /// Returns the length in bytes of the JSON summary report.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_report_len() -> usize {
-    let state = get_state();
-    state.report.len()
+    with_state(|state| state.report.len())
 }
 
 /// Returns a pointer to the error message string (if build failed).
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_error_ptr() -> *const u8 {
-    let state = get_state();
-    state.error.as_ptr()
+    with_state(|state| state.error.as_ptr())
 }
 
 /// Returns the length of the error message string.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_get_error_len() -> usize {
-    let state = get_state();
-    state.error.len()
+    with_state(|state| state.error.len())
 }
 
 /// Releases memory allocated for the image and report buffers.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_free_buffers() {
-    let state = get_state();
-    state.image.clear();
-    state.image.shrink_to_fit();
-    state.report.clear();
-    state.report.shrink_to_fit();
-    state.error.clear();
-    state.error.shrink_to_fit();
+    with_state(|state| {
+        state.image.clear();
+        state.image.shrink_to_fit();
+        state.report.clear();
+        state.report.shrink_to_fit();
+        state.error.clear();
+        state.error.shrink_to_fit();
+    });
 }

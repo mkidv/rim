@@ -202,19 +202,21 @@ impl<S: RimRead> RimRead for ExtentRimRead<S> {
             return Err(RimIOError::OutOfBounds);
         }
 
-        // Fast path: single contiguous extent covering the entire file
+        // Fast path: single extent covering the requested range
         if self.extents.len() == 1 {
             let ext = &self.extents[0];
-            match ext.source_offset {
-                Some(source_base) => {
-                    let source_pos = source_base
-                        .checked_add(offset.saturating_sub(ext.logical_offset))
-                        .ok_or(RimIOError::OutOfBounds)?;
-                    return self.source.read_at(source_pos, buf);
-                }
-                None => {
-                    buf.fill(0);
-                    return Ok(());
+            if offset >= ext.logical_offset && end <= ext.logical_end() {
+                match ext.source_offset {
+                    Some(source_base) => {
+                        let source_pos = source_base
+                            .checked_add(offset - ext.logical_offset)
+                            .ok_or(RimIOError::OutOfBounds)?;
+                        return self.source.read_at(source_pos, buf);
+                    }
+                    None => {
+                        buf.fill(0);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -334,5 +336,46 @@ mod tests {
         assert_eq!(ext[0], IoExtent::new(0, 100, 30));
         assert_eq!(ext[1], IoExtent::hole(30, 15));
         assert_eq!(ext[2], IoExtent::new(45, 500, 5));
+    }
+
+    #[test]
+    fn test_single_extent_bounds_check() {
+        // Reproduces finding H1: single extent describing only 2 bytes on an 8-byte file.
+        // Reading 8 bytes must fail with OutOfBounds, not return 8 bytes of underlying data.
+        let backing = b"0123456789ABCDEF";
+        let mut slice_io = SliceRimIO::new(backing);
+        let extents = alloc::vec![IoExtent::new(0, 0, 2)];
+        let mut reader = ExtentRimRead::new(&mut slice_io, extents, 8);
+
+        let mut buf = [0u8; 8];
+        assert_eq!(reader.read_at(0, &mut buf), Err(RimIOError::OutOfBounds));
+
+        // Reading the 2 bytes within the extent must succeed
+        let mut small_buf = [0u8; 2];
+        assert!(reader.read_at(0, &mut small_buf).is_ok());
+        assert_eq!(&small_buf, b"01");
+
+        // Reading at offset 2 (outside the extent) must fail
+        assert_eq!(
+            reader.read_at(2, &mut small_buf),
+            Err(RimIOError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn test_single_extent_leading_hole() {
+        // Single extent starting at logical offset 4, file size 8
+        let backing = b"0123456789ABCDEF";
+        let mut slice_io = SliceRimIO::new(backing);
+        let extents = alloc::vec![IoExtent::new(4, 0, 4)];
+        let mut reader = ExtentRimRead::new(&mut slice_io, extents, 8);
+
+        // Reading at offset 0 must fail (unmapped leading hole without hole extent)
+        let mut buf = [0u8; 4];
+        assert_eq!(reader.read_at(0, &mut buf), Err(RimIOError::OutOfBounds));
+
+        // Reading at offset 4 must succeed
+        assert!(reader.read_at(4, &mut buf).is_ok());
+        assert_eq!(&buf, b"0123");
     }
 }

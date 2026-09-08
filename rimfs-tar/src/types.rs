@@ -23,12 +23,13 @@ pub const CHRTYPE: u8 = b'3';
 pub const BLKTYPE: u8 = b'4';
 pub const DIRTYPE: u8 = b'5';
 pub const FIFOTYPE: u8 = b'6';
+pub const GNULONGNAME: u8 = b'L';
+pub const GNULONGLINK_TARGET: u8 = b'K';
 
 /// A lightweight handle representing an offset in a TAR archive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TarHandle(pub u64);
 impl FsHandle for TarHandle {}
-
 /// A parsed entry from a TAR archive.
 ///
 /// Stream-first: retains offset and size within the source storage.

@@ -115,7 +115,7 @@ pub fn calculate_sparse_geometry(virtual_size: u64) -> (u32, u32, u64) {
 /// Initializes a sparse QCOW2 v3 layout on a target stream.
 #[cfg(feature = "alloc")]
 pub fn init_sparse_qcow2_layout(dst: &mut dyn RimIO, img_len: u64) -> RimImgResult<Qcow2Header> {
-    let (l1_size, n_rt, aligned_size) = calculate_sparse_geometry(img_len);
+    let (l1_size, n_rt, _aligned_size) = calculate_sparse_geometry(img_len);
     let n_l1_clusters = ((l1_size as u64) * 8).div_ceil(CLUSTER_SIZE);
 
     let refcount_table_offset = CLUSTER_SIZE;
@@ -131,7 +131,7 @@ pub fn init_sparse_qcow2_layout(dst: &mut dyn RimIO, img_len: u64) -> RimImgResu
         backing_file_offset: U64::new(0),
         backing_file_size: U32::new(0),
         cluster_bits: U32::new(CLUSTER_BITS),
-        size: U64::new(aligned_size),
+        size: U64::new(img_len),
         crypt_method: U32::new(0),
         l1_size: U32::new(l1_size),
         l1_table_offset: U64::new(l1_table_offset),
@@ -282,6 +282,20 @@ impl<'a> Qcow2IO<'a> {
 #[cfg(feature = "alloc")]
 impl RimRead for Qcow2IO<'_> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let end_logical = self
+            .partition_offset
+            .checked_add(offset)
+            .and_then(|o| o.checked_add(buf.len() as u64))
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        if end_logical > self.virtual_size {
+            return Err(RimIOError::OutOfBounds);
+        }
+
         let mut read_bytes = 0;
         while read_bytes < buf.len() {
             let logical = self
@@ -289,10 +303,6 @@ impl RimRead for Qcow2IO<'_> {
                 .checked_add(offset)
                 .and_then(|o| o.checked_add(read_bytes as u64))
                 .ok_or(RimIOError::OutOfBounds)?;
-
-            if logical >= self.virtual_size {
-                return Err(RimIOError::OutOfBounds);
-            }
 
             let cluster_idx = logical / CLUSTER_SIZE;
             let in_cluster = (logical % CLUSTER_SIZE) as usize;
@@ -350,6 +360,20 @@ impl RimRead for Qcow2IO<'_> {
 #[cfg(feature = "alloc")]
 impl RimWrite for Qcow2IO<'_> {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> RimIOResult {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let end_logical = self
+            .partition_offset
+            .checked_add(offset)
+            .and_then(|o| o.checked_add(data.len() as u64))
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        if end_logical > self.virtual_size {
+            return Err(RimIOError::OutOfBounds);
+        }
+
         let mut written = 0;
         while written < data.len() {
             let logical = self
@@ -357,10 +381,6 @@ impl RimWrite for Qcow2IO<'_> {
                 .checked_add(offset)
                 .and_then(|o| o.checked_add(written as u64))
                 .ok_or(RimIOError::OutOfBounds)?;
-
-            if logical >= self.virtual_size {
-                return Err(RimIOError::OutOfBounds);
-            }
 
             let cluster_idx = logical / CLUSTER_SIZE;
             let in_cluster = (logical % CLUSTER_SIZE) as usize;
@@ -523,6 +543,20 @@ impl<'a> Qcow2ReadIO<'a> {
 
 impl RimRead for Qcow2ReadIO<'_> {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let end_logical = self
+            .partition_offset
+            .checked_add(offset)
+            .and_then(|o| o.checked_add(buf.len() as u64))
+            .ok_or(RimIOError::OutOfBounds)?;
+
+        if end_logical > self.virtual_size {
+            return Err(RimIOError::OutOfBounds);
+        }
+
         let mut read_bytes = 0;
         while read_bytes < buf.len() {
             let logical = self
@@ -530,10 +564,6 @@ impl RimRead for Qcow2ReadIO<'_> {
                 .checked_add(offset)
                 .and_then(|o| o.checked_add(read_bytes as u64))
                 .ok_or(RimIOError::OutOfBounds)?;
-
-            if logical >= self.virtual_size {
-                return Err(RimIOError::OutOfBounds);
-            }
 
             let cluster_idx = logical / CLUSTER_SIZE;
             let in_cluster = (logical % CLUSTER_SIZE) as usize;
@@ -769,6 +799,9 @@ pub fn parse_qcow2_extents(src: &mut dyn RimRead) -> RimImgResult<Vec<IoExtent>>
                 let mut l2_entry_bytes = [0u8; 8];
                 src.read_at(l2_offset + (l2_idx as u64) * 8, &mut l2_entry_bytes)?;
                 let l2_entry = u64::from_be_bytes(l2_entry_bytes);
+                if (l2_entry & QCOW_OFLAG_COMPRESSED) != 0 {
+                    return Err(RimImgError::UnsupportedFormat);
+                }
                 if (l2_entry & QCOW_OFLAG_ZERO) == 0 {
                     let phys = l2_entry & L2_OFFSET_MASK;
                     if phys != 0 {

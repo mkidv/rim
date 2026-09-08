@@ -53,6 +53,8 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
         }
     );
 
+    let mut has_errors = false;
+
     for (i, p) in scan.partitions.iter().enumerate() {
         println!("#{} {:?} ({}–{})", i, p.name, p.start_lba, p.end_lba);
 
@@ -74,11 +76,15 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
                     );
                     if report.has_error() {
                         println!("❌ Partition {} has errors!", i);
+                        has_errors = true;
                     } else {
                         println!("✅ Partition {} is clean.", i);
                     }
                 }
-                Err(e) => println!("❌ Error running checker: {}", e),
+                Err(e) => {
+                    println!("❌ Error running checker: {}", e);
+                    has_errors = true;
+                }
             }
             continue;
         }
@@ -98,11 +104,15 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
                     );
                     if report.has_error() {
                         println!("❌ Partition {} has errors!", i);
+                        has_errors = true;
                     } else {
                         println!("✅ Partition {} is clean.", i);
                     }
                 }
-                Err(e) => println!("❌ Error running checker: {}", e),
+                Err(e) => {
+                    println!("❌ Error running checker: {}", e);
+                    has_errors = true;
+                }
             }
             continue;
         }
@@ -122,11 +132,15 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
                     );
                     if report.has_error() {
                         println!("❌ Partition {} has errors!", i);
+                        has_errors = true;
                     } else {
                         println!("✅ Partition {} is clean.", i);
                     }
                 }
-                Err(e) => println!("❌ Error running checker: {}", e),
+                Err(e) => {
+                    println!("❌ Error running checker: {}", e);
+                    has_errors = true;
+                }
             }
             continue;
         }
@@ -152,11 +166,15 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
                     );
                     if report.has_error() {
                         println!("❌ Partition {} has errors!", i);
+                        has_errors = true;
                     } else {
                         println!("✅ Partition {} is clean.", i);
                     }
                 }
-                Err(e) => println!("❌ Error running checker: {}", e),
+                Err(e) => {
+                    println!("❌ Error running checker: {}", e);
+                    has_errors = true;
+                }
             }
             continue;
         }
@@ -164,6 +182,12 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
         println!(
             "Partition {} is not a recognized FAT/RimFAT/ExFAT/Ext4/NTFS volume.",
             i
+        );
+    }
+
+    if has_errors {
+        anyhow::bail!(
+            "Filesystem check failed: one or more partitions contain errors or failed to verify"
         );
     }
 

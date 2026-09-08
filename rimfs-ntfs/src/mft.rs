@@ -21,8 +21,8 @@ pub struct MftHandle(pub u64);
 
 impl FsHandle for MftHandle {}
 
-/// Read an MFT record by its record number
-pub fn read_record<IO: RimRead + ?Sized>(
+/// Read an MFT record directly using contiguous offset calculation
+pub fn read_record_direct<IO: RimRead + ?Sized>(
     io: &mut IO,
     meta: &NtfsMeta,
     record_number: u64,
@@ -46,6 +46,113 @@ pub fn read_record<IO: RimRead + ?Sized>(
     }
 
     Ok(buf)
+}
+
+/// Extract MFT data runs from Record 0 ($MFT)
+pub fn extract_mft_runs(rec0: &[u8]) -> RimIOResult<Vec<crate::view::runlist::NtfsRun>> {
+    let view = crate::view::mft_view::MftRecordView::new(rec0)
+        .map_err(|_| RimIOError::Invalid("Failed to parse Record 0"))?;
+    let attr = view
+        .find(crate::constant::ATTR_DATA)
+        .map_err(|_| RimIOError::Invalid("Failed to find $DATA in Record 0"))?
+        .ok_or(RimIOError::Invalid("Record 0 has no $DATA"))?;
+
+    let attr_view = attr
+        .as_view()
+        .map_err(|_| RimIOError::Invalid("Malformed $DATA in Record 0"))?;
+
+    match attr_view {
+        crate::view::attr_view::AttrView::NonResident { runlist, .. } => {
+            Ok(runlist.iter().collect())
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Read an MFT record using runlist
+pub fn read_record_from_runs<IO: RimRead + ?Sized>(
+    io: &mut IO,
+    meta: &NtfsMeta,
+    record_number: u64,
+    runs: &[crate::view::runlist::NtfsRun],
+) -> RimIOResult<Vec<u8>> {
+    let rec_size = meta.mft_record_size as usize;
+    let mft_byte_offset = record_number * meta.mft_record_size as u64;
+    let cluster_size = meta.bytes_per_cluster as u64;
+
+    let mut buf = vec![0u8; rec_size];
+    let mut bytes_read = 0usize;
+    let mut current_vcn = 0u64;
+
+    for run in runs {
+        let run_end_vcn = current_vcn + run.len;
+        let run_start_byte = current_vcn * cluster_size;
+        let run_end_byte = run_end_vcn * cluster_size;
+
+        let target_start = mft_byte_offset + bytes_read as u64;
+        let target_end = mft_byte_offset + rec_size as u64;
+
+        if target_start < run_end_byte && target_end > run_start_byte {
+            let chunk_start = target_start.max(run_start_byte);
+            let chunk_end = target_end.min(run_end_byte);
+            let chunk_len = (chunk_end - chunk_start) as usize;
+
+            let in_run_offset = chunk_start - run_start_byte;
+            if let Some(lcn) = run.lcn {
+                let disk_offset = meta.lcn_to_offset(lcn) + in_run_offset;
+                io.read_at(disk_offset, &mut buf[bytes_read..bytes_read + chunk_len])?;
+            } else {
+                buf[bytes_read..bytes_read + chunk_len].fill(0);
+            }
+            bytes_read += chunk_len;
+            if bytes_read >= rec_size {
+                break;
+            }
+        }
+        current_vcn = run_end_vcn;
+    }
+
+    if bytes_read < rec_size {
+        return Err(RimIOError::Invalid(
+            "MFT record beyond MFT stream allocation",
+        ));
+    }
+
+    let header = MftRecordHeader::read_from_prefix(&buf)
+        .map_err(|_| RimIOError::Invalid("Failed to read MFT header"))?
+        .0;
+
+    if !header.is_file_record() {
+        return Err(RimIOError::Invalid("Invalid MFT signature"));
+    }
+
+    if !decode_usa_fixup(&mut buf, meta.bytes_per_sector as usize) {
+        return Err(RimIOError::Invalid("Failed to decode MFT USA fixup"));
+    }
+
+    Ok(buf)
+}
+
+/// Read an MFT record by its record number.
+/// Record 0 is read directly at mft_lcn; subsequent records are read using
+/// record 0's $DATA run list if present, falling back to contiguous calculation.
+pub fn read_record<IO: RimRead + ?Sized>(
+    io: &mut IO,
+    meta: &NtfsMeta,
+    record_number: u64,
+) -> RimIOResult<Vec<u8>> {
+    if record_number == 0 {
+        return read_record_direct(io, meta, 0);
+    }
+
+    if let Ok(rec0) = read_record_direct(io, meta, 0)
+        && let Ok(runs) = extract_mft_runs(&rec0)
+        && !runs.is_empty()
+    {
+        return read_record_from_runs(io, meta, record_number, &runs);
+    }
+
+    read_record_direct(io, meta, record_number)
 }
 
 /// Write an MFT record by its record number

@@ -96,22 +96,12 @@ impl<'a, IO: RimIO + ?Sized> FatInjector<'a, IO> {
         if !self.meta.use_fat_integrity {
             return Ok(());
         }
-        // Simplified: Read the whole FAT and calculate CRC32
-        // In a real FS, we might do it incrementally.
-        // For now, let's read the first FAT.
         let mut fat_buf =
             vec![0u8; (self.meta.fat_size_sectors * self.meta.bytes_per_sector as u32) as usize];
         self.io.read_at(self.meta.fat_offset_bytes, &mut fat_buf)?;
 
         let checksum = crate::core::utils::checksum_utils::crc32(&fat_buf);
 
-        let free_clusters = self.allocator.free_count as u32;
-        let next_free = self
-            .allocator
-            .next_free_hint
-            .max(self.meta.first_data_unit());
-
-        // Update FSINFO (Primary and Backup)
         for sector in [FAT_FSINFO_SECTOR, FAT_FSINFO_BACKUP_SECTOR] {
             let fsinfo_off = sector * self.meta.bytes_per_sector as u64;
             let mut fsinfo_buf = [0u8; 512];
@@ -119,6 +109,29 @@ impl<'a, IO: RimIO + ?Sized> FatInjector<'a, IO> {
 
             // Offset 476 is fat_checksum (RimFAT)
             fsinfo_buf[476..480].copy_from_slice(&checksum.to_le_bytes());
+            self.io.write_at(fsinfo_off, &fsinfo_buf)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_fsinfo(&mut self) -> FsInjectorResult {
+        if self.meta.bits != 32 {
+            return Ok(());
+        }
+
+        let free_clusters = self.allocator.free_count as u32;
+        let next_free = self
+            .allocator
+            .next_free_hint
+            .max(self.meta.first_data_unit());
+
+        // Update standard FSINFO (Primary and Backup)
+        for sector in [FAT_FSINFO_SECTOR, FAT_FSINFO_BACKUP_SECTOR] {
+            let fsinfo_off = sector * self.meta.bytes_per_sector as u64;
+            let mut fsinfo_buf = [0u8; 512];
+            self.io.read_at(fsinfo_off, &mut fsinfo_buf)?;
+
             // Offset 488 is free_cluster_count
             fsinfo_buf[488..492].copy_from_slice(&free_clusters.to_le_bytes());
             // Offset 492 is next_free_cluster
@@ -133,12 +146,39 @@ impl<'a, IO: RimIO + ?Sized> FatInjector<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
     fn set_root_context(&mut self, _: &FileAttributes) -> FsInjectorResult {
-        // Load root cluster’s existing entries, strip trailing EOD region
         let root = self.meta.root_unit();
-        let offset = self.meta.unit_offset(root);
-
-        let mut buf = vec![0u8; self.meta.root_dir_size_bytes()];
-        self.io.read_at(offset, &mut buf)?;
+        let (chain_clusters, mut buf) = if self.meta.bits == 32 && root >= 2 {
+            let mut driver = FatDriver::new(self.meta);
+            let mut clusters = Vec::new();
+            let mut cur = root;
+            while cur >= 2 && cur <= self.meta.last_data_unit() && !self.meta.is_eoc(cur) {
+                clusters.push(cur);
+                if clusters.len() >= 100_000 {
+                    break;
+                }
+                match driver.get(self.io, cur) {
+                    Ok(next) => cur = next,
+                    Err(_) => break,
+                }
+            }
+            let cluster_list = if clusters.is_empty() {
+                vec![root]
+            } else {
+                clusters
+            };
+            let cs = self.meta.unit_size();
+            let mut full_buf = vec![0u8; cluster_list.len() * cs];
+            for (i, &c) in cluster_list.iter().enumerate() {
+                let off = self.meta.unit_offset(c);
+                self.io.read_at(off, &mut full_buf[i * cs..(i + 1) * cs])?;
+            }
+            (cluster_list, full_buf)
+        } else {
+            let offset = self.meta.unit_offset(root);
+            let mut buf = vec![0u8; self.meta.root_dir_size_bytes()];
+            self.io.read_at(offset, &mut buf)?;
+            (vec![root], buf)
+        };
 
         let eod_pos = buf
             .chunks(32)
@@ -147,8 +187,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
 
         buf.truncate(eod_pos * 32);
 
-        // Ensure the handle’s cluster_id equals the real root cluster (usually 2).
-        let handle = FatHandle::new(self.meta.root_unit());
+        let handle = FatHandle::from_chain(RunList::from_units(&chain_clusters));
 
         self.stack.push(FsContext::new(handle, buf));
         Ok(())
@@ -179,7 +218,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
 
         // Append the directory entry into the CURRENT parent now (size = 0).
         if let Some(parent) = self.stack.last_mut() {
-            FatEntries::dir(name, handle.cluster_id, attr)
+            FatEntries::dir_with_existing(name, handle.cluster_id, attr, &parent.buf)
                 .with_integrity_calculated(self.meta)
                 .to_raw_buffer(&mut parent.buf)
         }
@@ -209,7 +248,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
 
         // Append to parent
         if let Some(parent) = self.stack.last_mut() {
-            let mut entries = FatEntries::file(name, handle.cluster_id, size as u32, attr);
+            let size_u32 = u32::try_from(size)
+                .map_err(|_| FsInjectorError::Invalid("File size exceeds 4GB FAT limit"))?;
+            let mut entries = FatEntries::file_with_existing(
+                name,
+                handle.cluster_id,
+                size_u32,
+                attr,
+                &parent.buf,
+            );
             // Optimization: newly created files via injector are contiguous when single-run
             if self.meta.use_integrity && handle.cluster_chain.0.len() <= 1 {
                 entries.contiguous_hint = true;
@@ -266,6 +313,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<FatHandle> for FatInjector<'a, IO> {
             self.write_chain_buffer(&ctx.handle, &ctx.buf)?;
         }
 
+        if self.meta.bits == 32 {
+            self.update_fsinfo()?;
+        }
         if self.meta.use_integrity {
             self.update_fat_checksum()?;
             self.end_transaction()?;
@@ -467,5 +517,46 @@ mod tests {
             resolver.read_file("nested/unicodé.txt").unwrap(),
             b"bonjour\n"
         );
+    }
+
+    #[test]
+    fn test_fat_sfn_collision_numeric_tails() {
+        const SIZE_BYTES: u64 = 32 * 1024 * 1024;
+        let meta = FatMeta::new_fat32(SIZE_BYTES, Some("SFNTEST")).unwrap();
+        let mut buf = vec![0u8; SIZE_BYTES as usize];
+        let mut io = MemRimIO::new(&mut buf);
+        FatFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let mut injector = FatInjector::new(&mut io, &meta).unwrap();
+        let mut tree = FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: vec![
+                FsNode::new_file("long_filename_alpha.txt", b"alpha content".to_vec()),
+                FsNode::new_file("long_filename_beta.txt", b"beta content".to_vec()),
+                FsNode::new_file("long_filename_gamma.txt", b"gamma content".to_vec()),
+            ],
+        };
+        injector.inject_tree(&mut tree).unwrap();
+        injector.flush().unwrap();
+
+        let mut resolver = FatResolver::new(&mut io, &meta);
+        assert_eq!(
+            resolver.read_file("long_filename_alpha.txt").unwrap(),
+            b"alpha content"
+        );
+        assert_eq!(
+            resolver.read_file("long_filename_beta.txt").unwrap(),
+            b"beta content"
+        );
+        assert_eq!(
+            resolver.read_file("long_filename_gamma.txt").unwrap(),
+            b"gamma content"
+        );
+
+        // Verify that numeric tails ~1, ~2, ~3 exist in directory entries
+        let root_dir_entries = resolver.read_dir("/").unwrap();
+        assert!(root_dir_entries.contains(&"long_filename_alpha.txt".to_string()));
+        assert!(root_dir_entries.contains(&"long_filename_beta.txt".to_string()));
+        assert!(root_dir_entries.contains(&"long_filename_gamma.txt".to_string()));
     }
 }

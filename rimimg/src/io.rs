@@ -360,11 +360,11 @@ pub fn create_image_io<'a>(
             Ok(ImageIO::Qcow2(qcow2_io))
         }
         ImageFormat::Vdi => {
-            vdi::init_vdi_io(dst, raw_len, options)?;
+            let data_offset = vdi::init_vdi_io(dst, raw_len, options)?;
             Ok(ImageIO::Linear(LinearImageIO::new(
                 dst,
                 raw_len,
-                vdi::DATA_OFFSET,
+                data_offset,
                 format,
                 options,
                 false,
@@ -497,8 +497,14 @@ fn open_vhd(src: &mut dyn RimRead) -> RimImgResult<(u64, u64)> {
     }
 
     let footer: vhd::VhdFooter = src.read_struct(len - vhd::VHD_FOOTER_SIZE)?;
-    if !footer.validate() {
-        return Err(RimImgError::Corrupted("Invalid VHD footer"));
+    if &footer.cookie != b"conectix" {
+        return Err(RimImgError::InvalidHeader("Invalid VHD cookie"));
+    }
+    if footer.compute_checksum() != footer.checksum.get() {
+        return Err(RimImgError::Corrupted("Invalid VHD footer checksum"));
+    }
+    if footer.disk_type.get() != 2 {
+        return Err(RimImgError::UnsupportedFormat);
     }
 
     Ok((len - vhd::VHD_FOOTER_SIZE, 0))
@@ -511,6 +517,11 @@ fn open_vmdk(src: &mut dyn RimRead) -> RimImgResult<(u64, u64)> {
         return Err(RimImgError::InvalidHeader(
             "VMDK file too small (header truncated)",
         ));
+    }
+    let mut header = [0u8; 22];
+    src.read_at(0, &mut header)?;
+    if !header.starts_with(b"# Disk DescriptorFile") {
+        return Err(RimImgError::InvalidHeader("Invalid VMDK descriptor"));
     }
 
     Ok((len - data_offset, data_offset))

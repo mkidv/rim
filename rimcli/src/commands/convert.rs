@@ -4,6 +4,7 @@ use crate::ui::{format_duration, pretty_bytes};
 use anyhow::Context;
 use colored::Colorize;
 use rimimg::{ImageFormat, ImageOptions};
+use rimio::RimRead;
 use rimio::prelude::FileRimIO;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -141,8 +142,36 @@ pub(crate) fn convert_file_with_progress<F: FnMut(u64, u64)>(
         return unwrap_file_with_progress(input, output, input_format, on_progress);
     }
 
-    let temp = tempfile::NamedTempFile::new()
-        .context("Failed to create temp file for container conversion")?;
-    unwrap_file_with_progress(input, temp.path(), input_format, &mut on_progress)?;
-    wrap_file_with_progress(temp.path(), output, output_format, on_progress)
+    // Direct streaming container conversion without temporary disk files (O2)
+    let input_file = File::open(input)
+        .with_context(|| format!("Failed to open input image {}", input.display()))?;
+    let output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output)
+        .with_context(|| format!("Failed to create output image {}", output.display()))?;
+
+    let mut src = FileRimIO::new(input_file);
+    let mut reader = rimimg::open_image_read_io(&mut src).with_context(|| {
+        format!(
+            "Failed to open input image {} for streaming",
+            input.display()
+        )
+    })?;
+    let raw_len = reader.total_size()?;
+    let mut dst = FileRimIO::new(output_file);
+    let options = ImageOptions::default();
+
+    rimimg::wrap_io_with_progress(
+        &mut reader,
+        &mut dst,
+        raw_len,
+        output_format,
+        options,
+        &mut on_progress,
+    )?;
+
+    Ok(())
 }

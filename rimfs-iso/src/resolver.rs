@@ -56,6 +56,7 @@ pub struct IsoResolver<'a, IO: RimRead + ?Sized> {
     _meta: &'a IsoMeta,
     entries: BTreeMap<String, IsoResolvedEntry>,
     pub is_joliet: bool,
+    status: FsResolverResult<()>,
 }
 
 impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
@@ -65,9 +66,22 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
             _meta: meta,
             entries: BTreeMap::new(),
             is_joliet: false,
+            status: Ok(()),
         };
-        let _ = resolver.load_tree();
+        resolver.status = resolver.load_tree();
         resolver
+    }
+
+    pub fn try_new(io: &'a mut IO, meta: &'a IsoMeta) -> FsResolverResult<Self> {
+        let mut resolver = Self {
+            io,
+            _meta: meta,
+            entries: BTreeMap::new(),
+            is_joliet: false,
+            status: Ok(()),
+        };
+        resolver.load_tree()?;
+        Ok(resolver)
     }
 
     /// Locates the EFI boot entry in the El Torito Boot Catalog if present.
@@ -208,7 +222,21 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
     ) -> FsResolverResult<Option<Box<dyn RimRead + 'b>>> {
         if let Some(entry) = self.el_torito_efi_boot_entry()? {
             let phys_off = checked_iso_offset(entry.lba)?;
-            let stream = ExtentRimRead::from_contiguous(&mut *self.io, phys_off, entry.size_bytes);
+            let mut size_bytes = entry.size_bytes;
+
+            // Determine actual FAT image size if BPB is valid
+            let mut bpb = [0u8; 512];
+            if self.io.read_at(phys_off, &mut bpb).is_ok() && bpb[510] == 0x55 && bpb[511] == 0xAA {
+                let bps = u16::from_le_bytes([bpb[11], bpb[12]]) as u64;
+                let s16 = u16::from_le_bytes([bpb[19], bpb[20]]) as u64;
+                let s32 = u32::from_le_bytes([bpb[32], bpb[33], bpb[34], bpb[35]]) as u64;
+                let total_secs = if s16 != 0 { s16 } else { s32 };
+                if bps >= 512 && total_secs > 0 {
+                    size_bytes = total_secs * bps;
+                }
+            }
+
+            let stream = ExtentRimRead::from_contiguous(&mut *self.io, phys_off, size_bytes);
             Ok(Some(Box::new(stream)))
         } else {
             Ok(None)
@@ -421,6 +449,9 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
 
 impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     fn exists(&mut self, path: &str) -> bool {
+        if self.status.is_err() {
+            return false;
+        }
         let clean = normalize_fs_path(path);
         if clean.is_empty() {
             return true;
@@ -438,6 +469,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     }
 
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
+        self.status?;
         let clean = normalize_fs_path(path);
         let prefix = if clean.is_empty() {
             String::new()
@@ -469,6 +501,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     }
 
     fn open_file<'b>(&'b mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'b>> {
+        self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
             .entries
@@ -489,6 +522,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     }
 
     fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
+        self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
             .entries
@@ -506,6 +540,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
+        self.status?;
         let clean = normalize_fs_path(path);
         if clean.is_empty() {
             return Ok(FileAttributes::new_dir());

@@ -56,6 +56,31 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
 }
 
 impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
+    fn get_inode_table_block(&mut self, group: u32) -> u64 {
+        let bgdt_offset = (self.meta.first_data_block + 1) as u64 * self.meta.block_size as u64;
+        let entry_offset = bgdt_offset + (group as u64 * self.meta.bgdt_entry_size as u64);
+        let mut entry = [0u8; 64];
+        let read_len = self.meta.bgdt_entry_size.min(64);
+        if self
+            .io
+            .read_at(entry_offset, &mut entry[..read_len])
+            .is_ok()
+        {
+            let itable_lo = u32::from_le_bytes(entry[8..12].try_into().unwrap_or([0; 4]));
+            let itable_hi = if self.meta.features.has_64bit && read_len >= 44 {
+                u32::from_le_bytes(entry[40..44].try_into().unwrap_or([0; 4]))
+            } else {
+                0
+            };
+            let itable = (itable_lo as u64) | ((itable_hi as u64) << 32);
+            if itable != 0 && itable < self.meta.block_count {
+                return itable;
+            }
+        }
+        let layout = GroupLayout::compute(self.meta, group);
+        layout.inode_table_block
+    }
+
     /// Read inode raw bytes from inode table (with MRU cache)
     pub(crate) fn read_inode(&mut self, inode_num: u32) -> FsResolverResult<Vec<u8>> {
         if inode_num == 0 || inode_num as u64 > self.meta.inode_count {
@@ -72,8 +97,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let group = inode_index / self.meta.inodes_per_group;
         let index_in_group = inode_index % self.meta.inodes_per_group;
 
-        let layout = GroupLayout::compute(self.meta, group);
-        let inode_table_block = layout.inode_table_block;
+        let inode_table_block = self.get_inode_table_block(group);
 
         let inode_size = self.meta.inode_size as u64;
         let offset = (inode_table_block * self.meta.block_size as u64)
@@ -210,12 +234,15 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let map = BlockMapArray::read_from_bytes(&inode_buf[40..100])
             .map_err(|_| FsResolverError::Invalid("Failed to read block map"))?;
 
-        // We need to collect all blocks up to `size`.
         let block_size = self.meta.block_size as usize;
+        let ptrs_per_block = block_size / 4;
+        let dbl_ptrs = ptrs_per_block * ptrs_per_block;
+        let trpl_ptrs = dbl_ptrs * ptrs_per_block;
+
         let blocks_count = size.div_ceil(block_size);
         let mut blocks = Vec::with_capacity(blocks_count);
 
-        // 1. Direct Blocks
+        // 1. Direct Blocks (0..12)
         for &blk in &map.direct {
             if blocks.len() >= blocks_count {
                 break;
@@ -227,48 +254,89 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             return Ok(blocks);
         }
 
-        // 2. Indirect Block
+        // 2. Single Indirect Block
+        let ind_limit = blocks_count.min(12 + ptrs_per_block);
         if map.indirect != 0 {
-            self.read_indirect_block(map.indirect, &mut blocks, blocks_count)?;
+            self.read_indirect_block(map.indirect, &mut blocks, ind_limit)?;
+        }
+        while blocks.len() < ind_limit {
+            blocks.push(0);
         }
 
         if blocks.len() >= blocks_count {
             return Ok(blocks);
         }
 
-        // 3. Double Indirect
+        // 3. Double Indirect Block
+        let dbl_limit = blocks_count.min(12 + ptrs_per_block + dbl_ptrs);
         if map.double_indirect != 0 {
-            // Read the double indirect block, which contains pointers to indirect blocks
             let mut indirects = Vec::new();
-            self.read_indirect_block(map.double_indirect, &mut indirects, usize::MAX)?; // Read all ptrs
+            self.read_indirect_block(map.double_indirect, &mut indirects, ptrs_per_block)?;
+            while indirects.len() < ptrs_per_block {
+                indirects.push(0);
+            }
 
             for &indirect_blk in &indirects {
-                if blocks.len() >= blocks_count {
+                if blocks.len() >= dbl_limit {
                     break;
                 }
-                self.read_indirect_block(indirect_blk, &mut blocks, blocks_count)?;
+                let cur_limit = dbl_limit.min(blocks.len() + ptrs_per_block);
+                if indirect_blk != 0 {
+                    self.read_indirect_block(indirect_blk, &mut blocks, cur_limit)?;
+                }
+                while blocks.len() < cur_limit {
+                    blocks.push(0);
+                }
             }
         }
+        while blocks.len() < dbl_limit {
+            blocks.push(0);
+        }
 
-        // 4. Triple Indirect
-        if map.triple_indirect != 0 && blocks.len() < blocks_count {
+        if blocks.len() >= blocks_count {
+            return Ok(blocks);
+        }
+
+        // 4. Triple Indirect Block
+        let trpl_limit = blocks_count.min(12 + ptrs_per_block + dbl_ptrs + trpl_ptrs);
+        if map.triple_indirect != 0 {
             let mut double_indirects = Vec::new();
-            self.read_indirect_block(map.triple_indirect, &mut double_indirects, usize::MAX)?;
+            self.read_indirect_block(map.triple_indirect, &mut double_indirects, ptrs_per_block)?;
+            while double_indirects.len() < ptrs_per_block {
+                double_indirects.push(0);
+            }
 
             for &double_blk in &double_indirects {
-                if blocks.len() >= blocks_count {
+                if blocks.len() >= trpl_limit {
                     break;
                 }
-                let mut indirects = Vec::new();
-                self.read_indirect_block(double_blk, &mut indirects, usize::MAX)?;
-
-                for &indirect_blk in &indirects {
-                    if blocks.len() >= blocks_count {
-                        break;
+                let cur_dbl_limit = trpl_limit.min(blocks.len() + dbl_ptrs);
+                if double_blk != 0 {
+                    let mut indirects = Vec::new();
+                    self.read_indirect_block(double_blk, &mut indirects, ptrs_per_block)?;
+                    while indirects.len() < ptrs_per_block {
+                        indirects.push(0);
                     }
-                    self.read_indirect_block(indirect_blk, &mut blocks, blocks_count)?;
+                    for &indirect_blk in &indirects {
+                        if blocks.len() >= cur_dbl_limit {
+                            break;
+                        }
+                        let cur_limit = cur_dbl_limit.min(blocks.len() + ptrs_per_block);
+                        if indirect_blk != 0 {
+                            self.read_indirect_block(indirect_blk, &mut blocks, cur_limit)?;
+                        }
+                        while blocks.len() < cur_limit {
+                            blocks.push(0);
+                        }
+                    }
+                }
+                while blocks.len() < cur_dbl_limit {
+                    blocks.push(0);
                 }
             }
+        }
+        while blocks.len() < trpl_limit {
+            blocks.push(0);
         }
 
         Ok(blocks)
@@ -280,7 +348,10 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         blocks: &mut Vec<u32>,
         limit: usize,
     ) -> FsResolverResult<()> {
+        let ptrs_per_block = self.meta.block_size as usize / 4;
+        let count_to_add = (limit.saturating_sub(blocks.len())).min(ptrs_per_block);
         if block == 0 {
+            blocks.resize(blocks.len() + count_to_add, 0);
             return Ok(());
         }
         let offset = self.meta.unit_offset(block);
@@ -399,7 +470,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             let extents = self.read_extents(&inode_buf)?;
             for extent in &extents {
                 let phys_block = extent.physical_start();
-                let len_blocks = (extent.ee_len & 0x7FFF) as usize;
+                let len_blocks = extent.len() as usize;
                 for blk_idx in 0..len_blocks {
                     if offsets.len() >= blocks_needed {
                         break;
@@ -412,7 +483,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             // Block Map
             let blocks = self.read_block_map(&inode_buf, dir_size)?;
             for blk in blocks {
-                offsets.push(blk as u64 * block_size as u64);
+                if blk != 0 {
+                    offsets.push(blk as u64 * block_size as u64);
+                }
             }
         }
 
@@ -502,7 +575,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             let extents = self.read_extents(&inode_buf)?;
             for extent in &extents {
                 let phys_block = extent.physical_start();
-                let len_blocks = (extent.ee_len & 0x7FFF) as usize;
+                let len_blocks = extent.len() as usize;
                 for blk_idx in 0..len_blocks {
                     if offsets.len() >= blocks_needed {
                         break;
@@ -514,7 +587,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         } else {
             let blocks = self.read_block_map(&inode_buf, dir_size)?;
             for blk in blocks {
-                offsets.push(blk as u64 * block_size as u64);
+                if blk != 0 {
+                    offsets.push(blk as u64 * block_size as u64);
+                }
             }
         }
 
@@ -1011,7 +1086,12 @@ mod tests {
         // Triple indirect is at i_block[14 * 4] = offset 40 + 14 * 4 = 96
         inode[96..100].copy_from_slice(&100u32.to_le_bytes());
 
-        let blocks = resolver.read_block_map(&inode, 13 * 4096).unwrap();
+        let ptrs_per_block = 4096 / 4;
+        let triple_indirect_start = 12 + ptrs_per_block + ptrs_per_block * ptrs_per_block;
+        let blocks = resolver
+            .read_block_map(&inode, (triple_indirect_start + 1) * 4096)
+            .unwrap();
+        assert_eq!(blocks[triple_indirect_start], 400);
         assert!(blocks.contains(&400));
     }
 

@@ -389,6 +389,7 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
     /// Scan for the next contiguous range of `count` zero bits, starting from `hint_bit`.
     ///
     /// Returns the absolute bit index of the start of the range.
+    /// Supports runs that cross 4KB window boundaries and allocations exceeding 32,768 bits.
     pub fn find_next_free<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
@@ -396,37 +397,103 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         count: u64,
     ) -> RimIOResult<Option<u64>> {
         let total_bits = self.meta.bitmap_size() * 8;
-        let mut current_search = hint_bit;
-
-        // Optimization: Don't allow wrapping by default here, allocator logic can handle that
-        if current_search >= total_bits {
+        if count == 0 {
+            return Ok(if hint_bit <= total_bits {
+                Some(hint_bit)
+            } else {
+                None
+            });
+        }
+        if hint_bit
+            .checked_add(count)
+            .is_none_or(|end| end > total_bits)
+        {
             return Ok(None);
         }
 
-        while current_search + count <= total_bits {
-            let byte_offset = current_search / 8;
+        let mut run_start: Option<u64> = None;
+        let mut run_len: u64 = 0;
+        let mut current_bit = hint_bit;
+
+        while current_bit < total_bits {
+            let byte_offset = current_bit / 8;
             self.ensure_loaded(io, byte_offset)?;
 
-            let local_bit_start = (current_search % 8) + (byte_offset - self.window_start) * 8;
-            let window_total_bits = self.valid_len as u64 * 8;
-            let _window_limit_bits = window_total_bits.min(total_bits - (self.window_start * 8));
+            let window_start_bit = self.window_start * 8;
+            let window_bits = (self.valid_len as u64) * 8;
+            let window_end_bit = (window_start_bit + window_bits).min(total_bits);
 
-            // This search only returns runs fully contained in the current window.
-            if let Some(local_found) = self.buffer[..self.valid_len]
-                .find_next_zero_range(local_bit_start as usize, count as usize)
-            {
-                let found_abs = self.window_start * 8 + local_found as u64;
-                return Ok(Some(found_abs));
-            }
+            while current_bit < window_end_bit {
+                if run_start.is_none() {
+                    let local_start = (current_bit - window_start_bit) as usize;
+                    match self.buffer[..self.valid_len].find_first_zero(local_start) {
+                        Some(local_zero) => {
+                            let zero_bit = window_start_bit + local_zero as u64;
+                            if zero_bit >= window_end_bit {
+                                current_bit = window_end_bit;
+                                break;
+                            }
+                            run_start = Some(zero_bit);
+                            run_len = 0;
+                            current_bit = zero_bit;
+                        }
+                        None => {
+                            current_bit = window_end_bit;
+                            break;
+                        }
+                    }
+                }
 
-            // Not found in this remaining part of window.
-            // Advance `current_search` to start of next window or next potential byte
-            // To be safe and exhaust the window:
-            let next_window_start = self.window_start + self.valid_len as u64;
-            if next_window_start * 8 >= total_bits {
-                break;
+                if !current_bit.is_multiple_of(8) {
+                    let local_bit = (current_bit - window_start_bit) as usize;
+                    if self.buffer[..self.valid_len].get_bit(local_bit) {
+                        run_start = None;
+                        run_len = 0;
+                        current_bit += 1;
+                    } else {
+                        run_len += 1;
+                        if run_len == count {
+                            return Ok(run_start);
+                        }
+                        current_bit += 1;
+                    }
+                } else {
+                    let local_byte = ((current_bit - window_start_bit) / 8) as usize;
+                    if current_bit + 8 <= window_end_bit {
+                        let b = self.buffer[local_byte];
+                        if b == 0 {
+                            let needed = count - run_len;
+                            if needed <= 8 {
+                                return Ok(run_start);
+                            }
+                            run_len += 8;
+                            current_bit += 8;
+                        } else {
+                            let tz = b.trailing_zeros() as u64;
+                            run_len += tz;
+                            if run_len >= count {
+                                return Ok(run_start);
+                            }
+                            current_bit = current_bit + tz + 1;
+                            run_start = None;
+                            run_len = 0;
+                        }
+                    } else {
+                        let local_bit = (current_bit - window_start_bit) as usize;
+                        if self.buffer[..self.valid_len].get_bit(local_bit) {
+                            run_start = None;
+                            run_len = 0;
+                            current_bit += 1;
+                        } else {
+                            run_len += 1;
+                            if run_len == count {
+                                return Ok(run_start);
+                            }
+                            current_bit += 1;
+                        }
+                    }
+                }
             }
-            current_search = next_window_start * 8;
         }
 
         Ok(None)
@@ -581,5 +648,44 @@ mod tests {
         assert_eq!(bitmap_small[0], 0);
         // byte 1 is bits 8..15. [10, 30) intersects with [8, 16) at 10..15
         assert_eq!(bitmap_small[1], 0b11111100u8);
+    }
+
+    struct TestBitmapMeta {
+        size: u64,
+    }
+    impl BitmapFsMeta for TestBitmapMeta {
+        fn bitmap_offset(&self) -> u64 {
+            0
+        }
+        fn bitmap_size(&self) -> u64 {
+            self.size
+        }
+    }
+
+    #[test]
+    fn test_find_next_free_cross_window_and_large() {
+        let meta = TestBitmapMeta { size: 16384 };
+        let mut data = alloc::vec![0xFFu8; 16384];
+        let mut driver = BitmapDriver::new(&meta);
+        let mut io = rimio::prelude::MemRimIO::new(&mut data);
+
+        assert_eq!(driver.find_next_free(&mut io, 0, 1).unwrap(), None);
+
+        driver.set_bits_range(&mut io, 32700, 100, false).unwrap();
+        driver.flush(&mut io).unwrap();
+
+        assert_eq!(driver.find_next_free(&mut io, 0, 100).unwrap(), Some(32700));
+        assert_eq!(
+            driver.find_next_free(&mut io, 32750, 50).unwrap(),
+            Some(32750)
+        );
+        assert_eq!(driver.find_next_free(&mut io, 32700, 101).unwrap(), None);
+
+        driver.set_bits_range(&mut io, 10000, 40000, false).unwrap();
+        driver.flush(&mut io).unwrap();
+        assert_eq!(
+            driver.find_next_free(&mut io, 0, 40000).unwrap(),
+            Some(10000)
+        );
     }
 }

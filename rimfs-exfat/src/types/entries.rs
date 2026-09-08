@@ -109,7 +109,7 @@ impl ExFatEntries {
     pub fn file(
         name: &str,
         cluster: u32,
-        size: u32,
+        size: u64,
         attr: &FileAttributes,
         upcase: &UpcaseHandle,
     ) -> FsParsingResult<Self> {
@@ -121,7 +121,7 @@ impl ExFatEntries {
 
         let name_hash = compute_name_hash(name, upcase);
 
-        let mut stream = ExFatStreamEntry::new(cluster, size as u64, name_length, name_hash);
+        let mut stream = ExFatStreamEntry::new(cluster, size, name_length, name_hash);
         if cluster != 0 {
             stream.general_secondary_flags |= 1; // AllocationPossible
         }
@@ -138,7 +138,7 @@ impl ExFatEntries {
     pub fn file_contiguous(
         name: &str,
         cluster: u32,
-        size: u32,
+        size: u64,
         attr: &FileAttributes,
         upcase: &UpcaseHandle,
     ) -> FsParsingResult<Self> {
@@ -150,7 +150,7 @@ impl ExFatEntries {
 
         let name_hash = compute_name_hash(name, upcase);
 
-        let mut stream = ExFatStreamEntry::new(cluster, size as u64, name_length, name_hash);
+        let mut stream = ExFatStreamEntry::new(cluster, size, name_length, name_hash);
         stream.general_secondary_flags |= 0x03; // AllocationPossible | NoFatChain
 
         primary.compute_set_checksum(&stream, &names);

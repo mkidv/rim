@@ -4,6 +4,58 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-09-07
+### Added
+*   **Deep Filesystem Native Interoperability & Spec Compliance**:
+    *   **Ext4 (`rimfs-ext`)**:
+        *   Multi-level extent tree splitting (`C1`): handles files with >4 extents by creating proper extent index branches (`eh_depth > 0`) with `eh_generation = 0` and correct 48-bit physical block addresses.
+        *   Fixed big-endian byte order handling for extent start block high bits (`ee_start_hi`).
+        *   Added Ext4 directory tail checksum entries (`EXT4_FT_DIR_CSUM`, `0xDEAF`) with `rec_len = 12`.
+        *   Synchronized 64-bit file size tracking (`i_size_high`) across inodes.
+        *   Dynamic on-disk Block Group Descriptor Table (BGDT) loading in `ExtResolver` (`H4`), replacing static layout assumptions.
+        *   Sparse hole zero-padding across indirect, double indirect, and triple indirect block maps (`H5`).
+        *   Sparse directory extent traversal support (`H13`).
+    *   **FAT32 (`rimfs-fat`)**:
+        *   Case-insensitive directory search matching Windows/DOS semantics with automatic 8.3 short name numeric collisions (`~1`, `~2`) (`H3`).
+        *   Multi-cluster directory traversal in `FatResolver` and `FatInjector` for root and subdirectories (`H2`, `H7`).
+    *   **exFAT (`rimfs-exfat`)**:
+        *   Full support for contiguous subdirectory chains (`NoFatChain` flag) and fragmented FAT directory traversal (`H6`).
+        *   On-disk upcase table parsing and case-insensitive comparison (`H9`).
+        *   Zero-padded sparse filling for uninitialized ranges between `valid_data_length` and `data_length` (`H8`).
+    *   **NTFS (`rimfs-ntfs`)**:
+        *   Dynamic MFT runlist decoding from record 0 `$DATA` attribute, enabling transparent navigation of fragmented and non-contiguous `$MFT` structures (`H11`).
+        *   Propagated existing MFT metadata in `NtfsInjector::new` instead of allocating records over pre-existing volumes (`H10`).
+        *   Active `$BITMAP` verification for `$I30` directory index allocations, skipping inactive and deleted INDX chunks (`H12`).
+        *   Explicit rejection of compressed (`0x0001`) and encrypted (`0x4000`) attributes with `Unsupported`.
+        *   Respect of `initialized_size` for non-resident attributes, zero-padding uninitialized space up to `data_size`.
+    *   **TAR (`rimfs-tar`)**:
+        *   POSIX USTAR prefix splitting for paths up to 256 bytes (`prefix <= 155`, `name <= 100`) on path boundaries (`H14`).
+        *   GNU `././@LongLink` (`b'L'`, `b'K'`) long path and symlink target encoding without truncation (`H14`).
+        *   Single-pass index cache in `TarResolver` (`O1`), transforming $O(N)$ directory sweeps into $O(1)$ lookups.
+    *   **ZIP (`rimfs-zip`)**:
+        *   Fallible `ZipResolver::try_new` constructor with central directory integrity validation (`H15`).
+        *   Memory-budgeted Deflate decompression with strict CRC32 validation (`H15`, `O3`).
+        *   Deflate decompression support for symbolic link targets up to 64KB (`H15`).
+        *   Symmetric ZIP64 extra field emission and patching in Local File Headers (`H16`).
+    *   **ISO 9660 (`rimfs-iso`)**:
+        *   Fallible `IsoResolver::try_new` constructor validating Primary Volume Descriptors (`H17`).
+        *   Explicit rejection of piecemeal mutation (`write_file`, `write_dir`) with `Unsupported` (`H17`).
+        *   El Torito EFI boot image catalog sizing preventing `u16` sector count overflow and reading true partition bounds from the FAT BPB (`H18`).
+*   **Virtual Machine Container Hardening (`rimimg`)**:
+    *   VMDK monolithicFlat: set extent offset to sector 1 (`DESCRIPTOR_SECTORS`) in text descriptor, allowing hypervisors and QEMU to read MBR/GPT partition tables rather than the text descriptor (`H19`).
+    *   VHD: validated `disk_type == 2` (Fixed Disk) in `VhdFooter::validate` and rejected unsupported dynamic/differencing types (`H19`).
+    *   VDI: dynamic 1MB-aligned `offset_data` calculation based on block allocation table size, preventing block map collisions on images >262GB (`H20`).
+    *   Direct streaming container conversion in `rimcli convert` without intermediate disk scratch files (`O2`).
+*   **Core Architecture, Safety & Performance (`rimio`, `rimfs-core`, `examples`)**:
+    *   `ExtentRimIO`: fixed leading hole mapping without index shifting, multi-extent traversal across sparse holes, and bound checks (`H1`).
+    *   `StdRimIO` / `FileRimIO`: replaced unbounded `read_to_end` with chunked streaming in `copy_from_with_progress` (`H22`).
+    *   `BitmapDriver`: streaming windowed on-disk bitmap operations eliminating monolithic in-memory bitmask allocations (`A6`).
+    *   `FsChecker`: immediate phase abort when `fail_fast` is active (`H24`).
+    *   `rimcli check`: exits with non-zero status when any partition report contains errors (`H24`).
+    *   `MmapRimIO`: documented safety invariants, exclusive access preconditions, and truncation hazards (`H25`).
+    *   `wasm-synth`: synchronized spinlock guard eliminating mutable static aliasing (`H25`).
+    *   `ExFatAllocator`: direct `RunList` block allocation eliminating intermediate `Vec<u32>` heap allocations (`O4`).
+
 ## [0.9.1] - 2026-09-06
 ### Added
 *   **Dynamic Sparse QCOW2 Allocator (`rimimg` & `rimcli`)**:

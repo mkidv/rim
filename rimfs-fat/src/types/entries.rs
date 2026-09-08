@@ -86,9 +86,72 @@ impl FatEntries {
         }
     }
 
-    pub fn file(name: &str, cluster: u32, size: u32, attr: &FileAttributes) -> Self {
+    pub fn dir_with_existing(
+        name: &str,
+        cluster: u32,
+        attr: &FileAttributes,
+        existing_buf: &[u8],
+    ) -> Self {
         let (date, time, fine) = utils::datetime_from_attr(attr);
-        let (short_name, is_lfn) = utils::to_short_name(name);
+        let is_taken = |cand: &[u8; 11]| -> bool {
+            for chunk in existing_buf.chunks_exact(32) {
+                if chunk[0] != 0x00
+                    && chunk[0] != 0xE5
+                    && chunk[11] != 0x0F
+                    && &chunk[0..11] == cand
+                {
+                    return true;
+                }
+            }
+            false
+        };
+        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken);
+        let lfn = if is_lfn {
+            utils::lfn_entries(name, &short_name)
+        } else {
+            vec![]
+        };
+        let entry = FatEntry::new(
+            short_name,
+            FatAttributes::DIRECTORY.bits(),
+            cluster,
+            0,
+            date,
+            time,
+            fine,
+        );
+        Self {
+            lfn,
+            entry,
+            contiguous_hint: false,
+        }
+    }
+
+    pub fn file(name: &str, cluster: u32, size: u32, attr: &FileAttributes) -> Self {
+        Self::file_with_existing(name, cluster, size, attr, &[])
+    }
+
+    pub fn file_with_existing(
+        name: &str,
+        cluster: u32,
+        size: u32,
+        attr: &FileAttributes,
+        existing_buf: &[u8],
+    ) -> Self {
+        let (date, time, fine) = utils::datetime_from_attr(attr);
+        let is_taken = |cand: &[u8; 11]| -> bool {
+            for chunk in existing_buf.chunks_exact(32) {
+                if chunk[0] != 0x00
+                    && chunk[0] != 0xE5
+                    && chunk[11] != 0x0F
+                    && &chunk[0..11] == cand
+                {
+                    return true;
+                }
+            }
+            false
+        };
+        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken);
         let lfn = if is_lfn {
             utils::lfn_entries(name, &short_name)
         } else {

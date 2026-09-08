@@ -5,7 +5,6 @@
 use alloc::vec::Vec;
 
 use crate::allocator::ExtAllocator;
-use crate::core::allocator::FsAllocator;
 use crate::core::utils::align::pad_to_size;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::ExtMeta;
@@ -87,10 +86,11 @@ pub fn create_lost_found<IO: RimIO + ?Sized>(
     used_dirs_per_group: &mut [u16],
 ) -> FsInjectorResult {
     // 1. Allocate a block
-    let handle = allocator
-        .allocate(io, 1)
+    let runs = allocator
+        .blocks
+        .allocate_blocks_list(io, 1)
         .map_err(|_| FsInjectorError::Other("Allocation failed for lost+found"))?;
-    let block = handle.blocks.0[0].start as u32;
+    let block = runs.0[0].start as u32;
 
     // 2. Write directory content
     let dir_buf = ExtLostFound::create_dir_block(meta.block_size as usize);

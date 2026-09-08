@@ -5,8 +5,18 @@ use std::io;
 
 /// Memory-mapped implementation of `RimIO` using `memmap2`.
 ///
-/// This provides extremely fast random access (zero syscalls for read/write)
+/// This provides fast random access (zero syscalls for read/write)
 /// by mapping the file directly into process memory.
+///
+/// # Safety Invariants & Preconditions
+/// - **Exclusive Access / No Concurrent Modification**:
+///   The caller must ensure that the underlying file is not modified, truncated,
+///   or unlinked concurrently by any other thread, process, or file descriptor
+///   for the lifetime of this `MmapRimIO`.
+/// - **Undefined Behavior on Truncation**:
+///   If another process or file descriptor truncates or modifies the mapped file,
+///   dereferencing the mapped memory will result in undefined behavior (e.g. `SIGBUS`
+///   on Unix, `STATUS_IN_PAGE_ERROR` / access violation on Windows).
 ///
 /// # Platform Support
 /// Requires `mmap` feature.
@@ -20,10 +30,15 @@ pub struct MmapRimIO {
 
 impl MmapRimIO {
     /// Creates a new memory mapped IO from a standard file.
+    ///
+    /// # Safety Invariants
+    /// The caller must guarantee that no concurrent process or thread modifies or
+    /// truncates `file` while `MmapRimIO` is active.
     pub fn new(file: File) -> io::Result<Self> {
         let len = file.metadata()?.len();
         let mmap = if len > 0 {
-            // SAFETY: We own the file so we can safely map it.
+            // SAFETY: Caller guarantees that `file` is not concurrently mutated or truncated
+            // by external processes during the lifetime of this mapping.
             Some(unsafe { MmapMut::map_mut(&file)? })
         } else {
             None
@@ -88,8 +103,7 @@ impl RimWrite for MmapRimIO {
 
     fn flush(&mut self) -> RimIOResult {
         if let Some(mmap) = self.mmap.as_mut() {
-            mmap.flush()
-                .map_err(|e| RimIOError::Other(Box::leak(e.to_string().into_boxed_str())))
+            mmap.flush().map_err(RimIOError::from)
         } else {
             Ok(())
         }

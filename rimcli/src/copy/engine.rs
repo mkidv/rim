@@ -117,9 +117,14 @@ pub fn copy_tree<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInjector<H> +
             })?
     };
 
-    let adjusted_root_attr = apply_metadata_policy(&root_attr, options.metadata_policy);
+    let root_dir_attr =
+        if is_wild || base_path.is_empty() || base_path == "/" || !root_attr.is_dir() {
+            FileAttributes::new_dir()
+        } else {
+            apply_metadata_policy(&root_attr, options.metadata_policy)
+        };
     injector
-        .set_root_context(&adjusted_root_attr)
+        .set_root_context(&root_dir_attr)
         .map_err(|e| CopyError::Injector {
             path: base_path.to_string(),
             source: e,

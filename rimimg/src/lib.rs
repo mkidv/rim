@@ -299,7 +299,7 @@ mod tests {
                 let l1_size = num_clusters.div_ceil(l2_entries) as usize;
                 ((4 + l1_size) * qcow2::CLUSTER_SIZE as usize) + virtual_size as usize
             }
-            ImageFormat::Vdi => vdi::DATA_OFFSET as usize + raw_len,
+            ImageFormat::Vdi => vdi::calculate_data_offset(raw_len as u64) as usize + raw_len,
         }
     }
 
@@ -576,5 +576,126 @@ mod tests {
             Err(RimImgError::InvalidHeader(_)) => {}
             other => panic!("Expected InvalidHeader error, got {:?}", other.is_err()),
         }
+    }
+
+    #[test]
+    fn test_qcow2_virtual_eof_bounds() {
+        // Reproduces finding H21: virtual size 513 with partial-cluster access crossing EOF
+        let virtual_size = 513u64;
+        let mut storage = vec![0u8; 512 * 1024];
+        let mut mem_io = MemRimIO::new(&mut storage);
+
+        let mut qcow = qcow2::create_sparse_qcow2_io(&mut mem_io, virtual_size).unwrap();
+
+        // Writing 32 bytes at offset 512 would reach byte 544, exceeding virtual_size 513 -> OutOfBounds
+        let data = [0xAAu8; 32];
+        assert_eq!(qcow.write_at(512, &data), Err(RimIOError::OutOfBounds));
+
+        // Reading 32 bytes at offset 512 -> OutOfBounds
+        let mut buf = [0u8; 32];
+        assert_eq!(qcow.read_at(512, &mut buf), Err(RimIOError::OutOfBounds));
+
+        // Writing 1 byte at offset 512 -> exactly reaches byte 513 -> succeeds
+        assert!(qcow.write_at(512, &[0x42]).is_ok());
+
+        // Reading 1 byte at offset 512 -> succeeds and matches written byte
+        let mut single_byte = [0u8; 1];
+        assert!(qcow.read_at(512, &mut single_byte).is_ok());
+        assert_eq!(single_byte[0], 0x42);
+
+        // Accessing at offset 513 (EOF) -> OutOfBounds
+        assert_eq!(
+            qcow.read_at(513, &mut single_byte),
+            Err(RimIOError::OutOfBounds)
+        );
+        assert_eq!(qcow.write_at(513, &[0x99]), Err(RimIOError::OutOfBounds));
+    }
+
+    #[test]
+    fn test_vmdk_extent_offset_and_descriptor_validation() {
+        // H19: VMDK extent offset must be 1 (DESCRIPTOR_SECTORS), not 0
+        let disk_size = 2 * 1024 * 1024; // 2MB
+        let mut storage = vec![0u8; disk_size + 512];
+        let mut io = MemRimIO::new(&mut storage);
+        let mut raw_data = patterned_raw(disk_size);
+        let mut src_io = MemRimIO::new(&mut raw_data);
+
+        vmdk::wrap_raw_as_vmdk_io_with_progress(
+            &mut src_io,
+            &mut io,
+            disk_size as u64,
+            ImageOptions::deterministic(42),
+            |_, _| {},
+        )
+        .unwrap();
+
+        // Read descriptor text from sector 0
+        let mut desc_bytes = [0u8; 512];
+        io.read_at(0, &mut desc_bytes).unwrap();
+        let desc_str = core::str::from_utf8(&desc_bytes).unwrap();
+        // Extent description must reference sector offset 1, not 0
+        assert!(
+            desc_str.contains("FLAT \"disk.vmdk\" 1"),
+            "Descriptor should specify extent offset 1, got: {desc_str}"
+        );
+
+        // Tamper with descriptor magic -> unwrap must fail with InvalidHeader
+        let mut corrupt_storage = storage.clone();
+        corrupt_storage[0..4].copy_from_slice(b"XXXX");
+        let mut corrupt_io = MemRimIO::new(&mut corrupt_storage);
+        let mut dst = vec![0u8; disk_size];
+        let mut dst_io = MemRimIO::new(&mut dst);
+        assert_eq!(
+            vmdk::unwrap_vmdk_io(&mut corrupt_io, &mut dst_io),
+            Err(RimImgError::InvalidHeader("Invalid VMDK descriptor"))
+        );
+    }
+
+    #[test]
+    fn test_vhd_disk_type_validation() {
+        // H19: VHD must reject non-fixed disk types (e.g. dynamic = 3)
+        let disk_size = 512u64;
+        let mut footer = vhd::VhdFooter::new_fixed(disk_size, ImageOptions::deterministic(1));
+        assert!(footer.validate());
+
+        // Change disk_type to 3 (dynamic) and recalculate checksum
+        footer.disk_type = zerocopy::byteorder::U32::new(3);
+        let sum = footer.compute_checksum();
+        footer.checksum = zerocopy::byteorder::U32::new(sum);
+
+        assert!(!footer.validate(), "Dynamic VHD must fail validate()");
+
+        let mut storage = vec![0u8; (disk_size + vhd::VHD_FOOTER_SIZE) as usize];
+        let mut io = MemRimIO::new(&mut storage);
+        io.write_struct(disk_size, &footer).unwrap();
+
+        let mut dst = vec![0u8; disk_size as usize];
+        let mut dst_io = MemRimIO::new(&mut dst);
+        assert_eq!(
+            vhd::unwrap_vhd_io(&mut io, &mut dst_io),
+            Err(RimImgError::UnsupportedFormat)
+        );
+    }
+
+    #[test]
+    fn test_vdi_dynamic_data_offset_and_overlap_rejection() {
+        // H20: Small disk should use 1MB data offset
+        let small_disk = 10 * 1024 * 1024u64; // 10MB
+        assert_eq!(vdi::calculate_data_offset(small_disk), 1024 * 1024);
+
+        // Huge disk (e.g. 500GB -> 500,000 blocks * 4 = 2,000,000 bytes > 1MB)
+        let huge_disk = 500 * 1024 * 1024 * 1024u64;
+        let huge_offset = vdi::calculate_data_offset(huge_disk);
+        assert!(huge_offset >= 512 + (500 * 1024) * 4);
+        assert_eq!(huge_offset % (1024 * 1024), 0); // 1MB aligned
+
+        // Overlapping header rejection
+        let mut header = vdi::VdiHeader::new_fixed(small_disk, [0u8; 16]);
+        // Corrupt offset_data to overlap block map
+        header.offset_data = zerocopy::byteorder::U32::new(512);
+        assert_eq!(
+            vdi::validate_vdi_header(&header),
+            Err(RimImgError::Corrupted("VDI data offset overlaps block map"))
+        );
     }
 }

@@ -54,11 +54,93 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
         typeflag: u8,
         linkname: &str,
     ) -> FsInjectorResult {
+        let name_bytes = name.as_bytes();
+        let link_bytes = linkname.as_bytes();
+
+        // Check if name can be split into USTAR prefix (<= 155) + name (<= 100)
+        let mut ustar_prefix: Option<(&str, &str)> = None;
+        if name_bytes.len() > 100 {
+            for (idx, &b) in name_bytes.iter().enumerate().rev() {
+                if b == b'/' {
+                    let prefix = &name[..idx];
+                    let subname = &name[idx + 1..];
+                    if !prefix.is_empty()
+                        && prefix.len() <= 155
+                        && !subname.is_empty()
+                        && subname.len() <= 100
+                    {
+                        ustar_prefix = Some((prefix, subname));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If name > 100 and cannot be split via USTAR prefix, emit a GNU LongLink entry
+        if name_bytes.len() > 100 && ustar_prefix.is_none() {
+            let long_name_len = name_bytes.len() + 1;
+            let mut long_hdr = [0u8; TAR_BLOCK_SIZE];
+            long_hdr[..13].copy_from_slice(b"././@LongLink");
+            format_octal(&mut long_hdr[100..108], 0o644);
+            format_octal(&mut long_hdr[108..116], 0);
+            format_octal(&mut long_hdr[116..124], 0);
+            format_octal(&mut long_hdr[124..136], long_name_len as u64);
+            format_octal(&mut long_hdr[136..148], 0);
+            long_hdr[156] = GNULONGNAME;
+            long_hdr[257..263].copy_from_slice(USTAR_MAGIC);
+            long_hdr[263..265].copy_from_slice(USTAR_VERSION);
+            let chk = calculate_checksum(&long_hdr);
+            format_octal(&mut long_hdr[148..156], chk as u64);
+
+            self.io.write_at(self.current_offset, &long_hdr)?;
+            self.current_offset += TAR_BLOCK_SIZE as u64;
+
+            let padded_len = (long_name_len + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
+            let mut payload = alloc::vec![0u8; padded_len];
+            payload[..name_bytes.len()].copy_from_slice(name_bytes);
+            payload[name_bytes.len()] = 0;
+            self.io.write_at(self.current_offset, &payload)?;
+            self.current_offset += padded_len as u64;
+        }
+
+        // If linkname > 100, emit a GNU LongLink entry for the link target
+        if link_bytes.len() > 100 {
+            let long_link_len = link_bytes.len() + 1;
+            let mut long_hdr = [0u8; TAR_BLOCK_SIZE];
+            long_hdr[..13].copy_from_slice(b"././@LongLink");
+            format_octal(&mut long_hdr[100..108], 0o644);
+            format_octal(&mut long_hdr[108..116], 0);
+            format_octal(&mut long_hdr[116..124], 0);
+            format_octal(&mut long_hdr[124..136], long_link_len as u64);
+            format_octal(&mut long_hdr[136..148], 0);
+            long_hdr[156] = GNULONGLINK_TARGET;
+            long_hdr[257..263].copy_from_slice(USTAR_MAGIC);
+            long_hdr[263..265].copy_from_slice(USTAR_VERSION);
+            let chk = calculate_checksum(&long_hdr);
+            format_octal(&mut long_hdr[148..156], chk as u64);
+
+            self.io.write_at(self.current_offset, &long_hdr)?;
+            self.current_offset += TAR_BLOCK_SIZE as u64;
+
+            let padded_len = (long_link_len + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
+            let mut payload = alloc::vec![0u8; padded_len];
+            payload[..link_bytes.len()].copy_from_slice(link_bytes);
+            payload[link_bytes.len()] = 0;
+            self.io.write_at(self.current_offset, &payload)?;
+            self.current_offset += padded_len as u64;
+        }
+
         let mut header = [0u8; TAR_BLOCK_SIZE];
 
-        let name_bytes = name.as_bytes();
-        let name_len = name_bytes.len().min(100);
-        header[..name_len].copy_from_slice(&name_bytes[..name_len]);
+        if let Some((prefix, subname)) = ustar_prefix {
+            let sub_bytes = subname.as_bytes();
+            header[..sub_bytes.len()].copy_from_slice(sub_bytes);
+            let pref_bytes = prefix.as_bytes();
+            header[345..345 + pref_bytes.len()].copy_from_slice(pref_bytes);
+        } else {
+            let name_len = name_bytes.len().min(100);
+            header[..name_len].copy_from_slice(&name_bytes[..name_len]);
+        }
 
         format_octal(&mut header[100..108], mode as u64);
         format_octal(&mut header[108..116], uid as u64);
@@ -67,7 +149,6 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
         format_octal(&mut header[136..148], mtime);
         header[156] = typeflag;
 
-        let link_bytes = linkname.as_bytes();
         let link_len = link_bytes.len().min(100);
         header[157..157 + link_len].copy_from_slice(&link_bytes[..link_len]);
 

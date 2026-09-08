@@ -158,9 +158,8 @@ pub struct NtfsInjector<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
     /// Create a new NTFS injector
     pub fn new(io: &'a mut IO, meta: &'a NtfsMeta) -> FsInjectorResult<Self> {
-        let mft_allocator = mft::MftAllocator::from_io(io, meta).unwrap_or_else(|_| {
-            mft::MftAllocator::new(meta, crate::constant::MFT_RECORD_USNJRNL + 1)
-        });
+        let mft_allocator =
+            mft::MftAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
         let allocator = NtfsAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
         Ok(Self {
             io,

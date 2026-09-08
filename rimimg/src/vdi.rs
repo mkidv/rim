@@ -55,11 +55,25 @@ pub struct VdiHeader {
     pub unused2: [u8; 56],
 }
 
+/// Calculate data offset dynamically aligned to 1MB boundary based on block map size.
+pub fn calculate_data_offset(disk_size: u64) -> u64 {
+    let blocks = disk_size.div_ceil(BLOCK_SIZE as u64);
+    let bmap_bytes = blocks.saturating_mul(4);
+    let bmap_end = 512u64.saturating_add(bmap_bytes);
+    let rem = bmap_end % (BLOCK_SIZE as u64);
+    if rem == 0 {
+        bmap_end
+    } else {
+        bmap_end.saturating_add((BLOCK_SIZE as u64) - rem)
+    }
+}
+
 impl VdiHeader {
     pub fn new_fixed(disk_size: u64, uuid: [u8; 16]) -> Self {
         let blocks = disk_size.div_ceil(BLOCK_SIZE as u64) as u32;
         let total_sectors = disk_size / 512;
         let cylinders = (total_sectors / (16 * 63)) as u32;
+        let data_offset = calculate_data_offset(disk_size);
 
         Self {
             signature: U32::new(VDI_SIGNATURE),
@@ -69,7 +83,7 @@ impl VdiHeader {
             image_flags: U32::new(0),
             description: [0u8; 256],
             offset_blocks: U32::new(512),
-            offset_data: U32::new(DATA_OFFSET as u32),
+            offset_data: U32::new(data_offset as u32),
             geometry_cylinders: U32::new(cylinders),
             geometry_heads: U32::new(16),
             geometry_sectors: U32::new(63),
@@ -97,15 +111,15 @@ pub fn wrap_raw_as_vdi_io_with_progress<F: FnMut(u64, u64)>(
     options: ImageOptions,
     on_progress: F,
 ) -> RimImgResult {
-    init_vdi_io(dst, img_len, options)?;
-    dst.copy_from_with_progress(src, 0, DATA_OFFSET, img_len, on_progress)?;
+    let data_offset = init_vdi_io(dst, img_len, options)?;
+    dst.copy_from_with_progress(src, 0, data_offset, img_len, on_progress)?;
     dst.flush()?;
 
     Ok(())
 }
 
 #[cfg(feature = "alloc")]
-pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> RimImgResult {
+pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> RimImgResult<u64> {
     let num_blocks = u32::try_from(img_len.div_ceil(BLOCK_SIZE as u64))
         .map_err(|_| RimImgError::SizeOverflow)?;
 
@@ -117,6 +131,7 @@ pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> 
     dst.write_struct(0, &pre_header)?;
 
     let header = VdiHeader::new_fixed(img_len, options.unique_id);
+    let data_offset = header.offset_data.get() as u64;
     dst.write_struct(64, &header)?;
 
     let header_total = 64 + 400;
@@ -130,13 +145,13 @@ pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> 
     dst.write_at(512, &block_map)?;
 
     let current_pos = 512 + block_map_size as u64;
-    if current_pos < DATA_OFFSET {
+    if current_pos < data_offset {
         let pad_size =
-            usize::try_from(DATA_OFFSET - current_pos).map_err(|_| RimImgError::SizeOverflow)?;
+            usize::try_from(data_offset - current_pos).map_err(|_| RimImgError::SizeOverflow)?;
         dst.zero_fill(current_pos, pad_size)?;
     }
 
-    Ok(())
+    Ok(data_offset)
 }
 
 #[cfg(feature = "alloc")]
@@ -179,6 +194,16 @@ pub fn validate_vdi_header(header: &VdiHeader) -> RimImgResult {
     }
     if header.image_type.get() != VDI_TYPE_FIXED {
         return Err(RimImgError::UnsupportedFormat);
+    }
+    let offset_bmap = header.offset_blocks.get() as u64;
+    let bmap_bytes = (header.blocks_in_image.get() as u64)
+        .checked_mul(4)
+        .ok_or(RimImgError::SizeOverflow)?;
+    let bmap_end = offset_bmap
+        .checked_add(bmap_bytes)
+        .ok_or(RimImgError::SizeOverflow)?;
+    if (header.offset_data.get() as u64) < bmap_end {
+        return Err(RimImgError::Corrupted("VDI data offset overlaps block map"));
     }
     Ok(())
 }

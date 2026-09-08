@@ -2,8 +2,6 @@
 
 //! Indirect Block Logic for Ext2/3.
 
-use crate::core::allocator::FsAllocator;
-
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::{allocator::ExtAllocator, meta::ExtMeta, types::BlockMapArray};
 use rimio::prelude::*;
@@ -41,10 +39,11 @@ pub fn build_block_map<IO: RimIO + ?Sized>(
         let chunk = &remaining[..count];
 
         // Allocate Indirect Block
-        let handle = allocator
-            .allocate(io, 1)
+        let ind_blocks = allocator
+            .blocks
+            .allocate_blocks_list(io, 1)
             .map_err(|_| FsInjectorError::Other("Failed to allocate indirect block"))?;
-        let indirect_block = handle.blocks.0[0].start as u32;
+        let indirect_block = ind_blocks.0[0].start as u32;
         map.indirect = indirect_block;
 
         // Write Pointers
@@ -66,21 +65,25 @@ pub fn build_block_map<IO: RimIO + ?Sized>(
         let chunk = &remaining[..count]; // These are data blocks
 
         // Allocate Double Indirect Block
-        let handle = allocator
-            .allocate(io, 1)
+        let dbl_blocks = allocator
+            .blocks
+            .allocate_blocks_list(io, 1)
             .map_err(|_| FsInjectorError::Other("Failed to allocate double indirect block"))?;
-        let double_indirect_block = handle.blocks.0[0].start as u32;
+        let double_indirect_block = dbl_blocks.0[0].start as u32;
         map.double_indirect = double_indirect_block;
 
         // We need to split `chunk` into sub-chunks of `ptrs_per_block`
         // Allocate N indirect blocks
         let num_indirects = chunk.len().div_ceil(blocks_per_indirect);
-        let i_handle = allocator.allocate(io, num_indirects).map_err(|_| {
-            FsInjectorError::Other("Failed to allocate indirect blocks for double indirect")
-        })?;
+        let i_handle = allocator
+            .blocks
+            .allocate_blocks_list(io, num_indirects)
+            .map_err(|_| {
+                FsInjectorError::Other("Failed to allocate indirect blocks for double indirect")
+            })?;
 
         // Write the Double Indirect Block (it points to indirect blocks)
-        let i_blocks_vec = i_handle.blocks.to_units();
+        let i_blocks_vec = i_handle.to_units();
         write_pointers(io, meta, double_indirect_block, &i_blocks_vec)?;
 
         // For each indirect block, write its data pointers

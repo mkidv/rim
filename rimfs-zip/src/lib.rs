@@ -242,4 +242,34 @@ mod tests {
         assert_dirs(&mut resolver, &["documents/français"]);
         assert_dir_entries(&mut resolver, "documents", &["français"]);
     }
+
+    #[test]
+    fn test_zip_fallible_try_new_and_deflate_symlink() {
+        let meta = ZipMeta::default();
+        let mut empty_buf = [0u8; 100];
+        let mut io = MemRimIO::new(&mut empty_buf);
+
+        // try_new should fail on empty or unformatted buffer
+        let res = ZipResolver::try_new(&mut io, &meta);
+        assert!(res.is_err());
+
+        // Now test roundtrip of symlink with deflate compression
+        let mut disk_buf = alloc::vec![0u8; 65536];
+        let mut io = MemRimIO::new(&mut disk_buf);
+        let mut tree = FsNode::new_container(alloc::vec![
+            file("target_file.txt", b"Target File Content"),
+            FsNode::Symlink {
+                name: "link_deflate".into(),
+                target: "target_file.txt".into(),
+                attr: rimfs_core::resolver::attr::FileAttributes::new_symlink(),
+            }
+        ]);
+        let mut injector = ZipInjector::new(&mut io, &meta).unwrap();
+        injector.inject_tree(&mut tree).unwrap();
+        injector.flush().unwrap();
+
+        let mut resolver = ZipResolver::try_new(&mut io, &meta).unwrap();
+        let link_target = resolver.read_link("link_deflate").unwrap();
+        assert_eq!(link_target, "target_file.txt");
+    }
 }

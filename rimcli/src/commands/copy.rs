@@ -247,7 +247,6 @@ pub fn run(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("tar"))
-        || tar::TarMeta::new(raw_len, None).is_ok()
     {
         let meta = tar::TarMeta::new(raw_len, None)?;
         let mut resolver = tar::TarResolver::new(&mut image_io, &meta);
@@ -264,7 +263,6 @@ pub fn run(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-        || zip::ZipMeta::new(raw_len, None).is_ok()
     {
         let meta = zip::ZipMeta::new(raw_len, None)?;
         let mut resolver = zip::ZipResolver::new(&mut image_io, &meta);
@@ -281,7 +279,6 @@ pub fn run(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
-        || iso::IsoMeta::new(raw_len, None).is_ok()
     {
         let meta = iso::IsoMeta::new(raw_len, None)?;
         let mut resolver = iso::IsoResolver::new(&mut image_io, &meta);
