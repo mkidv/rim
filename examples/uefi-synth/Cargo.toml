@@ -20,7 +20,7 @@ test = false
 
 [dependencies]
 uefi = { version = "0.40.0", default-features = false, features = ["alloc"] }
-rimio = { version = "0.9.1", path = "../../rimio", default-features = false, features = ["alloc", "uefi"] }
-rimpart = { version = "0.9.1", path = "../../rimpart", default-features = false, features = ["alloc"] }
-rimfs = { version = "0.9.1", path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat", "tar"] }
-rimgen = { version = "0.9.1", path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat"] }
+rimio = { version = "0.10.0", path = "../../rimio", default-features = false, features = ["alloc", "uefi"] }
+rimpart = { version = "0.10.0", path = "../../rimpart", default-features = false, features = ["alloc"] }
+rimfs = { version = "0.10.0", path = "../../rimfs", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat", "tar"] }
+rimgen = { version = "0.10.0", path = "../../rimgen", default-features = false, features = ["alloc", "fat", "ext", "ntfs", "exfat"] }

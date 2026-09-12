@@ -19,15 +19,15 @@ std = ["alloc", "rimio/std", "crc32fast/std", "time/std", "rimfs-core/std"]
 [dependencies]
 bitflags = "2.9.1"
 crc32fast = { version = "1.4.2", default-features = false }
-rimio = { path = "../rimio", version = "0.9.1", default-features = false }
-rimfs-core = { path = "../rimfs-core", version = "0.9.1", default-features = false }
+rimio = { path = "../rimio", version = "0.10.0", default-features = false }
+rimfs-core = { path = "../rimfs-core", version = "0.10.0", default-features = false }
 time = { version = "0.3.41", default-features = false }
 zerocopy = { version = "0.8.25", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
-rimfs-core = { path = "../rimfs-core", version = "0.9.1", default-features = false, features = ["test-utils"] }
-rimio = { path = "../rimio", version = "0.9.1", features = ["mmap", "std"] }
+rimfs-core = { path = "../rimfs-core", version = "0.10.0", default-features = false, features = ["test-utils"] }
+rimio = { path = "../rimio", version = "0.10.0", features = ["mmap", "std"] }
 tempfile = "3.20.0"
 
 [[bench]]
