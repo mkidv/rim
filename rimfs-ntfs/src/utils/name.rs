@@ -69,6 +69,9 @@ pub fn generate_dos_8_3_name(name: &str) -> String {
 
 /// Determine if a filename complies with DOS 8.3 constraints (case-preserving for Win32AndDos).
 pub fn is_valid_dos_8_3(name: &str) -> bool {
+    if name == "." || name == ".." {
+        return true;
+    }
     if name.is_empty() || name.len() > 12 {
         return false;
     }
@@ -155,9 +158,19 @@ mod tests {
     fn test_dos_8_3_and_namespace() {
         assert!(is_valid_dos_8_3("FILE.TXT"));
         assert!(is_valid_dos_8_3("test_win.txt"));
+        assert!(is_valid_dos_8_3("."));
+        assert!(is_valid_dos_8_3(".."));
         assert!(!is_valid_dos_8_3("win_payload"));
         assert!(!is_valid_dos_8_3("long_filename.extension"));
 
+        assert_eq!(
+            determine_file_name_namespace("."),
+            NtfsFileNameNamespace::Win32AndDos
+        );
+        assert_eq!(
+            determine_file_name_namespace(".."),
+            NtfsFileNameNamespace::Win32AndDos
+        );
         assert_eq!(
             determine_file_name_namespace("FILE.TXT"),
             NtfsFileNameNamespace::Win32AndDos

@@ -152,6 +152,13 @@ impl NtfsRootDirFeature {
                 data_size: 0,
                 allocated_size: 0,
             },
+            RootSpec {
+                rec: MFT_RECORD_ROOT,
+                name: ".",
+                attrs: sys_dir,
+                data_size: 0,
+                allocated_size: 0,
+            },
         ];
 
         items
@@ -221,11 +228,13 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
         let attrs =
             NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM | NtfsFileAttributes::DIRECTORY;
         record.add_attribute(NtfsAttribute::standard_info_basic(attrs, self.timestamp));
-        record.add_attribute(NtfsAttribute::file_name(
+        record.add_attribute(NtfsAttribute::file_name_custom(
             Self::root_ref(),
             ".",
             0,
             (attrs - NtfsFileAttributes::DIRECTORY) | NtfsFileAttributes::I30_INDEX,
+            NtfsFileNameNamespace::Win32AndDos,
+            self.timestamp,
         ));
         record.add_attribute(NtfsAttribute::security_descriptor(
             SECURITY_DESCRIPTOR_ROOT.to_bytes(),
