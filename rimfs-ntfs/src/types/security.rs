@@ -735,7 +735,10 @@ mod tests {
         assert_eq!(&out[..16], &[0xaa; 16]);
         assert_eq!(
             &out[36..136],
-            SECURITY_DESCRIPTOR_SYSTEM.try_to_bytes().unwrap().as_slice()
+            SECURITY_DESCRIPTOR_SYSTEM
+                .try_to_bytes()
+                .unwrap()
+                .as_slice()
         );
         assert_eq!(&out[136..], &[0; 8]);
     }
@@ -833,7 +836,8 @@ mod tests {
         {
             let offset = [0, 192][index];
             let header =
-                SecurityDescriptorHeader::ref_from_bytes(&content.sds[offset..offset + 20]).unwrap();
+                SecurityDescriptorHeader::ref_from_bytes(&content.sds[offset..offset + 20])
+                    .unwrap();
             assert_eq!(header.offset.get(), offset as u64);
             assert_eq!(header.length.get() as usize, 20 + expected.len());
             assert_eq!(

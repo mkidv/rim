@@ -2,15 +2,18 @@
 
 //! Low-level FAT and exFAT forensic analysis and sector decoding.
 
-use rimio::RimIO;
-use rimfs::fat::types::FatCommonBpb;
 use rimfs::exfat::types::ExFatBootSector;
+use rimfs::fat::types::FatCommonBpb;
+use rimio::RimIO;
 use zerocopy::FromBytes;
 
 pub fn analyze_fat(io: &mut dyn RimIO, partition_offset: u64) {
     let mut sector = [0u8; 512];
     if io.read_at(partition_offset, &mut sector).is_err() {
-        println!("[-] Failed to read sector at offset 0x{:X}", partition_offset);
+        println!(
+            "[-] Failed to read sector at offset 0x{:X}",
+            partition_offset
+        );
         return;
     }
 
@@ -35,7 +38,10 @@ pub fn analyze_fat(io: &mut dyn RimIO, partition_offset: u64) {
         println!("  Reserved Sectors:   {}", rsvd);
         println!("  Number of FATs:     {}", num_fats);
         println!("  Total Sectors:      {}", total_sec);
-        println!("  Volume Size:        {} MB", (total_sec * bps as u64) / (1024 * 1024));
+        println!(
+            "  Volume Size:        {} MB",
+            (total_sec * bps as u64) / (1024 * 1024)
+        );
 
         let fat_start = partition_offset + (rsvd as u64 * bps as u64);
         println!("  FAT #1 Offset:      0x{:X}", fat_start);
@@ -43,17 +49,37 @@ pub fn analyze_fat(io: &mut dyn RimIO, partition_offset: u64) {
         // Check for FAT32 FSInfo sector
         if rsvd >= 2 {
             let mut fsinfo = [0u8; 512];
-            if io.read_at(partition_offset + bps as u64, &mut fsinfo).is_ok() {
+            if io
+                .read_at(partition_offset + bps as u64, &mut fsinfo)
+                .is_ok()
+            {
                 let lead_sig = u32::from_le_bytes([fsinfo[0], fsinfo[1], fsinfo[2], fsinfo[3]]);
-                let struct_sig = u32::from_le_bytes([fsinfo[484], fsinfo[485], fsinfo[486], fsinfo[487]]);
+                let struct_sig =
+                    u32::from_le_bytes([fsinfo[484], fsinfo[485], fsinfo[486], fsinfo[487]]);
                 if lead_sig == 0x41615252 && struct_sig == 0x61417272 {
-                    let free_clus = u32::from_le_bytes([fsinfo[488], fsinfo[489], fsinfo[490], fsinfo[491]]);
-                    let next_free = u32::from_le_bytes([fsinfo[492], fsinfo[493], fsinfo[494], fsinfo[495]]);
+                    let free_clus =
+                        u32::from_le_bytes([fsinfo[488], fsinfo[489], fsinfo[490], fsinfo[491]]);
+                    let next_free =
+                        u32::from_le_bytes([fsinfo[492], fsinfo[493], fsinfo[494], fsinfo[495]]);
                     println!("\n  --- FSInfo Sector ---");
                     println!("    Lead Signature:   0x{:08X} (Valid)", lead_sig);
                     println!("    Struct Signature: 0x{:08X} (Valid)", struct_sig);
-                    println!("    Free Clusters:    {}", if free_clus == 0xFFFFFFFF { "Unknown (0xFFFFFFFF)".to_string() } else { free_clus.to_string() });
-                    println!("    Next Free Cluster:{}", if next_free == 0xFFFFFFFF { "Unknown (0xFFFFFFFF)".to_string() } else { next_free.to_string() });
+                    println!(
+                        "    Free Clusters:    {}",
+                        if free_clus == 0xFFFFFFFF {
+                            "Unknown (0xFFFFFFFF)".to_string()
+                        } else {
+                            free_clus.to_string()
+                        }
+                    );
+                    println!(
+                        "    Next Free Cluster:{}",
+                        if next_free == 0xFFFFFFFF {
+                            "Unknown (0xFFFFFFFF)".to_string()
+                        } else {
+                            next_free.to_string()
+                        }
+                    );
                 }
             }
         }
@@ -63,7 +89,10 @@ pub fn analyze_fat(io: &mut dyn RimIO, partition_offset: u64) {
 pub fn analyze_exfat(io: &mut dyn RimIO, partition_offset: u64) {
     let mut sector = [0u8; 512];
     if io.read_at(partition_offset, &mut sector).is_err() {
-        println!("[-] Failed to read sector at offset 0x{:X}", partition_offset);
+        println!(
+            "[-] Failed to read sector at offset 0x{:X}",
+            partition_offset
+        );
         return;
     }
 
@@ -80,13 +109,31 @@ pub fn analyze_exfat(io: &mut dyn RimIO, partition_offset: u64) {
         println!("\n=== exFAT Filesystem Forensic Overview ===");
         println!("  Offset:             0x{:X}", partition_offset);
         println!("  FS Name:            EXFAT");
-        println!("  Bytes Per Sector:   {} (shift: {})", bps, vbr.bytes_per_sector_shift);
-        println!("  Sectors Per Cluster:{} (shift: {})", spc, vbr.sectors_per_cluster_shift);
+        println!(
+            "  Bytes Per Sector:   {} (shift: {})",
+            bps, vbr.bytes_per_sector_shift
+        );
+        println!(
+            "  Sectors Per Cluster:{} (shift: {})",
+            spc, vbr.sectors_per_cluster_shift
+        );
         println!("  Cluster Size:       {} bytes", bps * spc);
-        println!("  Volume Length:      {} sectors ({} MB)", vol_len, (vol_len * bps) / (1024 * 1024));
-        println!("  FAT Offset:         0x{:X} (Sector {})", partition_offset + fat_off as u64 * bps, fat_off);
+        println!(
+            "  Volume Length:      {} sectors ({} MB)",
+            vol_len,
+            (vol_len * bps) / (1024 * 1024)
+        );
+        println!(
+            "  FAT Offset:         0x{:X} (Sector {})",
+            partition_offset + fat_off as u64 * bps,
+            fat_off
+        );
         println!("  FAT Length:         {} sectors", fat_len);
-        println!("  Cluster Heap:       0x{:X} (Sector {})", partition_offset + heap_off as u64 * bps, heap_off);
+        println!(
+            "  Cluster Heap:       0x{:X} (Sector {})",
+            partition_offset + heap_off as u64 * bps,
+            heap_off
+        );
         println!("  Cluster Count:      {}", clus_cnt);
         println!("  Root Dir Cluster:   {}", root_dir);
         println!("  Volume Serial:      0x{:08X}", vbr.volume_serial.get());

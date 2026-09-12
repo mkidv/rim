@@ -2,11 +2,11 @@
 
 //! Adversarial integrity tripwires testing `ExtChecker` against deliberate corruptions.
 
-use alloc::vec::Vec;
 use crate::checker::ExtChecker;
 use crate::constant::*;
 use crate::formatter::ExtFormatter;
 use crate::meta::ExtMeta;
+use alloc::vec::Vec;
 use rimfs_core::checker::FsChecker;
 use rimfs_core::formatter::FsFormatter;
 use rimfs_core::testing::{assert_has_error, corrupt_byte_at, corrupt_bytes_at};
@@ -34,7 +34,10 @@ fn test_ext_tripwire_corrupted_magic() {
 
     let mut checker = ExtChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "ExtChecker must detect invalid superblock magic");
+    assert!(
+        report.has_error(),
+        "ExtChecker must detect invalid superblock magic"
+    );
     assert_has_error(&report, "SB.MAGIC");
 }
 
@@ -44,10 +47,15 @@ fn test_ext_tripwire_corrupted_free_blocks_counter() {
     let mut io = MemRimIO::new(&mut disk);
 
     // Corrupt free blocks count in superblock at EXT_SUPERBLOCK_OFFSET + 0x0C
-    corrupt_byte_at(&mut io, EXT_SUPERBLOCK_OFFSET + 0x0C, |b| b.wrapping_add(10));
+    corrupt_byte_at(&mut io, EXT_SUPERBLOCK_OFFSET + 0x0C, |b| {
+        b.wrapping_add(10)
+    });
 
     let mut checker = ExtChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "ExtChecker must detect free blocks mismatch");
+    assert!(
+        report.has_error(),
+        "ExtChecker must detect free blocks mismatch"
+    );
     assert_has_error(&report, "SB.FREE_BLOCKS");
 }

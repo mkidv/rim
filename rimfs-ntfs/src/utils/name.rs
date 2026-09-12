@@ -112,8 +112,8 @@ pub fn compare_names_upcase(a: &[u16], b: &[u16], upcase: &UpcaseHandle) -> Orde
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn test_compare_names_upcase() {

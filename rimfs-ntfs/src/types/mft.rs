@@ -11,9 +11,9 @@ use rimio::prelude::*;
 use crate::attr::NtfsFileAttributes;
 use crate::flags::MftRecordFlags;
 use crate::meta::NtfsMeta;
+use crate::mft::build_mft_reference;
 use crate::types::attribute::{NtfsAttribute, NtfsAttributeContent};
 use crate::types::{MftRecordHeader, NtfsAttributeType, NtfsFileNameNamespace, NtfsIndexEntry};
-use crate::mft::build_mft_reference;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]

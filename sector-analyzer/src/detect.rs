@@ -67,16 +67,16 @@ pub fn detect_fs_at(io: &mut dyn RimIO, offset: u64) -> FsKind {
     // 4. Check for EXT (Superblock magic 0xEF53 at offset + 1024 + 0x38)
     let mut sb_magic = [0u8; 2];
     if io.read_at(offset + 1024 + 56, &mut sb_magic).is_ok()
-        && u16::from_le_bytes(sb_magic) == 0xEF53 {
-            return FsKind::Ext;
-        }
+        && u16::from_le_bytes(sb_magic) == 0xEF53
+    {
+        return FsKind::Ext;
+    }
 
     // 5. Check for ISO 9660 (Descriptor at sector 16 = offset 32768)
     let mut iso_id = [0u8; 6];
-    if io.read_at(offset + 16 * 2048, &mut iso_id).is_ok()
-        && &iso_id[1..6] == b"CD001" {
-            return FsKind::Iso;
-        }
+    if io.read_at(offset + 16 * 2048, &mut iso_id).is_ok() && &iso_id[1..6] == b"CD001" {
+        return FsKind::Iso;
+    }
 
     FsKind::Unknown
 }

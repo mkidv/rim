@@ -17,9 +17,9 @@ use crate::core::bitmap::{BitmapDriver, SimpleBitmapMeta};
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
+use crate::mft::build_mft_reference;
 use crate::types::security::SECURITY_DESCRIPTOR_SYSTEM;
 use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsMftRecord};
-use crate::mft::build_mft_reference;
 use crate::utils::encode_runs_to_dataruns;
 
 pub struct NtfsMftFeature {

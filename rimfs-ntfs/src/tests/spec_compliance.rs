@@ -105,14 +105,37 @@ fn test_ntfs_boot_sector_wire_format_offsets() {
     let boot = NtfsBootSector::new_from_meta(&meta);
 
     let bytes = boot.as_bytes();
-    assert_eq!(&bytes[0..3], &[0xEB, 0x52, 0x90], "Jump instruction at 0x00");
+    assert_eq!(
+        &bytes[0..3],
+        &[0xEB, 0x52, 0x90],
+        "Jump instruction at 0x00"
+    );
     assert_eq!(&bytes[3..11], b"NTFS    ", "OEM ID at 0x03");
-    assert_eq!(&bytes[11..13], &512u16.to_le_bytes(), "Bytes per sector at 0x0B");
-    assert_eq!(bytes[13], meta.sectors_per_cluster, "Sectors per cluster at 0x0D");
+    assert_eq!(
+        &bytes[11..13],
+        &512u16.to_le_bytes(),
+        "Bytes per sector at 0x0B"
+    );
+    assert_eq!(
+        bytes[13], meta.sectors_per_cluster,
+        "Sectors per cluster at 0x0D"
+    );
     assert_eq!(bytes[21], 0xF8, "Media descriptor at 0x15");
-    assert_eq!(&bytes[48..56], &meta.mft_lcn.to_le_bytes(), "MFT LCN at 0x30");
-    assert_eq!(&bytes[56..64], &meta.mft_mirr_lcn.to_le_bytes(), "MFT Mirr LCN at 0x38");
-    assert_eq!(&bytes[510..512], &[0x55, 0xAA], "End marker signature at 0x1FE");
+    assert_eq!(
+        &bytes[48..56],
+        &meta.mft_lcn.to_le_bytes(),
+        "MFT LCN at 0x30"
+    );
+    assert_eq!(
+        &bytes[56..64],
+        &meta.mft_mirr_lcn.to_le_bytes(),
+        "MFT Mirr LCN at 0x38"
+    );
+    assert_eq!(
+        &bytes[510..512],
+        &[0x55, 0xAA],
+        "End marker signature at 0x1FE"
+    );
 }
 
 #[test]

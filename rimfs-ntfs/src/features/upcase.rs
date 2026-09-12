@@ -15,9 +15,9 @@ use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
-use crate::upcase::UpcaseHandle;
-use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};
 use crate::mft::build_mft_reference;
+use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};
+use crate::upcase::UpcaseHandle;
 use crate::utils::encode_runs_to_dataruns;
 
 #[derive(Default)]

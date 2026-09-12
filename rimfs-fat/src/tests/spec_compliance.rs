@@ -23,8 +23,15 @@ fn test_fat_bpb_wire_format_offsets() {
     let bytes = vbr.as_bytes();
 
     assert_eq!(&bytes[0..3], &FAT_JUMP_BOOT, "Jump boot at 0x00");
-    assert_eq!(&bytes[11..13], &512u16.to_le_bytes(), "Bytes per sector at 0x0B");
-    assert_eq!(bytes[13], meta.sectors_per_cluster as u8, "Sectors per cluster at 0x0D");
+    assert_eq!(
+        &bytes[11..13],
+        &512u16.to_le_bytes(),
+        "Bytes per sector at 0x0B"
+    );
+    assert_eq!(
+        bytes[13], meta.sectors_per_cluster as u8,
+        "Sectors per cluster at 0x0D"
+    );
     assert_eq!(bytes[16], meta.num_fats, "Number of FATs at 0x10");
     assert_eq!(bytes[21], FAT_MEDIA_DESCRIPTOR, "Media descriptor at 0x15");
     assert_eq!(&bytes[510..512], &[0x55, 0xAA], "End marker at 0x1FE");
@@ -46,9 +53,9 @@ fn test_fat_attribute_canonical_constants() {
 fn test_fat_dir_entry_wire_format() {
     let entry = FatEntry::new(
         *b"TESTFILETXT",
-        0x20, // ARCHIVE
-        2,    // first cluster
-        100,  // file size
+        0x20,   // ARCHIVE
+        2,      // first cluster
+        100,    // file size
         0x5021, // date
         0x6000, // time
         0,

@@ -55,11 +55,11 @@ impl<'a, IO: RimIO + ?Sized> ExFatFormatter<'a, IO> {
 mod tests {
     extern crate std;
     use self::std::{print, println};
-    use alloc::vec::Vec;
     use crate::{
         core::fat::FatFsMeta,
         {constant::EXFAT_FIRST_CLUSTER, prelude::*},
     };
+    use alloc::vec::Vec;
 
     fn hexdump(label: &str, data: &[u8]) {
         println!("--- {label} ---");

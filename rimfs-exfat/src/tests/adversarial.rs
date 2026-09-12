@@ -2,10 +2,10 @@
 
 //! Adversarial integrity tripwires testing `ExFatChecker` against deliberate corruptions.
 
-use alloc::vec::Vec;
 use crate::checker::ExFatChecker;
 use crate::formatter::ExFatFormatter;
 use crate::meta::ExFatMeta;
+use alloc::vec::Vec;
 use rimfs_core::checker::FsChecker;
 use rimfs_core::formatter::FsFormatter;
 use rimfs_core::meta::FsMeta;
@@ -13,7 +13,8 @@ use rimfs_core::testing::{assert_has_error, corrupt_byte_at};
 use rimio::MemRimIO;
 
 fn setup_clean_exfat() -> (ExFatMeta, Vec<u8>) {
-    let meta = ExFatMeta::new(32 * 1024 * 1024, Some("EXFAT_ADV")).expect("ExFatMeta creation failed");
+    let meta =
+        ExFatMeta::new(32 * 1024 * 1024, Some("EXFAT_ADV")).expect("ExFatMeta creation failed");
     let mut disk = vec![0u8; 32 * 1024 * 1024];
     {
         let mut io = MemRimIO::new(&mut disk);
@@ -34,7 +35,10 @@ fn test_exfat_tripwire_corrupted_boot_checksum() {
 
     let mut checker = ExFatChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "ExFatChecker must detect VBR checksum mismatch");
+    assert!(
+        report.has_error(),
+        "ExFatChecker must detect VBR checksum mismatch"
+    );
     assert_has_error(&report, "VBR.CHK");
 }
 
@@ -50,9 +54,15 @@ fn test_exfat_tripwire_orphan_cluster() {
 
     let mut checker = ExFatChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "ExFatChecker must detect orphan clusters / bitmap mismatch");
     assert!(
-        report.findings.iter().any(|f| f.code == "WALK.ORPHAN" || f.code == "XREF.BITMAPFAT"),
+        report.has_error(),
+        "ExFatChecker must detect orphan clusters / bitmap mismatch"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.code == "WALK.ORPHAN" || f.code == "XREF.BITMAPFAT"),
         "expected WALK.ORPHAN or XREF.BITMAPFAT, got {:?}",
         report.findings
     );

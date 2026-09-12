@@ -654,8 +654,8 @@ fn split_extents(runs: &MappedRunList, block_size: usize) -> FsInjectorResult<Ve
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::ToString;
     use super::*;
+    use alloc::string::ToString;
 
     use crate::checker::ExtChecker;
     use crate::core::traits::{FsFormatter, FsTreeResolver};

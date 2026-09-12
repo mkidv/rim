@@ -357,4 +357,3 @@ mod tests {
         assert_eq!(system_file_mft_reference(5), build_mft_reference(5, 5));
     }
 }
-

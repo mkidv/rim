@@ -55,7 +55,10 @@ fn main() {
         }
         "cat" => {
             if args.len() < 4 {
-                println!("Usage: {} cat <image> <file_path> [partition_index]", args[0]);
+                println!(
+                    "Usage: {} cat <image> <file_path> [partition_index]",
+                    args[0]
+                );
                 return;
             }
             let file_path = &args[3];
@@ -225,10 +228,18 @@ fn print_usage(bin: &str) {
     println!("sector-analyzer - Universal Forensic & Filesystem Verification Tool");
     println!("Usage: {} <command> [args]", bin);
     println!("\nUniversal Commands:");
-    println!("  <image>                         Inspect container, partition scheme, and filesystems");
-    println!("  info <image>                    Detailed forensic inspection of container and partitions");
-    println!("  check <image> [part_idx]        Run RIM FsChecker on partition (NTFS, FAT, exFAT, EXT4, ISO)");
-    println!("  ls <image> [part_idx] [path]    List directory tree via FsTreeResolver without OS mounting");
+    println!(
+        "  <image>                         Inspect container, partition scheme, and filesystems"
+    );
+    println!(
+        "  info <image>                    Detailed forensic inspection of container and partitions"
+    );
+    println!(
+        "  check <image> [part_idx]        Run RIM FsChecker on partition (NTFS, FAT, exFAT, EXT4, ISO)"
+    );
+    println!(
+        "  ls <image> [part_idx] [path]    List directory tree via FsTreeResolver without OS mounting"
+    );
     println!("  cat <image> <file_path> [part]  Extract and print file contents");
     println!("  probe <image>                   Scan for known magic signatures across the image");
     println!("  find <image> <pattern> [off] [l] Search for hex/text pattern");
@@ -237,8 +248,12 @@ fn print_usage(bin: &str) {
     println!("  dump-lba <image> <lba> [count]  Hex dump specific sectors");
     println!("  extract-bin <image> <lba> <cnt> <out> Extract raw sectors to a binary file");
     println!("\nFormat-Specific Forensic Dumps:");
-    println!("  dump-fat-meta <image> [part]    Dump FAT12/16/32 or exFAT BPB, FSInfo and geometry");
-    println!("  dump-ext-meta <image> [part]    Dump EXT2/3/4 Superblock and Block Group Descriptors");
+    println!(
+        "  dump-fat-meta <image> [part]    Dump FAT12/16/32 or exFAT BPB, FSInfo and geometry"
+    );
+    println!(
+        "  dump-ext-meta <image> [part]    Dump EXT2/3/4 Superblock and Block Group Descriptors"
+    );
     println!("  dump-ntfs-meta <image>          Detailed NTFS MFT and system records overview");
     println!("  dump-mft <image> <record_num>   Dump specific NTFS MFT record with attributes");
     println!("  dump-ntfs-layout <image>        Full NTFS system records layout dump");
@@ -261,7 +276,11 @@ fn run_info(path: &str) {
     println!("  SECTOR-ANALYZER FORENSIC DISK REPORT");
     println!("============================================================");
     println!("File Path:        {}", path);
-    println!("File Size:        {} bytes ({:.2} MB)", file_len, file_len as f64 / (1024.0 * 1024.0));
+    println!(
+        "File Size:        {} bytes ({:.2} MB)",
+        file_len,
+        file_len as f64 / (1024.0 * 1024.0)
+    );
 
     if let Ok(fmt) = rimimg::ImageFormat::from_io(&mut io) {
         println!("Container Format: {:?}", fmt);
@@ -275,8 +294,16 @@ fn run_info(path: &str) {
     for part in &parts {
         println!("  [Partition #{}]", part.index);
         println!("    Type:         {}", part.part_type);
-        println!("    Start Offset: 0x{:X} (Sector {})", part.start_offset, part.start_offset / DEFAULT_SECTOR_SIZE);
-        println!("    Size:         {} bytes ({:.2} MB)", part.size_bytes, part.size_bytes as f64 / (1024.0 * 1024.0));
+        println!(
+            "    Start Offset: 0x{:X} (Sector {})",
+            part.start_offset,
+            part.start_offset / DEFAULT_SECTOR_SIZE
+        );
+        println!(
+            "    Size:         {} bytes ({:.2} MB)",
+            part.size_bytes,
+            part.size_bytes as f64 / (1024.0 * 1024.0)
+        );
         println!("    Filesystem:   {}", part.fs.name());
         println!();
     }
@@ -292,61 +319,62 @@ fn run_check(path: &str, part_idx: usize) {
         return;
     }
     let part = parts.get(part_idx).unwrap_or_else(|| {
-        println!("[-] Partition index {} out of range (found {} partitions), using partition 0", part_idx, parts.len());
+        println!(
+            "[-] Partition index {} out of range (found {} partitions), using partition 0",
+            part_idx,
+            parts.len()
+        );
         &parts[0]
     });
-    println!("[+] Running FsChecker on Partition {} ({}) at offset 0x{:X}", part.index, part.fs.name(), part.start_offset);
+    println!(
+        "[+] Running FsChecker on Partition {} ({}) at offset 0x{:X}",
+        part.index,
+        part.fs.name(),
+        part.start_offset
+    );
     io.set_offset(part.start_offset);
 
     match part.fs {
-        FsKind::Ntfs => {
-            match rimfs::ntfs::NtfsMeta::from_io(&mut io) {
-                Ok(meta) => {
-                    let mut checker = rimfs::ntfs::traits::NtfsChecker::new(&mut io, &meta);
-                    match checker.check_all() {
-                        Ok(rep) => print_report(&rep),
-                        Err(e) => println!("[-] NtfsChecker error: {e:?}"),
-                    }
+        FsKind::Ntfs => match rimfs::ntfs::NtfsMeta::from_io(&mut io) {
+            Ok(meta) => {
+                let mut checker = rimfs::ntfs::traits::NtfsChecker::new(&mut io, &meta);
+                match checker.check_all() {
+                    Ok(rep) => print_report(&rep),
+                    Err(e) => println!("[-] NtfsChecker error: {e:?}"),
                 }
-                Err(e) => println!("[-] Failed to parse NtfsMeta: {e:?}"),
             }
-        }
-        FsKind::Fat => {
-            match rimfs::fat::FatMeta::from_io(&mut io) {
-                Ok(meta) => {
-                    let mut checker = rimfs::fat::traits::FatChecker::new(&mut io, &meta);
-                    match checker.check_all() {
-                        Ok(rep) => print_report(&rep),
-                        Err(e) => println!("[-] FatChecker error: {e:?}"),
-                    }
+            Err(e) => println!("[-] Failed to parse NtfsMeta: {e:?}"),
+        },
+        FsKind::Fat => match rimfs::fat::FatMeta::from_io(&mut io) {
+            Ok(meta) => {
+                let mut checker = rimfs::fat::traits::FatChecker::new(&mut io, &meta);
+                match checker.check_all() {
+                    Ok(rep) => print_report(&rep),
+                    Err(e) => println!("[-] FatChecker error: {e:?}"),
                 }
-                Err(e) => println!("[-] Failed to parse FatMeta: {e:?}"),
             }
-        }
-        FsKind::ExFat => {
-            match rimfs::exfat::ExFatMeta::from_io(&mut io) {
-                Ok(meta) => {
-                    let mut checker = rimfs::exfat::traits::ExFatChecker::new(&mut io, &meta);
-                    match checker.check_all() {
-                        Ok(rep) => print_report(&rep),
-                        Err(e) => println!("[-] ExFatChecker error: {e:?}"),
-                    }
+            Err(e) => println!("[-] Failed to parse FatMeta: {e:?}"),
+        },
+        FsKind::ExFat => match rimfs::exfat::ExFatMeta::from_io(&mut io) {
+            Ok(meta) => {
+                let mut checker = rimfs::exfat::traits::ExFatChecker::new(&mut io, &meta);
+                match checker.check_all() {
+                    Ok(rep) => print_report(&rep),
+                    Err(e) => println!("[-] ExFatChecker error: {e:?}"),
                 }
-                Err(e) => println!("[-] Failed to parse ExFatMeta: {e:?}"),
             }
-        }
-        FsKind::Ext => {
-            match rimfs::ext::ExtMeta::from_io(&mut io) {
-                Ok(meta) => {
-                    let mut checker = rimfs::ext::traits::ExtChecker::new(&mut io, &meta);
-                    match checker.check_all() {
-                        Ok(rep) => print_report(&rep),
-                        Err(e) => println!("[-] ExtChecker error: {e:?}"),
-                    }
+            Err(e) => println!("[-] Failed to parse ExFatMeta: {e:?}"),
+        },
+        FsKind::Ext => match rimfs::ext::ExtMeta::from_io(&mut io) {
+            Ok(meta) => {
+                let mut checker = rimfs::ext::traits::ExtChecker::new(&mut io, &meta);
+                match checker.check_all() {
+                    Ok(rep) => print_report(&rep),
+                    Err(e) => println!("[-] ExtChecker error: {e:?}"),
                 }
-                Err(e) => println!("[-] Failed to parse ExtMeta: {e:?}"),
             }
-        }
+            Err(e) => println!("[-] Failed to parse ExtMeta: {e:?}"),
+        },
         FsKind::Iso => {
             let meta = rimfs::iso::IsoMeta::default();
             let mut checker = rimfs::iso::IsoChecker::new(&mut io, &meta);
@@ -356,7 +384,10 @@ fn run_check(path: &str, part_idx: usize) {
             }
         }
         FsKind::Unknown => {
-            println!("[-] Unknown filesystem format at partition offset 0x{:X}", part.start_offset);
+            println!(
+                "[-] Unknown filesystem format at partition offset 0x{:X}",
+                part.start_offset
+            );
         }
     }
 }
@@ -370,7 +401,12 @@ fn run_ls(path: &str, part_idx: usize, dir_path: &str) {
         return;
     }
     let part = parts.get(part_idx).unwrap_or(&parts[0]);
-    println!("[+] Browsing Partition {} ({}) at path '{}'", part.index, part.fs.name(), dir_path);
+    println!(
+        "[+] Browsing Partition {} ({}) at path '{}'",
+        part.index,
+        part.fs.name(),
+        dir_path
+    );
     io.set_offset(part.start_offset);
 
     let entries = match part.fs {
@@ -502,9 +538,21 @@ fn run_dump_ext(path: &str, part_idx: usize) {
 
 fn print_report(report: &VerifyReport) {
     println!("\n=== Filesystem Integrity Report ===");
-    let errors = report.findings.iter().filter(|f| f.sev == Severity::Error).count();
-    let warns = report.findings.iter().filter(|f| f.sev == Severity::Warn).count();
-    let infos = report.findings.iter().filter(|f| f.sev == Severity::Info).count();
+    let errors = report
+        .findings
+        .iter()
+        .filter(|f| f.sev == Severity::Error)
+        .count();
+    let warns = report
+        .findings
+        .iter()
+        .filter(|f| f.sev == Severity::Warn)
+        .count();
+    let infos = report
+        .findings
+        .iter()
+        .filter(|f| f.sev == Severity::Info)
+        .count();
 
     for f in &report.findings {
         let tag = match f.sev {
@@ -515,7 +563,10 @@ fn print_report(report: &VerifyReport) {
         println!("{} [{}] {}", tag, f.code, f.msg);
     }
 
-    println!("\nSummary: {} errors, {} warnings, {} checks performed", errors, warns, infos);
+    println!(
+        "\nSummary: {} errors, {} warnings, {} checks performed",
+        errors, warns, infos
+    );
     if errors == 0 {
         println!("[+] Filesystem is structurally CLEAN.");
     } else {

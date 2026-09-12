@@ -2,13 +2,13 @@
 
 //! Adversarial integrity tripwires testing `NtfsChecker` against deliberate corruptions.
 
-use alloc::vec::Vec;
 use crate::checker::NtfsChecker;
 use crate::constant::*;
 use crate::formatter::NtfsFormatter;
 use crate::meta::NtfsMeta;
 use crate::types::*;
 use crate::view::attr_view::AttrView;
+use alloc::vec::Vec;
 use rimfs_core::checker::{FsChecker, Severity};
 use rimfs_core::injector::FsTreeInjector;
 use rimfs_core::testing::{assert_has_error, corrupt_byte_at, corrupt_bytes_at};
@@ -36,7 +36,10 @@ fn test_ntfs_tripwire_corrupted_boot_oem() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "NtfsChecker must detect corrupted boot OEM ID");
+    assert!(
+        report.has_error(),
+        "NtfsChecker must detect corrupted boot OEM ID"
+    );
     assert_has_error(&report, "BOOT.OEM");
 }
 
@@ -50,7 +53,10 @@ fn test_ntfs_tripwire_corrupted_boot_signature() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "NtfsChecker must detect corrupted boot signature");
+    assert!(
+        report.has_error(),
+        "NtfsChecker must detect corrupted boot signature"
+    );
     assert_has_error(&report, "BOOT.SIG");
 }
 
@@ -65,7 +71,10 @@ fn test_ntfs_tripwire_boot_mirror_mismatch() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "NtfsChecker must detect primary/alternate boot mismatch");
+    assert!(
+        report.has_error(),
+        "NtfsChecker must detect primary/alternate boot mismatch"
+    );
     assert_has_error(&report, "BOOT.MIRROR");
 }
 
@@ -80,7 +89,10 @@ fn test_ntfs_tripwire_mft_record_signature() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "NtfsChecker must detect invalid MFT record magic");
+    assert!(
+        report.has_error(),
+        "NtfsChecker must detect invalid MFT record magic"
+    );
     assert_has_error(&report, "MFT.SIG");
 }
 
@@ -96,7 +108,10 @@ fn test_ntfs_tripwire_mft_trailer_corruption() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "NtfsChecker must detect USA fixup trailer corruption");
+    assert!(
+        report.has_error(),
+        "NtfsChecker must detect USA fixup trailer corruption"
+    );
     assert_has_error(&report, "MFT.TRAILER");
 }
 
@@ -126,8 +141,8 @@ fn test_ntfs_tripwire_mft_usa_bounds() {
 fn test_ntfs_tripwire_index_corruption() {
     use crate::core::traits::FsNode;
     use crate::injector::NtfsInjector;
-    use rimfs_core::resolver::FileAttributes;
     use crate::upcase::UpcaseFlavor;
+    use rimfs_core::resolver::FileAttributes;
 
     let meta = NtfsMeta::new_custom(
         20 * 1024 * 1024,
@@ -192,7 +207,10 @@ fn test_ntfs_tripwire_index_corruption() {
 
     let mut checker = NtfsChecker::new(&mut io, &meta);
     let bad_rep = checker.check_all().unwrap();
-    assert!(bad_rep.has_error(), "NtfsChecker must detect corrupted child VCN");
+    assert!(
+        bad_rep.has_error(),
+        "NtfsChecker must detect corrupted child VCN"
+    );
     assert!(
         bad_rep
             .findings
@@ -214,7 +232,10 @@ fn test_ntfs_tripwire_index_corruption() {
 
     let mut checker2 = NtfsChecker::new(&mut io, &meta);
     let bad_rep2 = checker2.check_all().unwrap();
-    assert!(bad_rep2.has_error(), "NtfsChecker must detect trailing entries or mismatched length");
+    assert!(
+        bad_rep2.has_error(),
+        "NtfsChecker must detect trailing entries or mismatched length"
+    );
     assert!(
         bad_rep2
             .findings

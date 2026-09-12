@@ -12,8 +12,8 @@ use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
-use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsMftRecord};
 use crate::mft::build_mft_reference;
+use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsMftRecord};
 use zerocopy::IntoBytes;
 
 #[derive(Default)]

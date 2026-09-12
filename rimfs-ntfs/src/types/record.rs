@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn mft_header_has_explicit_endian_fields_and_unaligned_views() {
-        let mut header =
-            MftRecordHeader::new(0x12345678, MftRecordFlags::IN_USE, 1024).with_sequence_number(0x1234);
+        let mut header = MftRecordHeader::new(0x12345678, MftRecordFlags::IN_USE, 1024)
+            .with_sequence_number(0x1234);
         header.usa_offset = 48.into();
         header.attrs_offset = 56.into();
         header.base_file_record = 0x1122334455667788.into();

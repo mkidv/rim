@@ -17,12 +17,12 @@ use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::flags::IndexEntryFlags;
 use crate::meta::NtfsMeta;
+use crate::mft::build_mft_reference;
 use crate::types::{
     IndexDataEntryHeader, IndexEntryHeader, NtfsAttribute, NtfsCollationRule,
-    NtfsFileNameNamespace, NtfsIndexEntry, NtfsMftRecord, QuotaFlags, QuotaOEntryData, QuotaQData,
-    QUOTA_OWNER_ID_ADMINS, QUOTA_OWNER_ID_DEFAULT,
+    NtfsFileNameNamespace, NtfsIndexEntry, NtfsMftRecord, QUOTA_OWNER_ID_ADMINS,
+    QUOTA_OWNER_ID_DEFAULT, QuotaFlags, QuotaOEntryData, QuotaQData,
 };
-use crate::mft::build_mft_reference;
 use zerocopy::IntoBytes;
 
 pub struct NtfsExtendFeature {

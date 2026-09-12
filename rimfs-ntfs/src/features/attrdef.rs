@@ -15,11 +15,11 @@ use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
+use crate::mft::build_mft_reference;
 use crate::types::attrdef::build_standard_attr_defs;
 use crate::types::{
     NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord,
 };
-use crate::mft::build_mft_reference;
 
 #[derive(Default)]
 pub struct NtfsAttrDefFeature {

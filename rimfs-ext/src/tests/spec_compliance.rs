@@ -20,11 +20,31 @@ fn test_ext_superblock_wire_format_offsets() {
     sb.s_magic = EXT_SUPERBLOCK_MAGIC.into();
 
     let bytes = sb.as_bytes();
-    assert_eq!(&bytes[0..4], &(meta.inode_count as u32).to_le_bytes(), "Inodes count at 0x00");
-    assert_eq!(&bytes[4..8], &(meta.block_count as u32).to_le_bytes(), "Blocks count at 0x04");
-    assert_eq!(&bytes[56..58], &0xEF53u16.to_le_bytes(), "Magic 0xEF53 at 0x38");
-    assert_eq!(&bytes[84..88], &11u32.to_le_bytes(), "First inode 11 at 0x54");
-    assert_eq!(&bytes[88..90], &256u16.to_le_bytes(), "Inode size 256 at 0x58");
+    assert_eq!(
+        &bytes[0..4],
+        &(meta.inode_count as u32).to_le_bytes(),
+        "Inodes count at 0x00"
+    );
+    assert_eq!(
+        &bytes[4..8],
+        &(meta.block_count as u32).to_le_bytes(),
+        "Blocks count at 0x04"
+    );
+    assert_eq!(
+        &bytes[56..58],
+        &0xEF53u16.to_le_bytes(),
+        "Magic 0xEF53 at 0x38"
+    );
+    assert_eq!(
+        &bytes[84..88],
+        &11u32.to_le_bytes(),
+        "First inode 11 at 0x54"
+    );
+    assert_eq!(
+        &bytes[88..90],
+        &256u16.to_le_bytes(),
+        "Inode size 256 at 0x58"
+    );
 }
 
 #[test]

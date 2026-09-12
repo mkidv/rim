@@ -16,8 +16,8 @@ use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::flags::MftRecordFlags;
 use crate::meta::NtfsMeta;
-use crate::types::{NtfsAttribute, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord};
 use crate::mft::build_mft_reference;
+use crate::types::{NtfsAttribute, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord};
 
 #[derive(Default)]
 pub struct NtfsSecureFeature {

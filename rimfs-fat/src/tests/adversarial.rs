@@ -2,17 +2,18 @@
 
 //! Adversarial integrity tripwires testing `FatChecker` against deliberate corruptions.
 
-use alloc::vec::Vec;
 use crate::checker::FatChecker;
 use crate::formatter::FatFormatter;
 use crate::meta::FatMeta;
+use alloc::vec::Vec;
 use rimfs_core::checker::FsChecker;
 use rimfs_core::formatter::FsFormatter;
 use rimfs_core::testing::{assert_has_error, corrupt_bytes_at};
 use rimio::MemRimIO;
 
 fn setup_clean_fat32() -> (FatMeta, Vec<u8>) {
-    let meta = FatMeta::new_fat32(32 * 1024 * 1024, Some("FAT_ADV")).expect("FatMeta creation failed");
+    let meta =
+        FatMeta::new_fat32(32 * 1024 * 1024, Some("FAT_ADV")).expect("FatMeta creation failed");
     let mut disk = vec![0u8; 32 * 1024 * 1024];
     {
         let mut io = MemRimIO::new(&mut disk);
@@ -33,7 +34,10 @@ fn test_fat_tripwire_corrupted_boot_signature() {
 
     let mut checker = FatChecker::new(&mut io, &meta);
     let report = checker.check_all().expect("checker run failed");
-    assert!(report.has_error(), "FatChecker must detect corrupted boot signature");
+    assert!(
+        report.has_error(),
+        "FatChecker must detect corrupted boot signature"
+    );
     assert_has_error(&report, "VBR.INVALID");
 }
 
@@ -50,7 +54,10 @@ fn test_fat_tripwire_fat_copies_mismatch() {
 
         let mut checker = FatChecker::new(&mut io, &meta);
         let report = checker.check_all().expect("checker run failed");
-        assert!(report.has_error(), "FatChecker must detect mismatch between FAT copies");
+        assert!(
+            report.has_error(),
+            "FatChecker must detect mismatch between FAT copies"
+        );
         assert_has_error(&report, "FAT.MIRROR");
     }
 }

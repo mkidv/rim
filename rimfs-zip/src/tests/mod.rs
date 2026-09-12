@@ -1,5 +1,5 @@
-mod reformat;
 pub mod conformance;
+mod reformat;
 pub mod spec_compliance;
 
 use super::*;

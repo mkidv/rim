@@ -443,7 +443,7 @@ fn determine_cluster_size(size_bytes: u64) -> u32 {
         _ if size_bytes <= 32 * GB => 2 * NTFS_DEFAULT_CLUSTER_SIZE, // 16 GB - 32 GB: 8 KB
         _ if size_bytes <= 64 * GB => 4 * NTFS_DEFAULT_CLUSTER_SIZE, // 32 GB - 64 GB: 16 KB
         _ if size_bytes <= 128 * GB => 8 * NTFS_DEFAULT_CLUSTER_SIZE, // 64 GB - 128 GB: 32 KB
-        _ => 65536,                         // > 128 GB: 64 KB
+        _ => 65536,                                                  // > 128 GB: 64 KB
     }
 }
 
