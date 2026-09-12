@@ -4,6 +4,13 @@ All notable changes to the **RIM** (Rust Image Maker) project will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-09-13
+
+### Fixed
+
+*   **NTFS**: Remove invalid self-referential `.` entry from the root directory (`$I30`) index to ensure strict Windows CHKDSK compliance on formatted volumes.
+*   **CI**: Remove `--locked` flag from release packaging pipeline to allow workspace distribution without lockfile synchronization issues.
+
 ## [0.10.0] - 2026-09-12
 
 ### Added
