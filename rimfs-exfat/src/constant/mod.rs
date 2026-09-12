@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! exFAT specification constants, GUIDs, and signatures.
+
 mod boot_sectors;
 mod upcase;
 

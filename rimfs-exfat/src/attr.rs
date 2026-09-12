@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT file attributes and timestamps.
+
 // rimgen/fs/exfat/attr.rs
 
 use crate::core::resolver::attr::FileAttributes;

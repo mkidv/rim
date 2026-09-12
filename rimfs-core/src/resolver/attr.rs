@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Common filesystem entry attributes and timestamps.
+
 use time::OffsetDateTime;
 
 /// Represents the kind of a filesystem node.
@@ -117,19 +119,16 @@ impl FileAttributes {
         }
     }
 
-    /// Sets the `read_only` flag.
     pub fn set_read_only(mut self, value: bool) -> Self {
         self.read_only = value;
         self
     }
 
-    /// Sets the `hidden` flag.
     pub fn set_hidden(mut self, value: bool) -> Self {
         self.hidden = value;
         self
     }
 
-    /// Sets the `system` flag.
     pub fn set_system(mut self, value: bool) -> Self {
         self.system = value;
         self

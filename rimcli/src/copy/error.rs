@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Copy operation error types and policy violations.
+
 use rimfs_core::errors::{FsInjectorError, FsResolverError};
 use std::fmt;
 

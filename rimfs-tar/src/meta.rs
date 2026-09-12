@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! TAR archive metadata and block size constants.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -12,7 +14,7 @@ use rimfs_core::meta::FsMeta;
 /// Configuration and metadata for TAR archive filesystem operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TarMeta {
-    pub block_size: usize,
+    pub block_size: u64,
     pub total_size: u64,
     pub label: String,
 }
@@ -20,7 +22,7 @@ pub struct TarMeta {
 impl Default for TarMeta {
     fn default() -> Self {
         Self {
-            block_size: TAR_BLOCK_SIZE,
+            block_size: TAR_BLOCK_SIZE as u64,
             total_size: 0,
             label: String::from("TARFS"),
         }
@@ -29,13 +31,13 @@ impl Default for TarMeta {
 
 impl FsMeta<u64> for TarMeta {
     #[inline]
-    fn unit_size(&self) -> usize {
+    fn unit_size(&self) -> u64 {
         self.block_size
     }
 
     #[inline]
     fn unit_offset(&self, unit: u64) -> u64 {
-        unit * (self.block_size as u64)
+        unit * self.block_size
     }
 
     #[inline]
@@ -50,12 +52,12 @@ impl FsMeta<u64> for TarMeta {
 
     #[inline]
     fn last_data_unit(&self) -> u64 {
-        self.total_size.saturating_sub(1) / (self.block_size as u64)
+        self.total_size.saturating_sub(1) / self.block_size
     }
 
     #[inline]
-    fn total_units(&self) -> usize {
-        (self.total_size as usize) / self.block_size
+    fn total_units(&self) -> u64 {
+        self.total_size / self.block_size
     }
 
     #[inline]
@@ -72,7 +74,7 @@ impl FsMeta<u64> for TarMeta {
 impl TarMeta {
     pub fn new(total_size: u64, label: Option<&str>) -> rimfs_core::FsResult<Self> {
         Ok(Self {
-            block_size: TAR_BLOCK_SIZE,
+            block_size: TAR_BLOCK_SIZE as u64,
             total_size,
             label: String::from(label.unwrap_or("TARFS")),
         })

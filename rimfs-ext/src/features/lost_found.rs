@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! ext4 lost+found directory creation.
+
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::ExtMeta;
@@ -12,6 +16,7 @@ pub struct LostFoundFeature {
     inode_offset: u64,
     block_offset: u64,
     inode_size: u32,
+    has_extents: bool,
 }
 
 impl LostFoundFeature {
@@ -28,6 +33,7 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for LostFoundFeature
     fn prepare(&mut self, meta: &ExtMeta) -> FsFeatureResult<()> {
         self.block_size = meta.block_size;
         self.inode_size = meta.inode_size;
+        self.has_extents = meta.features.has_extents;
 
         let layout = GroupLayout::compute(meta, 0);
         // lost+found is at first_data_block + 1 (root is at first_data_block)
@@ -56,7 +62,12 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for LostFoundFeature
         io.write_at(self.block_offset, &dir_buf)?;
 
         // 2. Write Inode
-        let inode_data = ExtLostFound::create_inode(self.block_size, self.lf_block);
+        let mut inode_data = ExtLostFound::create_inode(self.block_size, self.lf_block);
+        if !self.has_extents {
+            let mut map = crate::types::BlockMapArray::default();
+            map.direct[0] = self.lf_block.into();
+            inode_data.set_block_map(&map);
+        }
         let inode_buf = inode_data.to_bytes();
         io.write_at(self.inode_offset, &inode_buf[..self.inode_size as usize])?;
 

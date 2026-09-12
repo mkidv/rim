@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ZIP archive driver implementation.
+
 use crate::checker::ZipChecker;
 use crate::formatter::ZipFormatter;
 use crate::injector::ZipInjector;
@@ -14,7 +16,7 @@ use rimio::RimIO;
 pub struct Zip;
 
 impl<'a> FsFilesystem<'a> for Zip {
-    type Unit = ZipHandle;
+    type Unit = u64;
     type Meta = ZipMeta;
     type Handle = ZipHandle;
     type Formatter = ZipFormatter<'a, dyn RimIO + 'a>;

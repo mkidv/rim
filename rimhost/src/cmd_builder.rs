@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! OS-native format and image mounting command builder.
+
 use rimgen::Filesystem;
 
 pub trait FormatCommandBuilder {

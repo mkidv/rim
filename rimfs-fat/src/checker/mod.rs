@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! FAT filesystem integrity and consistency checker.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec;
 
@@ -11,7 +14,6 @@ mod boot;
 mod fat;
 mod walker;
 
-// --- check options (identical or light) ---
 #[derive(Clone, Debug)]
 pub struct FatCheckerOptions {
     pub phases: VerifyPhases,

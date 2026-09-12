@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to copy files between host and disk image filesystems.
+
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::str::FromStr;
@@ -144,7 +146,6 @@ pub fn run(
         _ => {}
     };
 
-    // Check if source is a host directory
     if src_endpoint.host_path.is_dir() {
         if src_endpoint.partition.is_some() {
             anyhow::bail!(

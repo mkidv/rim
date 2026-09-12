@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimfs-ntfs: NTFS filesystem driver supporting attributes, B-trees, and $MFT.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
@@ -8,29 +12,24 @@ pub use rimfs_core as core;
 pub use rimfs_core::{bail, ensure};
 
 mod allocator;
-#[allow(dead_code)]
 mod attr;
 mod checker;
-#[allow(dead_code)]
 pub(crate) mod constant;
 pub mod features;
 mod filesystem;
-mod flags;
+pub use types::flags;
 mod formatter;
 mod injector;
 mod meta;
 mod mft;
 mod resolver;
-#[allow(dead_code)]
-pub(crate) mod system;
 #[cfg(test)]
 mod tests;
 pub mod types;
-#[allow(dead_code)]
+pub mod upcase;
 pub(crate) mod utils;
 pub mod view;
 
-pub use self::system::upcase;
 pub use utils::apply_usa_fixup;
 
 pub mod traits {

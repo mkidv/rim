@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Partition table parsing and validation errors.
+
 use rimio::errors::*;
 
 /// Unified error type for partition tools (GPT, MBR, etc.)
@@ -192,8 +194,8 @@ impl core::fmt::Display for PartError {
             PartError::Unsupported => write!(f, "{}", self.msg()),
             PartError::NotFound => write!(f, "{}", self.msg()),
             PartError::Other(msg) => write!(f, "{msg}"),
-            PartError::Gpt(e) => write!(f, "{e}"), // e implémente déjà Display
-            PartError::Mbr(e) => write!(f, "{e}"), // idem
+            PartError::Gpt(e) => write!(f, "{e}"),
+            PartError::Mbr(e) => write!(f, "{e}"),
         }
     }
 }

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
-use crate::{constant::*, meta::ExtMeta, types::GroupLayout};
+
+//! ext2/3/4 directory tree and inode reachability walker.
+
+use crate::types::ExtInodeHeader;
+use crate::{constant::*, meta::ExtMeta};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{format, vec, vec::Vec};
 use rimio::prelude::*;
+use zerocopy::FromBytes;
 
 use super::{Finding, FsCheckerResult, VerifyReport};
 pub use crate::core::checker::stats::WalkerStats;
@@ -44,10 +49,19 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
         let mut inode_buf = vec![0u8; inode_size];
 
         for group in 0..self.meta.group_count {
-            let layout = GroupLayout::compute(self.meta, group);
+            let desc = match crate::utils::read_group_descriptor(self.io, self.meta, group) {
+                Ok(desc) => desc,
+                Err(e) => {
+                    rep.push(Finding::warn(
+                        "WALK.IO",
+                        format!("Failed reading descriptor group {group}: {e:?}"),
+                    ));
+                    continue;
+                }
+            };
 
-            // Read this group's inode allocation bitmap.
-            let bitmap_offset = layout.inode_bitmap_block * self.meta.block_size as u64;
+            let bitmap_block = desc.inode_bitmap(self.meta.features.has_64bit);
+            let bitmap_offset = bitmap_block * self.meta.block_size as u64;
 
             if let Err(e) = self.io.read_at(bitmap_offset, &mut inode_bitmap) {
                 rep.push(Finding::warn(
@@ -58,6 +72,7 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
             }
 
             let valid_inodes = self.meta.group_total_inodes(group as usize);
+            let inode_table_block = desc.inode_table(self.meta.features.has_64bit);
 
             for i in 0..valid_inodes {
                 let byte = inode_bitmap[i / 8];
@@ -70,7 +85,7 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
 
                 let inode_num = group * self.meta.inodes_per_group + i as u32 + 1;
 
-                let inode_offset = layout.inode_table_block * self.meta.block_size as u64
+                let inode_offset = inode_table_block * self.meta.block_size as u64
                     + i as u64 * self.meta.inode_size as u64;
 
                 if let Err(e) = self.io.read_at(inode_offset, &mut inode_buf) {
@@ -81,9 +96,11 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
                     continue;
                 }
 
-                let i_mode = u16::from_le_bytes(inode_buf[0..2].try_into().unwrap());
+                let (inode, _) = ExtInodeHeader::ref_from_prefix(&inode_buf)
+                    .map_err(|_| super::FsCheckerError::Invalid("Truncated inode header"))?;
+                let i_mode = inode.i_mode.get();
 
-                let i_links = u16::from_le_bytes(inode_buf[26..28].try_into().unwrap());
+                let i_links = inode.i_links_count.get();
 
                 // Bitmap says allocated, so an empty inode is suspicious.
                 if i_mode == 0 || i_links == 0 {
@@ -109,11 +126,11 @@ impl<'a, IO: RimIO + ?Sized> ExtWalker<'a, IO> {
                     ));
                 } else if (i_mode & 0xF000) == 0xA000 {
                     // Symlink validation
-                    let i_size = u32::from_le_bytes(inode_buf[4..8].try_into().unwrap());
+                    let i_size = inode.i_size_lo.get();
 
-                    let i_blocks = u32::from_le_bytes(inode_buf[28..32].try_into().unwrap());
+                    let i_blocks = inode.i_blocks_lo.get();
 
-                    let i_flags = u32::from_le_bytes(inode_buf[32..36].try_into().unwrap());
+                    let i_flags = inode.i_flags.get();
 
                     if i_size < 60 {
                         // Fast symlink

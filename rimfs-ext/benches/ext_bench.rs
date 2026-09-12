@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use rimfs_ext::prelude::*;
 
@@ -30,7 +32,7 @@ fn bench_ext4_format(c: &mut Criterion) {
         b.iter(|| {
             let file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
-            let mut io = MmapRimIO::new(file).unwrap();
+            let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
             let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
             ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         });
@@ -119,13 +121,13 @@ fn bench_ext4_large_write(c: &mut Criterion) {
             || {
                 let file = tempfile::tempfile().unwrap();
                 file.set_len(SIZE_BYTES).unwrap();
-                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file.try_clone().unwrap()) }.unwrap();
                 let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
                 ExtFormatter::new(&mut io, &meta).format(false).unwrap();
                 (file, content.clone())
             },
             |(file, mut content_copy)| {
-                let mut io = MmapRimIO::new(file).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
                 let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
@@ -225,7 +227,7 @@ fn bench_ext4_large_read(c: &mut Criterion) {
     let file_mmap = tempfile::tempfile().unwrap();
     file_mmap.set_len(SIZE_BYTES).unwrap();
     {
-        let mut io = MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap();
+        let mut io = unsafe { MmapRimIO::new(file_mmap.try_clone().unwrap()) }.unwrap();
         ExtFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
         injector
@@ -246,7 +248,7 @@ fn bench_ext4_large_read(c: &mut Criterion) {
 
     group.bench_function("read_10mb_contiguous_mmap", |b| {
         b.iter_with_setup(
-            || MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap(),
+            || unsafe { MmapRimIO::new(file_mmap.try_clone().unwrap()) }.unwrap(),
             |mut io| {
                 let mut resolver = ExtResolver::new(&mut io, &meta);
                 let data = resolver.read_file("bigfile.bin").unwrap();
@@ -337,12 +339,12 @@ fn bench_ext4_small_files(c: &mut Criterion) {
             || {
                 let file = tempfile::tempfile().unwrap();
                 file.set_len(SIZE_BYTES).unwrap();
-                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file.try_clone().unwrap()) }.unwrap();
                 ExtFormatter::new(&mut io, &meta).format(false).unwrap();
                 (file, content.clone())
             },
             |(file, mut content_copy)| {
-                let mut io = MmapRimIO::new(file).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
                 let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;

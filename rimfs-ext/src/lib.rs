@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimfs-ext: ext2/ext3/ext4 filesystem driver.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
@@ -10,9 +14,7 @@ pub use rimfs_core::{bail, ensure};
 mod allocator;
 mod attr;
 mod checker;
-#[allow(dead_code)]
-pub(crate) mod constant;
-#[allow(dead_code)]
+pub mod constant;
 pub(crate) mod features;
 mod filesystem;
 mod formatter;
@@ -20,7 +22,6 @@ mod injector;
 mod meta;
 mod resolver;
 pub mod types;
-#[allow(dead_code)]
 pub(crate) mod utils;
 
 pub mod traits {
@@ -48,3 +49,7 @@ pub use prelude::*;
 #[cfg(feature = "std")]
 pub use rimfs_core::StdResolver;
 pub use rimfs_core::utils::{path_utils::*, volume::*};
+
+#[cfg(test)]
+mod tests;
+

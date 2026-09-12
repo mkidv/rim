@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Interactive progress bar and spinner display.
+
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 

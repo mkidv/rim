@@ -1,3 +1,5 @@
+//! rimio: Random-access zero-allocation I/O abstraction layer.
+
 // SPDX-License-Identifier: MIT
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -105,7 +107,6 @@ pub trait RimRead {
     /// Reads `buf.len()` bytes into `buf` from `offset` (absolute or relative to current partition).
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult;
 
-    /// Returns the total size of the storage/source in bytes, if known.
     fn total_size(&mut self) -> RimIOResult<u64> {
         Err(RimIOError::Unsupported)
     }
@@ -578,9 +579,9 @@ fn validate_stream_chunk<const N: usize>(chunk: usize) -> RimIOResult {
 
 #[inline(always)]
 fn array_ref_from_slice<const N: usize>(slice: &[u8]) -> &[u8; N] {
-    debug_assert_eq!(slice.len(), N);
-    // SAFETY: all callers slice exactly `N` bytes (e.g. `start..start + N`).
-    unsafe { &*slice.as_ptr().cast::<[u8; N]>() }
+    slice
+        .try_into()
+        .expect("fixed-size chunk must contain exactly N bytes")
 }
 
 #[cfg(not(feature = "alloc"))]
@@ -899,33 +900,23 @@ impl<T: RimIO + ?Sized> RimIOStreamExt for T {
 ///
 /// Allows resizing the underlying storage (if supported by the backend).
 pub trait RimIOSetLen: RimIO {
-    /// Sets the length of the storage.
     fn set_len(&mut self, len: u64) -> RimIOResult;
 }
 
 /// Extension trait for reading structs using zerocopy from any `RimRead` source.
 pub trait RimReadStructExt: RimRead {
     /// Reads a struct of type `T` from the given offset.
-    fn read_struct<T: zerocopy::FromBytes + zerocopy::KnownLayout + zerocopy::Immutable>(
+    /// Reads directly into the final, zero-initialized value without a heap buffer.
+    /// `IntoBytes` excludes padding and permits a safe mutable byte view of `T`.
+    fn read_struct<
+        T: zerocopy::FromBytes + zerocopy::IntoBytes + zerocopy::KnownLayout + zerocopy::Immutable,
+    >(
         &mut self,
         offset: u64,
     ) -> RimIOResult<T> {
-        let size = core::mem::size_of::<T>();
-
-        #[cfg(feature = "alloc")]
-        {
-            let mut buf = alloc::vec![0u8; size];
-            self.read_at(offset, &mut buf)?;
-            T::read_from_bytes(&buf).map_err(|_| RimIOError::Other("read_struct failed"))
-        }
-
-        #[cfg(not(feature = "alloc"))]
-        {
-            assert!(size <= BLOCK_BUF_SIZE, "read_struct: type too large");
-            let mut buf = [0u8; BLOCK_BUF_SIZE];
-            self.read_at(offset, &mut buf[..size])?;
-            T::read_from_bytes(&buf[..size]).map_err(|_| RimIOError::Other("read_struct failed"))
-        }
+        let mut value = T::new_zeroed();
+        self.read_at(offset, value.as_mut_bytes())?;
+        Ok(value)
     }
 }
 
@@ -950,3 +941,92 @@ impl<T: RimWrite + ?Sized> RimWriteStructExt for T {}
 pub trait RimIOStructExt: RimReadStructExt + RimWriteStructExt {}
 
 impl<T: RimIO + ?Sized> RimIOStructExt for T {}
+
+#[cfg(test)]
+mod struct_io_tests {
+    use super::*;
+
+    struct Reader {
+        calls: usize,
+        fail: bool,
+    }
+    impl RimRead for Reader {
+        fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> RimIOResult {
+            self.calls += 1;
+            assert_eq!(offset, 17);
+            if self.fail {
+                let filled = bytes.len().min(2);
+                bytes[..filled].fill(0x5a);
+                Err(RimIOError::OutOfBounds)
+            } else {
+                bytes.fill(0x5a);
+                Ok(())
+            }
+        }
+        fn total_size(&mut self) -> RimIOResult<u64> {
+            Ok(16384)
+        }
+    }
+    #[test]
+    fn fixed_read_has_one_io_and_no_scratch_size_limit() {
+        let mut reader = Reader {
+            calls: 0,
+            fail: false,
+        };
+        let value: [u8; 8193] = reader.read_struct(17).unwrap();
+        assert_eq!(value, [0x5a; 8193]);
+        assert_eq!(reader.calls, 1);
+    }
+    #[test]
+    fn failed_read_never_returns_partially_filled_value() {
+        let mut reader = Reader {
+            calls: 0,
+            fail: true,
+        };
+        assert_eq!(
+            reader.read_struct::<[u8; 4]>(17),
+            Err(RimIOError::OutOfBounds)
+        );
+        assert_eq!(reader.calls, 1);
+    }
+    #[test]
+    fn fixed_read_supports_aligned_types_at_unaligned_disk_offsets() {
+        let mut reader = Reader {
+            calls: 0,
+            fail: false,
+        };
+        let value: [u128; 2] = reader.read_struct(17).unwrap();
+        assert_eq!(value, [u128::from_ne_bytes([0x5a; 16]); 2]);
+        assert_eq!(reader.calls, 1);
+    }
+
+    #[test]
+    fn fixed_write_borrows_the_value_and_propagates_errors() {
+        struct Writer {
+            address: usize,
+            calls: usize,
+        }
+        impl RimWrite for Writer {
+            fn flush(&mut self) -> RimIOResult {
+                Ok(())
+            }
+            fn write_at(&mut self, offset: u64, bytes: &[u8]) -> RimIOResult {
+                self.calls += 1;
+                assert_eq!(offset, 17);
+                assert_eq!(bytes.as_ptr() as usize, self.address);
+                assert_eq!(bytes, &[0x5a; 32]);
+                Err(RimIOError::OutOfBounds)
+            }
+        }
+        let value = [0x5au8; 32];
+        let mut writer = Writer {
+            address: value.as_ptr() as usize,
+            calls: 0,
+        };
+        assert_eq!(
+            writer.write_struct(17, &value),
+            Err(RimIOError::OutOfBounds)
+        );
+        assert_eq!(writer.calls, 1);
+    }
+}

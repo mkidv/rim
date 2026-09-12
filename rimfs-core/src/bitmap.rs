@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-//! Bitmap operations trait for efficient bit manipulation.
-//!
-//! Provides a unified interface for setting, getting, and counting bits
-//! in byte slices used as bitmaps (allocation bitmaps, reachability tracking, etc.).
+//! Generic bit allocation bitmap supporting fast range searches.
+
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
+
+use rimio::prelude::*;
 
 /// Extension trait for bitmap operations on byte slices.
 ///
@@ -132,7 +134,6 @@ impl BitmapOps for [u8] {
                 continue;
             }
 
-            // Check each bit in this byte
             let first_bit = if byte_idx == start_byte {
                 start_bit_in_byte
             } else {
@@ -168,7 +169,6 @@ impl BitmapOps for [u8] {
             // fast-forward to next zero
             current_start = self.find_first_zero(current_start)?;
 
-            // Check if we have 'len' zeros from here
             if current_start + len > limit {
                 return None;
             }
@@ -189,9 +189,6 @@ impl BitmapOps for [u8] {
         None
     }
 }
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 impl BitmapOps for Vec<u8> {
@@ -231,8 +228,6 @@ impl BitmapOps for Vec<u8> {
     }
 }
 
-use rimio::prelude::*;
-
 /// Trait to abstract bitmap location and size.
 ///
 /// This allows `BitmapDriver` to work generic over any filesystem metadata that describes a bitmap
@@ -240,15 +235,77 @@ use rimio::prelude::*;
 pub trait BitmapFsMeta {
     /// Absolute offset of the bitmap in bytes.
     fn bitmap_offset(&self) -> u64;
+
     /// Total size of the bitmap in bytes.
     fn bitmap_size(&self) -> u64;
+
+    /// Number of meaningful allocation bits.
+    ///
+    /// Defaults to the whole bitmap.
+    #[inline]
+    fn bitmap_valid_bits(&self) -> u64 {
+        self.bitmap_size() * 8
+    }
+}
+
+impl<M: BitmapFsMeta> BitmapFsMeta for &M {
+    #[inline]
+    fn bitmap_offset(&self) -> u64 {
+        (**self).bitmap_offset()
+    }
+
+    #[inline]
+    fn bitmap_size(&self) -> u64 {
+        (**self).bitmap_size()
+    }
+
+    #[inline]
+    fn bitmap_valid_bits(&self) -> u64 {
+        (**self).bitmap_valid_bits()
+    }
+}
+
+/// Standalone descriptor implementing [`BitmapFsMeta`] for arbitrary bitmap regions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimpleBitmapMeta {
+    pub offset: u64,
+    pub size: u64,
+    pub valid_bits: u64,
+}
+
+impl SimpleBitmapMeta {
+    #[inline]
+    pub fn new(offset: u64, size: u64, valid_bits: u64) -> Self {
+        Self {
+            offset,
+            size,
+            valid_bits,
+        }
+    }
+}
+
+impl BitmapFsMeta for SimpleBitmapMeta {
+    #[inline]
+    fn bitmap_offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[inline]
+    fn bitmap_size(&self) -> u64 {
+        self.size
+    }
+
+    #[inline]
+    fn bitmap_valid_bits(&self) -> u64 {
+        self.valid_bits
+    }
 }
 
 /// A buffered view into an on-disk bitmap.
 ///
 /// Handles caching a window of the bitmap to reduce I/O.
-pub struct BitmapDriver<'a, M: BitmapFsMeta> {
-    pub meta: &'a M,
+pub struct BitmapDriver<M: BitmapFsMeta> {
+    pub meta: M,
     pub buffer: [u8; 4096], // Fixed 4KB window (common sector/block/cluster size)
     pub window_start: u64,  // Byte offset where the current window starts
     pub valid_len: usize,   // How many bytes in buffer are valid
@@ -256,8 +313,8 @@ pub struct BitmapDriver<'a, M: BitmapFsMeta> {
     pub dirty: bool,        // Does the buffer need flushing?
 }
 
-impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
-    pub fn new(meta: &'a M) -> Self {
+impl<M: BitmapFsMeta> BitmapDriver<M> {
+    pub fn new(meta: M) -> Self {
         Self {
             meta,
             buffer: [0u8; 4096],
@@ -278,6 +335,59 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         Ok(())
     }
 
+    fn ensure_loaded_ro<R: RimRead + ?Sized>(
+        &mut self,
+        io: &mut R,
+        byte_offset: u64,
+    ) -> RimIOResult {
+        if self.valid
+            && byte_offset >= self.window_start
+            && byte_offset < self.window_start + self.valid_len as u64
+        {
+            return Ok(());
+        }
+
+        if self.valid && self.dirty {
+            return Err(RimIOError::Invalid("State"));
+        }
+
+        let bitmap_size = self.meta.bitmap_size();
+        if byte_offset >= bitmap_size {
+            return Err(RimIOError::OutOfBounds);
+        }
+
+        let buf_len = self.buffer.len() as u64;
+        let new_start = (byte_offset / buf_len) * buf_len;
+
+        let to_read = core::cmp::min(buf_len, bitmap_size - new_start) as usize;
+
+        io.read_at(
+            self.meta.bitmap_offset() + new_start,
+            &mut self.buffer[..to_read],
+        )?;
+
+        self.window_start = new_start;
+        self.valid_len = to_read;
+        self.valid = true;
+
+        Ok(())
+    }
+
+    pub fn get_bit_ro<R: RimRead + ?Sized>(
+        &mut self,
+        io: &mut R,
+        bit_index: u64,
+    ) -> RimIOResult<bool> {
+        let byte_offset = bit_index / 8;
+        self.ensure_loaded_ro(io, byte_offset)?;
+
+        let local_byte = (byte_offset - self.window_start) as usize;
+
+        Ok(self
+            .buffer
+            .get_bit(local_byte * 8 + (bit_index % 8) as usize))
+    }
+
     /// Ensure the window covers the given byte offset.
     ///
     /// The window is aligned to the buffer size if possible to maximize sequential access.
@@ -291,27 +401,7 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         }
 
         self.flush(io)?;
-
-        let bitmap_size = self.meta.bitmap_size();
-        if byte_offset >= bitmap_size {
-            return Err(RimIOError::OutOfBounds);
-        }
-
-        // Align window to 4KB boundaries
-        let buf_len = self.buffer.len() as u64;
-        let new_start = (byte_offset / buf_len) * buf_len;
-
-        let to_read = core::cmp::min(buf_len, bitmap_size.saturating_sub(new_start)) as usize;
-
-        let abs_offset = self.meta.bitmap_offset() + new_start;
-        io.read_at(abs_offset, &mut self.buffer[..to_read])?;
-
-        self.window_start = new_start;
-        self.valid_len = to_read;
-        self.valid = true;
-        self.dirty = false;
-
-        Ok(())
+        self.ensure_loaded_ro(io, byte_offset)
     }
 
     /// Set a bit at a specific index.
@@ -338,12 +428,20 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         bit_index: u64,
     ) -> RimIOResult<bool> {
         let byte_offset = bit_index / 8;
-        self.ensure_loaded(io, byte_offset)?;
+        if self.valid
+            && byte_offset >= self.window_start
+            && byte_offset < self.window_start + self.valid_len as u64
+        {
+            let local_byte = (byte_offset - self.window_start) as usize;
+            return Ok(self
+                .buffer
+                .get_bit(local_byte * 8 + (bit_index % 8) as usize));
+        }
 
-        let local_byte = (byte_offset - self.window_start) as usize;
-        Ok(self
-            .buffer
-            .get_bit(local_byte * 8 + (bit_index % 8) as usize))
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+        self.get_bit_ro(io, bit_index)
     }
 
     /// Set a range of bits.
@@ -386,6 +484,170 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         Ok(())
     }
 
+    /// Set a range of bits from a RunList and flush to disk.
+    pub fn set_run_list<IO: RimIO + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        runs: &RunList,
+        value: bool,
+    ) -> RimIOResult {
+        for run in runs.iter() {
+            self.set_bits_range(io, run.start, run.length, value)?;
+        }
+        self.flush(io)?;
+
+        Ok(())
+    }
+
+    /// Scan for the next contiguous range of `count` zero bits, starting from `hint_bit`.
+    ///
+    /// Returns the absolute bit index of the start of the range.
+    /// Supports runs that cross 4KB window boundaries and allocations exceeding 32,768 bits.
+    pub fn find_next_free_ro<R: RimRead + ?Sized>(
+        &mut self,
+        io: &mut R,
+        hint_bit: u64,
+        count: u64,
+    ) -> RimIOResult<Option<u64>> {
+        let total_bits = self.meta.bitmap_valid_bits();
+
+        if count == 0 {
+            return Ok((hint_bit <= total_bits).then_some(hint_bit));
+        }
+
+        if hint_bit
+            .checked_add(count)
+            .is_none_or(|end| end > total_bits)
+        {
+            return Ok(None);
+        }
+
+        let mut run_start: Option<u64> = None;
+        let mut run_len = 0u64;
+        let mut current_bit = hint_bit;
+
+        while current_bit < total_bits {
+            let byte_offset = current_bit / 8;
+            self.ensure_loaded_ro(io, byte_offset)?;
+
+            let window_start_bit = self.window_start * 8;
+            let window_bits = self.valid_len as u64 * 8;
+            let window_end_bit = (window_start_bit + window_bits).min(total_bits);
+
+            while current_bit < window_end_bit {
+                if run_start.is_none() {
+                    let local_start = (current_bit - window_start_bit) as usize;
+
+                    match self.buffer[..self.valid_len].find_first_zero(local_start) {
+                        Some(local_zero) => {
+                            let zero_bit = window_start_bit + local_zero as u64;
+
+                            if zero_bit >= window_end_bit {
+                                current_bit = window_end_bit;
+                                break;
+                            }
+
+                            run_start = Some(zero_bit);
+                            run_len = 0;
+                            current_bit = zero_bit;
+                        }
+
+                        None => {
+                            current_bit = window_end_bit;
+                            break;
+                        }
+                    }
+                }
+
+                if !current_bit.is_multiple_of(8) {
+                    let local_bit = (current_bit - window_start_bit) as usize;
+
+                    if self.buffer[..self.valid_len].get_bit(local_bit) {
+                        run_start = None;
+                        run_len = 0;
+                        current_bit += 1;
+                    } else {
+                        run_len += 1;
+
+                        if run_len == count {
+                            return Ok(run_start);
+                        }
+
+                        current_bit += 1;
+                    }
+                } else if current_bit.is_multiple_of(64) && current_bit + 64 <= window_end_bit {
+                    let local_byte = ((current_bit - window_start_bit) / 8) as usize;
+                    let word = u64::from_le_bytes(
+                        self.buffer[local_byte..local_byte + 8].try_into().unwrap(),
+                    );
+                    if word == 0 {
+                        let needed = count - run_len;
+                        if needed <= 64 {
+                            return Ok(run_start);
+                        }
+                        run_len += 64;
+                        current_bit += 64;
+                    } else {
+                        let zeros = word.trailing_zeros() as u64;
+                        run_len += zeros;
+                        if run_len >= count {
+                            return Ok(run_start);
+                        }
+                        current_bit += zeros + 1;
+                        run_start = None;
+                        run_len = 0;
+                    }
+                } else {
+                    let local_byte = ((current_bit - window_start_bit) / 8) as usize;
+
+                    if current_bit + 8 <= window_end_bit {
+                        let byte = self.buffer[local_byte];
+
+                        if byte == 0 {
+                            let needed = count - run_len;
+
+                            if needed <= 8 {
+                                return Ok(run_start);
+                            }
+
+                            run_len += 8;
+                            current_bit += 8;
+                        } else {
+                            let zeros = byte.trailing_zeros() as u64;
+
+                            run_len += zeros;
+
+                            if run_len >= count {
+                                return Ok(run_start);
+                            }
+
+                            current_bit += zeros + 1;
+                            run_start = None;
+                            run_len = 0;
+                        }
+                    } else {
+                        let local_bit = (current_bit - window_start_bit) as usize;
+
+                        if self.buffer[..self.valid_len].get_bit(local_bit) {
+                            run_start = None;
+                            run_len = 0;
+                        } else {
+                            run_len += 1;
+
+                            if run_len == count {
+                                return Ok(run_start);
+                            }
+                        }
+
+                        current_bit += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Scan for the next contiguous range of `count` zero bits, starting from `hint_bit`.
     ///
     /// Returns the absolute bit index of the start of the range.
@@ -396,169 +658,200 @@ impl<'a, M: BitmapFsMeta> BitmapDriver<'a, M> {
         hint_bit: u64,
         count: u64,
     ) -> RimIOResult<Option<u64>> {
-        let total_bits = self.meta.bitmap_size() * 8;
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+
+        self.find_next_free_ro(io, hint_bit, count)
+    }
+
+    /// Find enough free units without mutating the bitmap. Ignores padding bits.
+    pub fn find_free_runs_ro<R: RimRead + ?Sized>(
+        &mut self,
+        io: &mut R,
+        count: u64,
+    ) -> RimIOResult<Option<RunList>> {
         if count == 0 {
-            return Ok(if hint_bit <= total_bits {
-                Some(hint_bit)
-            } else {
-                None
-            });
-        }
-        if hint_bit
-            .checked_add(count)
-            .is_none_or(|end| end > total_bits)
-        {
-            return Ok(None);
+            return Err(RimIOError::InvalidBuffer);
         }
 
-        let mut run_start: Option<u64> = None;
-        let mut run_len: u64 = 0;
-        let mut current_bit = hint_bit;
+        let valid_bits = self.meta.bitmap_valid_bits();
 
-        while current_bit < total_bits {
-            let byte_offset = current_bit / 8;
-            self.ensure_loaded(io, byte_offset)?;
+        let mut runs = RunList::new();
+        let mut found = 0u64;
+        let mut bit = 0u64;
 
-            let window_start_bit = self.window_start * 8;
-            let window_bits = (self.valid_len as u64) * 8;
-            let window_end_bit = (window_start_bit + window_bits).min(total_bits);
+        while bit < valid_bits {
+            let Some(start) = self.find_next_free_ro(io, bit, 1)? else {
+                break;
+            };
 
-            while current_bit < window_end_bit {
-                if run_start.is_none() {
-                    let local_start = (current_bit - window_start_bit) as usize;
-                    match self.buffer[..self.valid_len].find_first_zero(local_start) {
-                        Some(local_zero) => {
-                            let zero_bit = window_start_bit + local_zero as u64;
-                            if zero_bit >= window_end_bit {
-                                current_bit = window_end_bit;
+            bit = start;
+
+            // Efficiently advance through consecutive free bits directly from windowed memory
+            while bit < valid_bits && found < count {
+                let byte_offset = bit / 8;
+                self.ensure_loaded_ro(io, byte_offset)?;
+
+                let window_start_bit = self.window_start * 8;
+                let window_bits = self.valid_len as u64 * 8;
+                let window_end_bit = (window_start_bit + window_bits).min(valid_bits);
+
+                let mut in_window = true;
+                while bit < window_end_bit && found < count {
+                    let local_bit = (bit - window_start_bit) as usize;
+                    if bit.is_multiple_of(8) && bit + 8 <= window_end_bit {
+                        let byte = self.buffer[local_bit / 8];
+                        if byte == 0 {
+                            let needed = count - found;
+                            let take = needed.min(8);
+                            bit += take;
+                            found += take;
+                            if take < 8 {
                                 break;
                             }
-                            run_start = Some(zero_bit);
-                            run_len = 0;
-                            current_bit = zero_bit;
-                        }
-                        None => {
-                            current_bit = window_end_bit;
+                            continue;
+                        } else {
+                            let zeros = byte.trailing_zeros() as u64;
+                            let needed = count - found;
+                            let take = zeros.min(needed);
+                            bit += take;
+                            found += take;
+                            in_window = false;
                             break;
                         }
+                    } else if !self.buffer[..self.valid_len].get_bit(local_bit) {
+                        bit += 1;
+                        found += 1;
+                    } else {
+                        in_window = false;
+                        break;
                     }
                 }
 
-                if !current_bit.is_multiple_of(8) {
-                    let local_bit = (current_bit - window_start_bit) as usize;
-                    if self.buffer[..self.valid_len].get_bit(local_bit) {
-                        run_start = None;
-                        run_len = 0;
-                        current_bit += 1;
-                    } else {
-                        run_len += 1;
-                        if run_len == count {
-                            return Ok(run_start);
-                        }
-                        current_bit += 1;
-                    }
-                } else {
-                    let local_byte = ((current_bit - window_start_bit) / 8) as usize;
-                    if current_bit + 8 <= window_end_bit {
-                        let b = self.buffer[local_byte];
-                        if b == 0 {
-                            let needed = count - run_len;
-                            if needed <= 8 {
-                                return Ok(run_start);
-                            }
-                            run_len += 8;
-                            current_bit += 8;
-                        } else {
-                            let tz = b.trailing_zeros() as u64;
-                            run_len += tz;
-                            if run_len >= count {
-                                return Ok(run_start);
-                            }
-                            current_bit = current_bit + tz + 1;
-                            run_start = None;
-                            run_len = 0;
-                        }
-                    } else {
-                        let local_bit = (current_bit - window_start_bit) as usize;
-                        if self.buffer[..self.valid_len].get_bit(local_bit) {
-                            run_start = None;
-                            run_len = 0;
-                            current_bit += 1;
-                        } else {
-                            run_len += 1;
-                            if run_len == count {
-                                return Ok(run_start);
-                            }
-                            current_bit += 1;
-                        }
-                    }
+                if !in_window {
+                    break;
                 }
             }
+
+            runs.push(Run::new(start, bit - start));
+
+            if found == count {
+                return Ok(Some(runs));
+            }
+
+            bit += 1;
         }
 
         Ok(None)
     }
 
+    /// Find enough free units without mutating the bitmap. Ignores padding bits.
+    pub fn find_free_runs<IO: RimIO + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        count: u64,
+    ) -> RimIOResult<Option<RunList>> {
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+
+        self.find_free_runs_ro(io, count)
+    }
+
     /// Optimized: Format the entire bitmap with a pattern (usually 0x00 or 0xFF).
-    /// Used for initialization.
+    /// Used for initialization. Uses zero_at when pattern is 0 for sparse storage optimization.
     pub fn format_with<IO: RimIO + ?Sized>(&mut self, io: &mut IO, pattern: u8) -> RimIOResult {
         let size = self.meta.bitmap_size();
-        let chunk_size = self.buffer.len();
-        self.buffer.fill(pattern);
+        if pattern == 0 {
+            io.zero_at(self.meta.bitmap_offset(), size)?;
+        } else {
+            let chunk_size = self.buffer.len();
+            self.buffer.fill(pattern);
 
-        let mut offset = 0;
-        while offset < size {
-            let to_write = core::cmp::min(chunk_size as u64, size - offset) as usize;
-            let abs_offset = self.meta.bitmap_offset() + offset;
-            io.write_at(abs_offset, &self.buffer[..to_write])?;
-            offset += to_write as u64;
+            let mut offset = 0;
+            while offset < size {
+                let to_write = core::cmp::min(chunk_size as u64, size - offset) as usize;
+                let abs_offset = self.meta.bitmap_offset() + offset;
+                io.write_at(abs_offset, &self.buffer[..to_write])?;
+                offset += to_write as u64;
+            }
         }
 
         // Invalidate current window to be safe
         self.valid = false;
+        self.dirty = false;
         Ok(())
     }
 
-    /// Count used bits (ones).
-    pub fn count_ones<IO: RimIO + ?Sized>(&mut self, io: &mut IO) -> RimIOResult<usize> {
-        let size = self.meta.bitmap_size();
-        let mut count = 0;
-        let mut offset = 0;
+    /// Count used bits without requiring write access.
+    pub fn count_ones_ro<R: RimRead + ?Sized>(&mut self, io: &mut R) -> RimIOResult<u64> {
+        let valid_bits = self.meta.bitmap_valid_bits();
 
-        // Iterate through all windows
-        while offset < size {
-            self.ensure_loaded(io, offset)?;
-            count += self.buffer[..self.valid_len].count_ones();
-            offset += self.valid_len as u64;
+        let full_bytes = valid_bits / 8;
+        let tail_bits = (valid_bits % 8) as u32;
+
+        let mut count = 0u64;
+        let mut offset = 0u64;
+
+        while offset < full_bytes {
+            self.ensure_loaded_ro(io, offset)?;
+
+            let available = self.valid_len as u64;
+            let remaining = full_bytes - offset;
+            let len = available.min(remaining) as usize;
+
+            count += self.buffer[..len]
+                .iter()
+                .map(|b| b.count_ones() as u64)
+                .sum::<u64>();
+
+            offset += len as u64;
         }
+
+        if tail_bits != 0 {
+            self.ensure_loaded_ro(io, full_bytes)?;
+
+            let local_byte = (full_bytes - self.window_start) as usize;
+            let mask = (1u8 << tail_bits) - 1;
+
+            count += (self.buffer[local_byte] & mask).count_ones() as u64;
+        }
+
         Ok(count)
+    }
+
+    /// Count used bits, flushing pending writes first.
+    pub fn count_ones<IO: RimIO + ?Sized>(&mut self, io: &mut IO) -> RimIOResult<u64> {
+        if self.valid && self.dirty {
+            self.flush(io)?;
+        }
+
+        self.count_ones_ro(io)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_set_get_bit() {
         let mut bitmap = [0u8; 4];
 
-        // Set bit 0
         bitmap.set_bit(0, true);
         assert!(bitmap.get_bit(0));
         assert_eq!(bitmap[0], 0b00000001);
 
-        // Set bit 7
         bitmap.set_bit(7, true);
         assert!(bitmap.get_bit(7));
         assert_eq!(bitmap[0], 0b10000001);
 
-        // Set bit 8 (first bit of second byte)
         bitmap.set_bit(8, true);
         assert!(bitmap.get_bit(8));
         assert_eq!(bitmap[1], 0b00000001);
 
-        // Clear bit 0
         bitmap.set_bit(0, false);
         assert!(!bitmap.get_bit(0));
         assert_eq!(bitmap[0], 0b10000000);
@@ -610,7 +903,6 @@ mod tests {
         assert_eq!(bitmap.find_next_zero_range(0, 8), Some(0));
         assert_eq!(bitmap.find_next_zero_range(0, 9), None); // Interrupted by 0xFF at bit 8
 
-        // Skip over the ones
         assert_eq!(bitmap.find_next_zero_range(0, 10), None);
         // Should hop over 0xFF(bits 8-15) to bit 16
         assert_eq!(bitmap.find_next_zero_range(5, 5), Some(16));
@@ -625,7 +917,6 @@ mod tests {
         assert_eq!(bitmap[0], 0b00111100);
         assert_eq!(bitmap[1], 0);
 
-        // Clear part of it: [3, 5) -> bits 3, 4
         bitmap.set_bits_in_range(3, 5, false);
         assert_eq!(bitmap[0], 0b00100100);
 
@@ -652,6 +943,7 @@ mod tests {
 
     struct TestBitmapMeta {
         size: u64,
+        valid_bits: Option<u64>,
     }
     impl BitmapFsMeta for TestBitmapMeta {
         fn bitmap_offset(&self) -> u64 {
@@ -660,14 +952,20 @@ mod tests {
         fn bitmap_size(&self) -> u64 {
             self.size
         }
+        fn bitmap_valid_bits(&self) -> u64 {
+            self.valid_bits.unwrap_or(self.size * 8)
+        }
     }
 
     #[test]
     fn test_find_next_free_cross_window_and_large() {
-        let meta = TestBitmapMeta { size: 16384 };
-        let mut data = alloc::vec![0xFFu8; 16384];
+        let meta = TestBitmapMeta {
+            size: 16384,
+            valid_bits: None,
+        };
+        let mut data = vec![0xFFu8; 16384];
         let mut driver = BitmapDriver::new(&meta);
-        let mut io = rimio::prelude::MemRimIO::new(&mut data);
+        let mut io = MemRimIO::new(&mut data);
 
         assert_eq!(driver.find_next_free(&mut io, 0, 1).unwrap(), None);
 
@@ -687,5 +985,35 @@ mod tests {
             driver.find_next_free(&mut io, 0, 40000).unwrap(),
             Some(10000)
         );
+    }
+
+    #[test]
+    fn fragmented_scan_excludes_padding_and_does_not_reserve() {
+        let meta = TestBitmapMeta {
+            size: 2,
+            valid_bits: Some(8),
+        };
+        let mut data = [0b10101010, 0b11111110];
+        let mut io = rimio::prelude::MemRimIO::new(&mut data);
+        let mut driver = BitmapDriver::new(&meta);
+        let runs = driver.find_free_runs(&mut io, 4).unwrap().unwrap();
+        assert_eq!(runs.total_units(), 4);
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.start)
+                .collect::<alloc::vec::Vec<_>>(),
+            [0, 2, 4, 6]
+        );
+        assert!(driver.find_free_runs(&mut io, 5).unwrap().is_none());
+        assert_eq!(
+            driver
+                .find_free_runs(&mut io, 4)
+                .unwrap()
+                .unwrap()
+                .total_units(),
+            4
+        );
+        driver.flush(&mut io).unwrap();
+        assert_eq!(data, [0b10101010, 0b11111110]);
     }
 }

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Image generation options and format-specific configuration.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageOptions {
     pub timestamp_seconds: u32,

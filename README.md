@@ -224,6 +224,17 @@ println!("Synthesized {} bytes in {:?}", report.total_bytes, report.total_durati
 
 ---
 
+## 📚 Architecture & Technical Documentation
+
+For in-depth architectural specifications, design principles, and component deep dives, consult the dedicated technical guides in [`docs/`](docs/):
+
+- **[Architecture Overview (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)**: System design philosophy, 7-layer architecture diagram, runtime profiles (`no_std`, UEFI, WASM), and data flow pipelines.
+- **[Filesystem Engines & Contracts (`docs/FILESYSTEMS.md`)](docs/FILESYSTEMS.md)**: `rimfs-core` unified contracts (`FsFilesystem`, `FsFormatter`, `FsInjector`, `FsResolver`, `FsChecker`) and technical specifications for the 7 filesystem and archive drivers (FAT/RimFAT, ExFAT, EXT2/3/4, NTFS 3.1, ISO 9660, TAR, ZIP).
+- **[Containers, Partitions & Storage I/O (`docs/CONTAINERS.md`)](docs/CONTAINERS.md)**: The `RimIO` positioned I/O layer, `OverlayRimIO` copy-on-write engine, MBR/GPT and streaming partition tables (`rimpart`), and VM disk formats (`rimimg`: RAW, VHD, VMDK, VDI, QCOW2 dynamic sparse allocator).
+- **[Synthesis & Transfer Engine (`docs/SYNTHESIS_AND_TRANSFER.md`)](docs/SYNTHESIS_AND_TRANSFER.md)**: Declarative storage synthesis with `rimgen`, partition alignment and auto-sizing, universal rootless `rim copy` transfers, and `rimhost` OS integration.
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

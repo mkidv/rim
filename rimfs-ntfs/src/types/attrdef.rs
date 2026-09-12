@@ -6,43 +6,44 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
-use zerocopy::{Immutable, IntoBytes};
+use zerocopy::byteorder::little_endian::{U16, U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Attribute Definition entry (160 bytes)
-#[derive(Debug, Clone, Copy, IntoBytes, Immutable)]
-#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, IntoBytes, Immutable)]
+#[repr(C)]
 pub struct AttributeDefinition {
     /// Name of the attribute (Unicode, zero padded)
-    pub name: [u16; 64],
+    pub name: [U16; 64],
     /// Attribute type code (e.g., 0x10 for $STANDARD_INFORMATION)
-    pub attr_type: u32,
+    pub attr_type: U32,
     /// Display rule
-    pub display_rule: u32,
+    pub display_rule: U32,
     /// Collation rule
-    pub collation_rule: u32,
+    pub collation_rule: U32,
     /// Flags
-    pub flags: u32,
+    pub flags: U32,
     /// Minimum size in bytes
-    pub min_size: u64,
+    pub min_size: U64,
     /// Maximum size in bytes
-    pub max_size: u64,
+    pub max_size: U64,
 }
 
 impl AttributeDefinition {
     pub fn new(name: &str, attr_type: u32, flags: u32, min_size: u64, max_size: u64) -> Self {
-        let mut name_buf = [0u16; 64];
+        let mut name_buf = [U16::new(0); 64];
         for (i, c) in name.encode_utf16().take(64).enumerate() {
-            name_buf[i] = c;
+            name_buf[i] = c.into();
         }
 
         Self {
             name: name_buf,
-            attr_type,
-            display_rule: 0,
-            collation_rule: 0,
-            flags,
-            min_size,
-            max_size,
+            attr_type: attr_type.into(),
+            display_rule: 0.into(),
+            collation_rule: 0.into(),
+            flags: flags.into(),
+            min_size: min_size.into(),
+            max_size: max_size.into(),
         }
     }
 }
@@ -77,3 +78,10 @@ pub fn build_standard_attr_defs() -> Vec<u8> {
     result.extend_from_slice(&[0u8; 160]);
     result
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<AttributeDefinition>() == 160);
+    assert!(core::mem::align_of::<AttributeDefinition>() == 1);
+    assert!(core::mem::offset_of!(AttributeDefinition, attr_type) == 128);
+    assert!(core::mem::offset_of!(AttributeDefinition, min_size) == 144);
+};

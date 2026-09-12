@@ -3,7 +3,7 @@
 
 use core::cmp::Ordering;
 
-use crate::upcase::UpcaseHandle;
+use crate::{types::NtfsFileNameNamespace, upcase::UpcaseHandle};
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{format, string::String};
@@ -12,11 +12,11 @@ use alloc::{format, string::String};
 ///
 /// If the name fits DOS 8.3 constraints, use `Win32AndDos` (3).
 /// Otherwise, use `Win32` (1) accompanied by an alias in `Dos` (2).
-pub fn determine_file_name_namespace(name: &str) -> crate::types::record::NtfsFileNameNamespace {
+pub fn determine_file_name_namespace(name: &str) -> NtfsFileNameNamespace {
     if is_valid_dos_8_3(name) {
-        crate::types::record::NtfsFileNameNamespace::Win32AndDos
+        NtfsFileNameNamespace::Win32AndDos
     } else {
-        crate::types::record::NtfsFileNameNamespace::Win32
+        NtfsFileNameNamespace::Win32
     }
 }
 
@@ -108,4 +108,72 @@ pub fn compare_names_upcase(a: &[u16], b: &[u16], upcase: &UpcaseHandle) -> Orde
         }
     }
     a.len().cmp(&b.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+    use super::*;
+
+    #[test]
+    fn test_compare_names_upcase() {
+        use crate::upcase::UpcaseFlavor;
+        let upcase = UpcaseHandle::from_flavor(&UpcaseFlavor::Windows);
+
+        let name1: Vec<u16> = "filename.txt".encode_utf16().collect();
+        let name2: Vec<u16> = "FILENAME.TXT".encode_utf16().collect();
+        let name3: Vec<u16> = "filename.tyt".encode_utf16().collect();
+
+        assert_eq!(
+            compare_names_upcase(&name1, &name2, &upcase),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_names_upcase(&name1, &name3, &upcase),
+            Ordering::Less
+        );
+
+        // Unicode check: Cyrillic 'a' (U+0430) and 'A' (U+0410)
+        let cyr_a_lower: Vec<u16> = vec![0x0430];
+        let cyr_a_upper: Vec<u16> = vec![0x0410];
+        assert_eq!(
+            compare_names_upcase(&cyr_a_lower, &cyr_a_upper, &upcase),
+            Ordering::Equal
+        );
+
+        // Standard ASCII order check
+        assert!(
+            compare_names_upcase(
+                &"a".encode_utf16().collect::<Vec<_>>(),
+                &"B".encode_utf16().collect::<Vec<_>>(),
+                &upcase
+            ) == Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_dos_8_3_and_namespace() {
+        assert!(is_valid_dos_8_3("FILE.TXT"));
+        assert!(is_valid_dos_8_3("test_win.txt"));
+        assert!(!is_valid_dos_8_3("win_payload"));
+        assert!(!is_valid_dos_8_3("long_filename.extension"));
+
+        assert_eq!(
+            determine_file_name_namespace("FILE.TXT"),
+            NtfsFileNameNamespace::Win32AndDos
+        );
+        assert_eq!(
+            determine_file_name_namespace("win_payload"),
+            NtfsFileNameNamespace::Win32
+        );
+
+        assert_eq!(generate_dos_8_3_name("win_payload"), "WIN_PA~1");
+        assert_eq!(generate_dos_8_3_name("from_windows"), "FROM_W~1");
+        assert_eq!(
+            generate_dos_8_3_name("long_filename.extension"),
+            "LONG_F~1.EXT"
+        );
+        assert_eq!(generate_dos_8_3_name("document.tar.gz"), "DOCUME~1.GZ");
+        assert_eq!(generate_dos_8_3_name("a+b=c[1].txt"), "ABC1~1.TXT");
+    }
 }

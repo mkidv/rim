@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Standard library std::io adapters for RimIO.
+
 #[cfg(feature = "std")]
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 

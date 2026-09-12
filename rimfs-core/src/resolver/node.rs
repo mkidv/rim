@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Logical filesystem node representation (files, directories, symlinks).
+
 pub use crate::resolver::attr::FileAttributes;
 use core::fmt;
 

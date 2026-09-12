@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT filesystem integrity and consistency checker.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec};
 
@@ -128,10 +131,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
 
         let bitmap_clus = crit.bitmap_fc.unwrap_or(self.meta.bitmap_cluster);
         let bpos = self.meta.unit_offset(bitmap_clus);
-        let bsize = self
-            .meta
-            .unit_size()
-            .min(self.meta.bitmap_size_bytes as usize);
+        let bsize = (self.meta.unit_size() as usize).min(self.meta.bitmap_size_bytes as usize);
         // Note: simplified reading of just first cluster of bitmap if > 1 cluster
         // Real implementation should chain-read bitmap.
         // For now, let's assume small disk or just check 1st bitmap cluster coverage
@@ -201,10 +201,6 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExFatChecker<'a, IO> {
         Ok(())
     }
 }
-
-/* =========================================================================
-Implementation of old checks, factorized / adapted
-========================================================================= */
 
 /// Deep walk of FAT chains (detects loops, overflow, and invalid indices)
 fn check_fat_chains_deep<IO: RimIO + ?Sized>(io: &mut IO, meta: &ExFatMeta) -> FsCheckerResult {
@@ -290,7 +286,9 @@ fn check_bitmap_fat_consistency<IO: RimIO + ?Sized>(
                 .expect("slice length checked"),
         );
 
-        let (byte_index, bit_mask) = meta.bitmap_entry_offset(cluster);
+        let idx = (cluster.saturating_sub(EXFAT_FIRST_CLUSTER)) as usize;
+        let byte_index = idx / 8;
+        let bit_mask = 1u8 << (idx % 8);
         if byte_index >= bitmap.len() {
             return Err(FsCheckerError::Invalid("Bitmap index out of bounds"));
         }
@@ -393,7 +391,6 @@ fn compare_vbr_main_backup<IO: RimIO + ?Sized>(
     io.read_at(0, &mut main_raw)?;
     io.read_at(boot_backup_lba512(0, bps) * 512, &mut bak_raw)?;
 
-    // Parse struct -> neutralize -> re-serialize
     if let (Ok(m0), Ok(b0)) = (
         ExFatBootSector::read_from_bytes(&main_raw),
         ExFatBootSector::read_from_bytes(&bak_raw),
@@ -432,17 +429,17 @@ fn check_bpb_geometry(
             format!("NumberOfFats={} (TexFAT not supported)", vbr.number_of_fats),
         ));
     }
-    if vbr.cluster_count == 0 {
+    if vbr.cluster_count.get() == 0 {
         rep.push(Finding::err("BPB.CLUS", "ClusterCount == 0"));
     }
-    if vbr.fat_length == 0 {
+    if vbr.fat_length.get() == 0 {
         rep.push(Finding::err("BPB.FATL", "FATLength == 0"));
     }
 
-    let vol_bytes = vbr.volume_length.saturating_mul(bps as u64);
-    let fat_begin = (vbr.fat_offset as u64) * (bps as u64);
-    let fat_end = (vbr.fat_offset as u64 + vbr.fat_length as u64) * (bps as u64);
-    let heap_off = (vbr.cluster_heap_offset as u64) * (bps as u64);
+    let vol_bytes = vbr.volume_length.get().saturating_mul(bps as u64);
+    let fat_begin = (vbr.fat_offset.get() as u64) * (bps as u64);
+    let fat_end = (vbr.fat_offset.get() as u64 + vbr.fat_length.get() as u64) * (bps as u64);
+    let heap_off = (vbr.cluster_heap_offset.get() as u64) * (bps as u64);
     if !(fat_begin < fat_end && fat_end <= heap_off && heap_off < vol_bytes) {
         rep.push(Finding::err(
             "BPB.ORDER",
@@ -450,8 +447,8 @@ fn check_bpb_geometry(
         ));
     }
 
-    let need_bytes = (vbr.cluster_count as u64 + 2) * 4;
-    let fat_bytes = (vbr.fat_length as u64) * (bps as u64);
+    let need_bytes = (vbr.cluster_count.get() as u64 + 2) * 4;
+    let fat_bytes = (vbr.fat_length.get() as u64) * (bps as u64);
     if fat_bytes < need_bytes {
         rep.push(Finding::err(
             "BPB.FATL",
@@ -459,8 +456,8 @@ fn check_bpb_geometry(
         ));
     }
 
-    if vbr.root_dir_cluster < EXFAT_FIRST_CLUSTER
-        || vbr.root_dir_cluster > (EXFAT_FIRST_CLUSTER + vbr.cluster_count - 1)
+    if vbr.root_dir_cluster.get() < EXFAT_FIRST_CLUSTER
+        || vbr.root_dir_cluster.get() > (EXFAT_FIRST_CLUSTER + vbr.cluster_count.get() - 1)
     {
         rep.push(Finding::err(
             "BPB.ROOT",
@@ -478,8 +475,6 @@ fn check_bpb_geometry(
     ));
     Ok(())
 }
-
-/* -------------------- FAT sampling -------------------- */
 
 fn sample_fat<IO: RimIO + ?Sized>(
     io: &mut IO,
@@ -510,8 +505,6 @@ fn sample_fat<IO: RimIO + ?Sized>(
     }
     Ok(())
 }
-
-/* -------------------- ROOT & CRITICAL ENTRIES -------------------- */
 
 fn scan_root_for_critical_with_meta<IO: RimIO + ?Sized>(
     io: &mut IO,
@@ -649,7 +642,6 @@ fn verify_upcase_checksum_over_file<IO: RimIO + ?Sized>(
             return Err(FsCheckerError::Invalid("Up-Case cluster out of range"));
         }
 
-        // Read current cluster
         let mut buf = vec![0u8; bytes_per_cluster];
         io.read_at(meta.unit_offset(cur), &mut buf)?;
 
@@ -688,8 +680,6 @@ fn verify_upcase_checksum_over_file<IO: RimIO + ?Sized>(
     }
     Ok(())
 }
-
-/* -------------------- BITMAP vs FAT -------------------- */
 
 fn bitmap_covers_critical<IO: RimIO + ?Sized>(
     io: &mut IO,
@@ -775,17 +765,19 @@ fn bitmap_has_cluster_meta<IO: RimIO + ?Sized>(
     Ok((byte & (1 << bit)) != 0)
 }
 
-/* -------------------- parsing helpers -------------------- */
-
 fn parse_bitmap_entry(raw: &[u8]) -> Option<(u32, u64)> {
     ExFatBitmapEntry::read_from_bytes(raw)
         .ok()
-        .map(|e| (e.first_cluster, e.data_length))
+        .map(|e| (e.first_cluster.get(), e.data_length.get()))
 }
 fn parse_upcase_entry(raw: &[u8]) -> Option<(u32, u64, u32)> {
-    ExFatUpcaseEntry::read_from_bytes(raw)
-        .ok()
-        .map(|e| (e.first_cluster, e.data_length, e.table_checksum))
+    ExFatUpcaseEntry::read_from_bytes(raw).ok().map(|e| {
+        (
+            e.first_cluster.get(),
+            e.data_length.get(),
+            e.table_checksum.get(),
+        )
+    })
 }
 
 fn check_file_entry_set(raw: &[u8]) -> (bool, usize, String) {
@@ -831,7 +823,6 @@ mod tests {
 
         let cluster_in_2nd_bmp_clus = EXFAT_FIRST_CLUSTER + (cluster_size as u32 * 8);
 
-        // Mark this bit in the 2nd cluster of bitmap
         let second_bmp_clus = bfc + 1;
         let second_bmp_offset = meta.unit_offset(second_bmp_clus);
         let mut second_clus_data = vec![0u8; cluster_size];

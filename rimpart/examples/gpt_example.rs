@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // cargo run -p rimpart --example gpt_roundtrip --features std,mem
 use rimio::prelude::MemRimIO;
 use rimpart::gpt::{self, GptEntry};

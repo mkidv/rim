@@ -96,3 +96,31 @@ pub fn encode_runs_to_dataruns(runs: &rimio::run::RunList) -> Vec<u8> {
     out.push(encode_data_run_end());
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_data_run_encoding() {
+        let (run, len) = encode_data_run(100, 10);
+        assert!(len > 0);
+        assert_eq!(run[0] & 0x0F, 1);
+
+        let (run128, len128) = encode_data_run(4101, 128);
+        assert_eq!(
+            run128[0] & 0x0F,
+            2,
+            "Length 128 must use 2 bytes (0x80, 0x00)"
+        );
+        assert_eq!(run128[1], 0x80);
+        let mut full_runs = run128[..len128].to_vec();
+        full_runs.push(0);
+        let runs: Vec<_> = crate::view::runlist::NtfsRunList::new(&full_runs)
+            .iter()
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, 128);
+        assert_eq!(runs[0].lcn, Some(4101));
+    }
+}

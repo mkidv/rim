@@ -10,16 +10,16 @@ use alloc::vec::Vec;
 use rimio::prelude::*;
 
 use crate::allocator::{FsAllocator, NtfsAllocator, NtfsHandle};
-use crate::attr::{AttributeType, NtfsFileNameNamespace};
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
 use crate::types::attrdef::build_standard_attr_defs;
-use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};
-use crate::utils::build_mft_reference;
+use crate::types::{
+    NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord,
+};
+use crate::mft::build_mft_reference;
 
 #[derive(Default)]
 pub struct NtfsAttrDefFeature {
@@ -61,7 +61,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
         if size >= 600 {
             let clusters = size.div_ceil(allocator.meta.bytes_per_cluster as u64);
             let handle = allocator
-                .allocate_contiguous(io, clusters as usize)
+                .allocate_contiguous(io, clusters)
                 .map_err(crate::core::errors::FsFeatureError::Allocator)?;
             self.handle = Some(handle);
         }
@@ -99,24 +99,20 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
                 NtfsFileNameNamespace::Win32AndDos,
             ));
             record.add_attribute(NtfsAttribute::non_resident(
-                AttributeType::Data,
+                NtfsAttributeType::Data,
                 "",
                 meta,
                 &handle.runs,
                 size,
             ));
 
-            let raw = record.to_raw_buffer(meta).map_err(|_| {
-                crate::core::errors::FsFeatureError::Other("MFT serialization failed")
-            })?;
-            mft::write_record(io, meta, MFT_RECORD_ATTRDEF, &raw)
+            record
+                .write_to_mft(io, meta, MFT_RECORD_ATTRDEF)
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         } else {
             let record = Self::build_resident_record(self.content.clone(), SECURITY_ID_SYSTEM);
-            let raw = record.to_raw_buffer(meta).map_err(|_| {
-                crate::core::errors::FsFeatureError::Other("MFT serialization failed")
-            })?;
-            mft::write_record(io, meta, MFT_RECORD_ATTRDEF, &raw)
+            record
+                .write_to_mft(io, meta, MFT_RECORD_ATTRDEF)
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         }
 

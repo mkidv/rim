@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Partition type definition macros.
+
 #[macro_export]
 /// Defines a set of GPT partition types, along with associated constants, detection functions, and an enum for partition kinds.
 ///

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! Read-only filesystem tree traversal and resolver interfaces.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -17,6 +20,11 @@ pub mod std_resolver;
 pub mod attr;
 pub mod node;
 pub mod walker;
+
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub mod path_index;
+#[cfg(any(feature = "alloc", feature = "std"))]
+pub use path_index::PathIndex;
 
 pub use attr::NodeKind;
 pub use node::*;

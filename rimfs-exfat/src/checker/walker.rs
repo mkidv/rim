@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT directory entry set reachability walker.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{format, vec, vec::Vec};
 
@@ -58,7 +61,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
         let root = self.meta.root_unit();
         let mut stack = vec![(root, 0)]; // (cluster, depth)
 
-        // Mark root chain as reachable
         // Note: Root dir has no strict size in ExFAT, it's a chain.
         // We will mark it as we traverse.
 
@@ -77,7 +79,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
             // ReadDir entries
             let children = self.scan_directory(dir_cluster, rep, stats)?;
 
-            // Mark this directory's chain itself as reachable
             // (Note: children might have marked parts of it, but we ensure full coverage here)
             let mut cur = ClusterCursor::new(self.meta, dir_cluster);
             cur.for_each_run(self.io, |_io, start, len| {
@@ -93,7 +94,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
 
             for child in children {
                 if child.is_dir() {
-                    // Check if loop
                     let first = child.first_cluster();
                     let idx = (first.saturating_sub(EXFAT_FIRST_CLUSTER)) as usize;
                     if idx / 8 < self.reachable_bitmap.len() {
@@ -107,7 +107,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
                         }
                     }
 
-                    // Mark and push
                     if child.size() > 0 {
                         self.mark_reachable(child.first_cluster(), child.size() as u64)?;
                     }
@@ -130,7 +129,7 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
         rep: &mut VerifyReport,
         stats: &mut WalkerStats,
     ) -> FsCheckerResult<Vec<ExFatEntries>> {
-        let cs = self.meta.unit_size();
+        let cs = self.meta.unit_size() as usize;
         let mut entries = Vec::new();
 
         // State for entry reconstruction
@@ -158,7 +157,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
 
                 match type_byte {
                     EXFAT_ENTRY_PRIMARY => {
-                        // Flush previous if exists
                         if let (Some(p), Some(s)) = (raw_primary.take(), raw_stream.take()) {
                             if let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s) {
                                 entries.push(e);
@@ -204,7 +202,6 @@ impl<'a, IO: RimIO + ?Sized> ExFatWalker<'a, IO> {
             Ok(())
         })?;
 
-        // Flush final
         if let (Some(p), Some(s)) = (raw_primary, raw_stream)
             && let Ok(e) = ExFatEntries::from_raw(&lfn_stack, &p, &s)
         {

@@ -1,78 +1,89 @@
 // SPDX-License-Identifier: MIT
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+//! Linear contiguous block and sector allocator.
 
 use rimio::RimIO;
 
 use crate::allocator::{FsAllocator, FsAllocatorError, FsAllocatorResult, FsHandle};
-use crate::meta::FsMeta;
 
-/// A simple linear allocator (bump allocator).
+/// A high-performance, zero-allocation linear bump allocator.
 ///
-/// Maintains a `next_free` cursor and blindly allocates the next available units
-/// until it reaches the end of the data region.
-///
-/// This is primarily useful for:
-/// - Initial formatting of a filesystem (writing sequentially).
-/// - Simple filesystems where fragmentation is not a concern or handled elsewhere.
-#[derive(Debug, Clone, Copy)]
-pub struct LinearAllocator<'a, M> {
-    pub meta: &'a M,
-    pub next_free: u32,
+/// Maintains a cursor and sequentially allocates contiguous ranges of units
+/// until reaching `max_units`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinearAllocator {
+    pub current: u64,
+    pub max_units: u64,
+    pub base_offset: u64,
 }
 
-impl<'a, M: FsMeta<u32>> LinearAllocator<'a, M> {
-    pub fn new(meta: &'a M) -> Self {
+impl LinearAllocator {
+    /// Create a new linear allocator starting at `start` and bounded by `max_units`.
+    pub const fn new(start: u64, max_units: u64) -> Self {
         Self {
-            meta,
-            next_free: meta.first_data_unit(),
+            current: start,
+            max_units,
+            base_offset: start,
         }
     }
 
-    pub fn used_units(&self) -> usize {
-        (self.next_free - self.meta.first_data_unit()) as usize
+    /// Allocate a contiguous range of `count` units, returning the starting unit number.
+    pub fn allocate_range(&mut self, count: u64) -> FsAllocatorResult<u64> {
+        if count == 0 {
+            return Err(FsAllocatorError::InvalidSize);
+        }
+
+        let start = self.current;
+        let end = start
+            .checked_add(count)
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
+        if end > self.max_units {
+            return Err(FsAllocatorError::OutOfBlocks);
+        }
+
+        self.current = end;
+        Ok(start)
     }
 
-    pub fn remaining_units(&self) -> usize {
-        self.meta.total_units() - self.used_units()
+    /// Reset cursor back to the base starting unit.
+    pub fn reset(&mut self) {
+        self.current = self.base_offset;
+    }
+
+    /// Number of units allocated so far.
+    #[inline]
+    pub fn used_units(&self) -> u64 {
+        self.current.saturating_sub(self.base_offset)
+    }
+
+    /// Number of remaining allocatable units.
+    #[inline]
+    pub fn remaining_units(&self) -> u64 {
+        self.max_units.saturating_sub(self.current)
     }
 }
 
-impl<'a, M, H> FsAllocator<H> for LinearAllocator<'a, M>
+impl<H> FsAllocator<H> for LinearAllocator
 where
-    M: FsMeta<u32>,
-    H: FsHandle + From<Vec<u32>> + Clone,
+    H: FsHandle + From<u64>,
 {
-    fn allocate<IO: RimIO + ?Sized>(&mut self, io: &mut IO, count: usize) -> FsAllocatorResult<H> {
-        self.allocate_contiguous(io, count)
+    fn allocate<IO: RimIO + ?Sized>(&mut self, _io: &mut IO, count: u64) -> FsAllocatorResult<H> {
+        self.allocate_range(count).map(H::from)
     }
 
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
         _io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<H> {
-        let mut chain = vec![0u32; count];
-        for unit in &mut chain {
-            let next_unit = self.next_free;
-            crate::ensure!(
-                next_unit <= self.meta.last_data_unit(),
-                FsAllocatorError::OutOfBlocks
-            );
-            self.next_free += 1;
-            *unit = next_unit;
-        }
-        Ok(H::from(chain))
+        self.allocate_range(count).map(H::from)
     }
 
-    fn used_units(&self) -> usize {
-        (self.next_free - self.meta.first_data_unit()) as usize
+    fn used_units(&self) -> u64 {
+        self.used_units()
     }
 
-    fn remaining_units(&self) -> usize {
-        self.meta.total_units() - ((self.next_free - self.meta.first_data_unit()) as usize)
+    fn remaining_units(&self) -> u64 {
+        self.remaining_units()
     }
 }

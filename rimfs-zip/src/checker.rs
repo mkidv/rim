@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: MIT
+
+//! ZIP archive central directory and local header consistency checker.
+
+use rimio::RimReadStructExt;
+use zerocopy::FromBytes;
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -122,14 +127,11 @@ fn read_entries<IO: RimIO + ?Sized>(
         }
     };
 
-    let mut eocd_buf = [0u8; END_OF_CENTRAL_DIR_FIXED_SIZE];
-    io.read_at(eocd_offset, &mut eocd_buf)?;
+    let eocd_buf: ZipEocd = io.read_struct(eocd_offset)?;
 
-    let total_entries = u16::from_le_bytes([eocd_buf[10], eocd_buf[11]]) as u64;
-    let cd_size =
-        u32::from_le_bytes([eocd_buf[12], eocd_buf[13], eocd_buf[14], eocd_buf[15]]) as u64;
-    let cd_offset =
-        u32::from_le_bytes([eocd_buf[16], eocd_buf[17], eocd_buf[18], eocd_buf[19]]) as u64;
+    let total_entries = eocd_buf.total_entries.get() as u64;
+    let cd_size = eocd_buf.directory_size.get() as u64;
+    let cd_offset = eocd_buf.directory_offset.get() as u64;
 
     let Some(cd_end) = cd_offset.checked_add(cd_size) else {
         rep.push(Finding::err("ZIP.CD", "Central Directory offset overflow"));
@@ -167,8 +169,9 @@ fn read_entries<IO: RimIO + ?Sized>(
             return Ok(Vec::new());
         }
 
-        let cdh_buf = &cd_buf[cd_pos..cdh_end];
-        let sig = u32::from_le_bytes([cdh_buf[0], cdh_buf[1], cdh_buf[2], cdh_buf[3]]);
+        let cdh_buf = ZipCentralDirectoryHeader::ref_from_bytes(&cd_buf[cd_pos..cdh_end])
+            .map_err(|_| rimio::RimIOError::Invalid("Invalid ZIP central header"))?;
+        let sig = cdh_buf.signature.get();
         if sig != CENTRAL_DIR_HEADER_SIG {
             rep.push(Finding::err(
                 "ZIP.CD_SIG",
@@ -177,16 +180,13 @@ fn read_entries<IO: RimIO + ?Sized>(
             return Ok(Vec::new());
         }
 
-        let compression_method = u16::from_le_bytes([cdh_buf[10], cdh_buf[11]]);
-        let expected_crc32 =
-            u32::from_le_bytes([cdh_buf[16], cdh_buf[17], cdh_buf[18], cdh_buf[19]]);
-        let comp_size =
-            u32::from_le_bytes([cdh_buf[20], cdh_buf[21], cdh_buf[22], cdh_buf[23]]) as u64;
-        let name_len = u16::from_le_bytes([cdh_buf[28], cdh_buf[29]]) as usize;
-        let extra_len = u16::from_le_bytes([cdh_buf[30], cdh_buf[31]]) as usize;
-        let comment_len = u16::from_le_bytes([cdh_buf[32], cdh_buf[33]]) as usize;
-        let lfh_offset =
-            u32::from_le_bytes([cdh_buf[42], cdh_buf[43], cdh_buf[44], cdh_buf[45]]) as u64;
+        let compression_method = cdh_buf.compression_method.get();
+        let expected_crc32 = cdh_buf.crc32.get();
+        let comp_size = cdh_buf.compressed_size.get() as u64;
+        let name_len = cdh_buf.name_len.get() as usize;
+        let extra_len = cdh_buf.extra_len.get() as usize;
+        let comment_len = cdh_buf.comment_len.get() as usize;
+        let lfh_offset = cdh_buf.local_header_offset.get() as u64;
 
         let Some(lfh_end) = lfh_offset.checked_add(LOCAL_FILE_HEADER_FIXED_SIZE as u64) else {
             rep.push(Finding::err("ZIP.LFH", "Local File Header offset overflow"));
@@ -200,9 +200,8 @@ fn read_entries<IO: RimIO + ?Sized>(
             return Ok(Vec::new());
         }
 
-        let mut lfh_buf = [0u8; LOCAL_FILE_HEADER_FIXED_SIZE];
-        io.read_at(lfh_offset, &mut lfh_buf)?;
-        let lfh_sig = u32::from_le_bytes([lfh_buf[0], lfh_buf[1], lfh_buf[2], lfh_buf[3]]);
+        let lfh_buf: ZipLocalFileHeader = io.read_struct(lfh_offset)?;
+        let lfh_sig = lfh_buf.signature.get();
         if lfh_sig != LOCAL_FILE_HEADER_SIG {
             rep.push(Finding::err(
                 "ZIP.LFH",
@@ -211,8 +210,8 @@ fn read_entries<IO: RimIO + ?Sized>(
             return Ok(Vec::new());
         }
 
-        let lfh_name_len = u16::from_le_bytes([lfh_buf[26], lfh_buf[27]]) as u64;
-        let lfh_extra_len = u16::from_le_bytes([lfh_buf[28], lfh_buf[29]]) as u64;
+        let lfh_name_len = lfh_buf.name_len.get() as u64;
+        let lfh_extra_len = lfh_buf.extra_len.get() as u64;
         let Some(data_offset) = lfh_offset
             .checked_add(LOCAL_FILE_HEADER_FIXED_SIZE as u64)
             .and_then(|v| v.checked_add(lfh_name_len))

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Terminal user interface styling and output formatting.
+
 pub mod badge;
 pub mod format;
 pub mod progress;

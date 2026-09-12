@@ -10,15 +10,14 @@ use alloc::{vec, vec::Vec};
 use rimio::prelude::*;
 
 use crate::allocator::{FsAllocator, NtfsAllocator, NtfsHandle};
-use crate::attr::{AttributeType, NtfsFileNameNamespace};
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::{MftRecordFlags, NtfsFileAttributes};
+use crate::flags::MftRecordFlags;
 use crate::meta::NtfsMeta;
-use crate::mft;
-use crate::types::{NtfsAttribute, NtfsMftRecord};
-use crate::utils::build_mft_reference;
+use crate::types::{NtfsAttribute, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord};
+use crate::mft::build_mft_reference;
 
 #[derive(Default)]
 pub struct NtfsSecureFeature {
@@ -64,7 +63,7 @@ impl NtfsSecureFeature {
         ));
 
         record.add_attribute(NtfsAttribute::non_resident(
-            AttributeType::Data,
+            NtfsAttributeType::Data,
             "$SDS",
             meta,
             sds_runs,
@@ -113,11 +112,10 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
     }
 
     fn allocate(&mut self, io: &mut IO, allocator: &mut NtfsAllocator<'a>) -> FsFeatureResult<()> {
-        let content = crate::system::secure::build_secure_content();
-        let sds_len = content.sds.len() as u64;
+        let sds_len = crate::types::SecureFileContent::default_sds_size() as u64;
         let clusters = sds_len.div_ceil(allocator.meta.bytes_per_cluster as u64);
         let handle = allocator
-            .allocate_contiguous(io, clusters as usize)
+            .allocate_contiguous(io, clusters)
             .map_err(crate::core::errors::FsFeatureError::Allocator)?;
         self.handle = Some(handle);
         Ok(())
@@ -125,7 +123,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
 
     fn write(&self, io: &mut IO, allocator: &NtfsAllocator<'a>) -> FsFeatureResult<()> {
         let meta = allocator.meta;
-        let content = crate::system::secure::build_secure_content();
+        let content = crate::types::SecureFileContent::default();
         let sds_len = content.sds.len() as u64;
 
         let handle = self.handle.as_ref().ok_or(
@@ -143,8 +141,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         }
 
-        // Write $SDS content
-        let mut binding = content.sds.clone();
+        let mut binding = content.sds;
         let mut stream = MemRimIO::new(&mut binding);
         crate::core::utils::stream_copy::write_stream_to_run_list(
             io,
@@ -165,10 +162,8 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
             SECURITY_ID_SYSTEM,
         );
 
-        let raw = record
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_SECURE, &raw)
+        record
+            .write_to_mft(io, meta, MFT_RECORD_SECURE)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         Ok(())

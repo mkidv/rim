@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Filesystem formatting and file tree injection for generated partitions.
+
 use crate::builder::BuildEvent;
 use crate::errors::{GenError, GenResult};
 use crate::layout::constants::*;
@@ -87,9 +89,9 @@ where
 
 impl PartitionSpan {
     fn from_entry(entry: GptEntry) -> Self {
-        let sectors = entry.end_lba - entry.start_lba + 1;
+        let sectors = entry.end_lba.get() - entry.start_lba.get() + 1;
         Self {
-            offset: entry.start_lba * DEFAULT_SECTOR_SIZE,
+            offset: entry.start_lba.get() * DEFAULT_SECTOR_SIZE,
             size_bytes: sectors * DEFAULT_SECTOR_SIZE,
         }
     }
@@ -137,8 +139,8 @@ pub fn format_inject_resolved_all<F: for<'a> FnMut(BuildEvent<'a>)>(
         let rep = PartitionReport {
             name: part.name.clone(),
             fs: part.fs,
-            start_lba: entry.start_lba,
-            end_lba: entry.end_lba,
+            start_lba: entry.start_lba.get(),
+            end_lba: entry.end_lba.get(),
             size_bytes: span.size_bytes,
             dirs_count: counts.dirs,
             files_count: counts.files,

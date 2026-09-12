@@ -11,16 +11,16 @@ use alloc::{vec, vec::Vec};
 use rimio::prelude::*;
 
 use crate::allocator::{FsAllocator, NtfsAllocator, NtfsHandle};
-use crate::attr::AttributeType;
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
+use crate::core::bitmap::{BitmapDriver, SimpleBitmapMeta};
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
 use crate::types::security::SECURITY_DESCRIPTOR_SYSTEM;
-use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};
-use crate::utils::{build_mft_reference, encode_runs_to_dataruns};
+use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsAttributeType, NtfsMftRecord};
+use crate::mft::build_mft_reference;
+use crate::utils::encode_runs_to_dataruns;
 
 pub struct NtfsMftFeature {
     bitmap_handle: Option<NtfsHandle>,
@@ -66,7 +66,7 @@ impl NtfsMftFeature {
         let clusters = bitmap_size.div_ceil(meta.bytes_per_cluster as u64);
 
         record.add_attribute(NtfsAttribute {
-            attr_type: AttributeType::Bitmap,
+            attr_type: NtfsAttributeType::Bitmap,
             content: NtfsAttributeContent::NonResident {
                 allocated_size: clusters * meta.bytes_per_cluster as u64,
                 data_size: bitmap_size,
@@ -171,13 +171,13 @@ impl NtfsMftFeature {
         timestamp: u64,
     ) -> NtfsMftRecord<'static> {
         let mut record = NtfsMftRecord::new(record_number, false, true);
-        record.header.link_count = 0;
+        record.header.link_count = (0).into();
         record.add_attribute(NtfsAttribute::standard_info_basic(
             NtfsFileAttributes::HIDDEN | NtfsFileAttributes::SYSTEM,
             timestamp,
         ));
         record.add_attribute(NtfsAttribute::security_descriptor(
-            SECURITY_DESCRIPTOR_SYSTEM.to_vec(),
+            SECURITY_DESCRIPTOR_SYSTEM.to_bytes(),
         ));
         record.add_attribute(NtfsAttribute::data_empty());
         record
@@ -221,14 +221,13 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
         let meta = allocator.meta;
         let mft_offset = meta.mft_record_offset(0);
         let mft_area_size = meta.reserved_mft_records * meta.mft_record_size as u64;
-        io.zero_fill(mft_offset, mft_area_size as usize)
+        io.zero_at(mft_offset, mft_area_size)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
-        // Allocate bitmap for MFT record allocation tracking
         let records_per_cluster = meta.bytes_per_cluster as u64 * 8;
         let bitmap_clusters = meta.reserved_mft_records.div_ceil(records_per_cluster);
         let handle = allocator
-            .allocate_contiguous(io, bitmap_clusters as usize)
+            .allocate_contiguous(io, bitmap_clusters)
             .map_err(crate::core::errors::FsFeatureError::Allocator)?;
         self.bitmap_handle = Some(handle);
         Ok(())
@@ -241,7 +240,6 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
             crate::core::errors::FsFeatureError::InvalidConfiguration("MFT bitmap not allocated"),
         )?;
 
-        // 1. Write Inode 0 ($MFT)
         let mft_clusters = (meta.reserved_mft_records * meta.mft_record_size as u64)
             .div_ceil(meta.bytes_per_cluster as u64);
         let mft_handle = NtfsHandle::from_range(meta.mft_lcn, mft_clusters);
@@ -249,98 +247,89 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
 
         let records_per_cluster = meta.bytes_per_cluster as u64 * 8;
         let bitmap_clusters = meta.reserved_mft_records.div_ceil(records_per_cluster);
-        let mut bitmap_data = vec![0u8; (bitmap_clusters * meta.bytes_per_cluster as u64) as usize];
+        let bitmap_offset = meta.lcn_to_offset(bitmap_handle.start_lcn);
+        let bitmap_size_bytes = bitmap_clusters * meta.bytes_per_cluster as u64;
 
-        let mut mark_in_use = |rec: u64| {
-            let i = rec as usize;
-            bitmap_data[i / 8] |= 1u8 << (i % 8);
-        };
-
-        for rec in 0u64..MFT_RECORD_FREE_START {
-            mark_in_use(rec);
-        }
-        mark_in_use(MFT_RECORD_QUOTA);
-        mark_in_use(MFT_RECORD_OBJID);
-        mark_in_use(MFT_RECORD_REPARSE);
-
-        io.write_at(meta.lcn_to_offset(bitmap_handle.start_lcn), &bitmap_data)
+        let bm_meta =
+            SimpleBitmapMeta::new(bitmap_offset, bitmap_size_bytes, meta.reserved_mft_records);
+        let mut driver = BitmapDriver::new(bm_meta);
+        driver
+            .format_with(io, 0x00)
+            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        driver
+            .set_bits_range(io, 0, MFT_RECORD_FREE_START, true)
+            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        driver
+            .set_bit(io, MFT_RECORD_QUOTA, true)
+            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        driver
+            .set_bit(io, MFT_RECORD_OBJID, true)
+            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        driver
+            .set_bit(io, MFT_RECORD_REPARSE, true)
+            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        driver
+            .flush(io)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         let bitmap_dataruns = encode_runs_to_dataruns(&bitmap_handle.runs);
         let record0 =
             Self::build_record_0_mft(meta, mft_dataruns, bitmap_dataruns, SECURITY_ID_SYSTEM);
-        let raw0 = record0
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_MFT, &raw0)
+        record0
+            .write_to_mft(io, meta, MFT_RECORD_MFT)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
-        // 2. Write Inode 1 ($MFTMirr)
         let mirr_clusters =
             (4 * meta.mft_record_size as u64).div_ceil(meta.bytes_per_cluster as u64);
         let mirr_handle = NtfsHandle::from_range(meta.mft_mirr_lcn, mirr_clusters);
         let mirr_dataruns = encode_runs_to_dataruns(&mirr_handle.runs);
         let record1 = Self::build_record_1_mftmirr(meta, mirr_dataruns, SECURITY_ID_SYSTEM);
-        let raw1 = record1
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_MFTMIRR, &raw1)
+        record1
+            .write_to_mft(io, meta, MFT_RECORD_MFTMIRR)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
-        // 3. Write Inode 6 ($Bitmap)
         let total_bitmap_size = meta.total_clusters.div_ceil(8);
         let total_bmp_clusters = total_bitmap_size.div_ceil(meta.bytes_per_cluster as u64);
         let bmp_handle = NtfsHandle::from_range(meta.bitmap_lcn, total_bmp_clusters);
         let bmp_dataruns = encode_runs_to_dataruns(&bmp_handle.runs);
         let record6 = Self::build_record_6_bitmap(meta, bmp_dataruns, SECURITY_ID_SYSTEM);
-        let raw6 = record6
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_BITMAP, &raw6)
+        record6
+            .write_to_mft(io, meta, MFT_RECORD_BITMAP)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
-        // 4. Write Inode 7 ($Boot)
         let boot_size = 16 * meta.bytes_per_sector as u64;
         let boot_clusters = boot_size.div_ceil(meta.bytes_per_cluster as u64);
         let boot_handle = NtfsHandle::from_range(0, boot_clusters);
         let boot_dataruns = encode_runs_to_dataruns(&boot_handle.runs);
         let record7 = Self::build_record_7_boot(meta, boot_dataruns, SECURITY_ID_SYSTEM);
-        let raw7 = record7
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_BOOT, &raw7)
+        record7
+            .write_to_mft(io, meta, MFT_RECORD_BOOT)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
-        // 5. Placeholders 12..15 (In-use records with 0x10, 0x50, 0x80)
+        // Placeholders 12..15 (In-use records with 0x10, 0x50, 0x80)
         for i in MFT_RECORD_RESERVED_START..MFT_RECORD_FREE_START {
             let record = Self::build_record_placeholder(meta, i as u32, self.timestamp);
-            let raw = record.to_raw_buffer(meta).map_err(|_| {
-                crate::core::errors::FsFeatureError::Other("MFT serialization failed")
-            })?;
-            mft::write_record(io, meta, i, &raw)
+            record
+                .write_to_mft(io, meta, i)
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         }
 
-        // 6. Records 16..23 are free
+        // Records 16..23 are free
         for i in MFT_RECORD_FREE_START..MFT_RECORD_USER_START {
             let record = NtfsMftRecord::new(i as u32, false, false);
-            let raw = record.to_raw_buffer(meta).map_err(|_| {
-                crate::core::errors::FsFeatureError::Other("MFT serialization failed")
-            })?;
-            mft::write_record(io, meta, i, &raw)
+            record
+                .write_to_mft(io, meta, i)
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         }
 
-        // 7. Remaining reserved: write empty records (skipping quota/objid/reparse)
+        // Remaining reserved: write empty records (skipping quota/objid/reparse)
         for i in MFT_RECORD_USER_START..NTFS_RESERVED_MFT_RECORDS {
             if i == MFT_RECORD_OBJID || i == MFT_RECORD_QUOTA || i == MFT_RECORD_REPARSE {
                 continue;
             }
             let record = NtfsMftRecord::new(i as u32, false, false);
-            let raw = record.to_raw_buffer(meta).map_err(|_| {
-                crate::core::errors::FsFeatureError::Other("MFT serialization failed")
-            })?;
-            mft::write_record(io, meta, i, &raw)
+            record
+                .write_to_mft(io, meta, i)
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
         }
 

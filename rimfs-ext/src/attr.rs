@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 file mode and permission attributes.
+
 use crate::core::traits::{FileAttributes, NodeKind};
 use crate::types::ExtFileType;
 

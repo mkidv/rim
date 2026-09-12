@@ -4,6 +4,7 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec::Vec;
 
+use zerocopy::byteorder::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
@@ -20,17 +21,31 @@ use crate::{
 /// This is the fixed-size header portion of a directory entry.
 /// The name field follows immediately after and is variable length.
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct ExtDirEntryHeader {
-    /// Inode number
-    pub inode: u32,
-    /// Record length (total size of this entry including padding)
-    pub rec_len: u16,
-    /// Name length (excluding null terminator)
+    pub inode: U32,
+    pub rec_len: U16,
     pub name_len: u8,
-    /// File type (EXT_FT_* constants)
     pub file_type: u8,
 }
+
+impl ExtDirEntryHeader {
+    /// Borrow the fixed header and name, bounded by this record's declared length.
+    pub fn from_record(bytes: &[u8]) -> Option<(&Self, &[u8])> {
+        let (header, _) = Self::ref_from_prefix(bytes).ok()?;
+        let record = bytes.get(..header.rec_len.get() as usize)?;
+        let name = record.get(8..8 + header.name_len as usize)?;
+        Some((header, name))
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<ExtDirEntryHeader>() == 8);
+    assert!(core::mem::align_of::<ExtDirEntryHeader>() == 1);
+    assert!(core::mem::offset_of!(ExtDirEntryHeader, rec_len) == 4);
+    assert!(core::mem::offset_of!(ExtDirEntryHeader, name_len) == 6);
+    assert!(core::mem::offset_of!(ExtDirEntryHeader, file_type) == 7);
+};
 
 /// EXT Directory Entry structure
 ///
@@ -38,15 +53,10 @@ pub struct ExtDirEntryHeader {
 /// The structure is variable-length with a minimum of 8 bytes header.
 #[derive(Debug, Clone)]
 pub struct ExtDirEntry {
-    /// Inode number
     pub inode: u32,
-    /// Record length (total size of this entry including padding)
     pub rec_len: u16,
-    /// Name length (excluding null terminator)
     pub name_len: u8,
-    /// File type (EXT_FT_* constants)
     pub file_type: u8,
-    /// Entry name (variable length)
     pub name: Vec<u8>,
 }
 
@@ -101,8 +111,8 @@ impl ExtDirEntry {
     /// Uses ExtDirEntryHeader for the fixed header, then appends name
     pub fn to_raw_buffer(&self, buf: &mut Vec<u8>) {
         let header = ExtDirEntryHeader {
-            inode: self.inode,
-            rec_len: self.rec_len,
+            inode: self.inode.into(),
+            rec_len: self.rec_len.into(),
             name_len: self.name_len,
             file_type: self.file_type,
         };
@@ -121,20 +131,12 @@ impl ExtDirEntry {
 
     /// Parse from raw bytes
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 8 {
-            return None;
-        }
-
-        let inode = u32::from_le_bytes(data[0..4].try_into().ok()?);
-        let rec_len = u16::from_le_bytes(data[4..6].try_into().ok()?);
-        let name_len = data[6];
-        let file_type = data[7];
-
-        if data.len() < 8 + name_len as usize {
-            return None;
-        }
-
-        let name = data[8..8 + name_len as usize].to_vec();
+        let (header, name) = ExtDirEntryHeader::from_record(data)?;
+        let inode = header.inode.get();
+        let rec_len = header.rec_len.get();
+        let name_len = header.name_len;
+        let file_type = header.file_type;
+        let name = name.to_vec();
 
         Some(Self {
             inode,
@@ -194,54 +196,10 @@ impl ExtLostFound {
         // ".." entry pointing to root (inode 2)
         ExtDirEntry::dotdot(EXT_ROOT_INODE).to_raw_buffer(&mut buf);
 
-        // Pad the rest of the block
-        // Ext requires the last entry to span the rest of the block,
-        // so we adjust the last entry's rec_len implicitly or explicitly.
-        // `ExtDirEntry::to_raw_buffer` handles partial padding, but we need
-        // to make sure we fill the block.
-
-        if buf.len() < block_size {
-            let padding = block_size - buf.len();
-            buf.extend(core::iter::repeat_n(0, padding));
-        }
-
-        // Fix up the last entry's rec_len to cover the whole block
-        // e2fsck requirement: The directory block must be fully covered by entries.
-        // The last entry (typically "..") is extended.
-        Self::pad_last_entry(&mut buf, block_size);
+        // Pad to block_size and adjust last entry's rec_len
+        crate::utils::pad_directory_block(&mut buf, block_size);
 
         buf
-    }
-
-    /// Helper to adjust the last entry's rec_len to cover the rest of the block.
-    fn pad_last_entry(buf: &mut [u8], block_size: usize) {
-        if buf.is_empty() {
-            return;
-        }
-
-        let mut pos = 0;
-        let mut last_entry_pos = 0;
-
-        // Walk entries to find the last one
-        while pos + 8 <= buf.len() {
-            let rec_len = u16::from_le_bytes([buf[pos + 4], buf[pos + 5]]) as usize;
-            if rec_len == 0 {
-                break;
-            }
-            // Sanity check preventing infinite loop if corrupt
-            if pos + rec_len > buf.len() {
-                break;
-            }
-            last_entry_pos = pos;
-            pos += rec_len;
-        }
-
-        let remaining = block_size - last_entry_pos;
-        if remaining > 0 && remaining <= 65535 {
-            let new_len = remaining as u16;
-            buf[last_entry_pos + 4] = (new_len & 0xFF) as u8;
-            buf[last_entry_pos + 5] = ((new_len >> 8) & 0xFF) as u8;
-        }
     }
 
     /// Generate the Inode for `lost+found`
@@ -262,5 +220,30 @@ impl ExtLostFound {
     /// Create the directory entry for `lost+found` to be placed in the parent (Root)
     pub fn entry() -> ExtDirEntry {
         ExtDirEntry::dir(Self::INODE, Self::NAME)
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn directory_header_is_little_endian_and_name_stays_in_record() {
+        let bytes = [0x78, 0x56, 0x34, 0x12, 12, 0, 3, 1, b'a', b'b', b'c', 0];
+        let (header, name) = ExtDirEntryHeader::from_record(&bytes).unwrap();
+        assert_eq!(header.inode.get(), 0x12345678);
+        assert_eq!(name, b"abc");
+        assert_eq!(header.as_bytes(), &bytes[..8]);
+        let mut encoded = Vec::new();
+        ExtDirEntry::from_bytes(&bytes)
+            .unwrap()
+            .to_raw_buffer(&mut encoded);
+        assert_eq!(encoded, bytes);
+        for len in 0..bytes.len() {
+            assert!(ExtDirEntryHeader::from_record(&bytes[..len]).is_none());
+        }
+        let mut crosses_record = bytes;
+        crosses_record[4] = 8;
+        assert!(ExtDirEntryHeader::from_record(&crosses_record).is_none());
     }
 }

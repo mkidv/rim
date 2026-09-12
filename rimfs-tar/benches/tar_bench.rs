@@ -36,7 +36,7 @@ fn bench_tar_format(c: &mut Criterion) {
         b.iter(|| {
             let file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
-            let mut io = MmapRimIO::new(file).unwrap();
+            let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
             let meta = TarMeta::new(SIZE_BYTES, Some("BENCH_TAR")).unwrap();
             TarFormatter::new(&mut io, &meta).format(false).unwrap();
         });

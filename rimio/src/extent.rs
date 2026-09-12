@@ -46,7 +46,6 @@ impl IoExtent {
         }
     }
 
-    /// Returns the logical end offset (exclusive).
     #[inline]
     pub fn logical_end(&self) -> u64 {
         self.logical_offset.saturating_add(self.len)
@@ -115,13 +114,11 @@ impl<S> ExtentRimRead<S> {
         }
     }
 
-    /// Returns the total logical size in bytes.
     #[inline]
     pub fn total_size(&self) -> u64 {
         self.total_size
     }
 
-    /// Returns a reference to the backing source.
     #[inline]
     pub fn source(&self) -> &S {
         &self.source
@@ -139,7 +136,6 @@ impl<S> ExtentRimRead<S> {
         self.source
     }
 
-    /// Returns the extent slice.
     #[inline]
     pub fn extents(&self) -> &[IoExtent] {
         &self.extents
@@ -158,7 +154,6 @@ impl<S> ExtentRimRead<S> {
             if logical_offset >= ext.logical_offset && logical_offset < ext.logical_end() {
                 return Some(self.last_extent_idx);
             }
-            // Check next sequential extent
             if self.last_extent_idx + 1 < self.extents.len() {
                 let next = &self.extents[self.last_extent_idx + 1];
                 if logical_offset >= next.logical_offset && logical_offset < next.logical_end() {
@@ -264,7 +259,7 @@ impl<S: RimRead> RimRead for ExtentRimRead<S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::SliceRimIO;
@@ -314,7 +309,6 @@ mod tests {
         reader.read_at(0, &mut full_buf).unwrap();
         assert_eq!(&full_buf, b"CCCC\0\0\0\0AAAAEEEE");
 
-        // Read crossing extent boundaries (spanning hole)
         let mut cross_buf = [0u8; 8];
         reader.read_at(2, &mut cross_buf).unwrap();
         assert_eq!(&cross_buf, b"CC\0\0\0\0AA");

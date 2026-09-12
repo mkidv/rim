@@ -11,11 +11,11 @@ use std::collections::BTreeMap;
 use rimio::prelude::*;
 use zerocopy::FromBytes;
 
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::{FsResolverError, FsResolverResult};
 use crate::core::resolver::FsTreeResolver;
 use crate::core::resolver::attr::FileAttributes;
-use crate::flags::*;
 use crate::meta::NtfsMeta;
 use crate::mft;
 use crate::types::*;
@@ -51,25 +51,22 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             return Ok(cached.clone());
         }
 
-        // Bootstrap MFT runs from record 0 if not yet loaded
-        if self.mft_runs.is_empty()
-            && let Ok(rec0) = mft::read_record_direct(self.io, self.meta, 0)
-        {
-            if let Ok(runs) = mft::extract_mft_runs(&rec0) {
-                self.mft_runs = runs;
+        if self.mft_runs.is_empty() {
+            let rec0 = mft::read_record_direct(self.io, self.meta, 0)?;
+            self.mft_runs = mft::extract_mft_runs(&rec0)?;
+            if self.mft_runs.is_empty() {
+                return Err(FsResolverError::Invalid("Missing MFT runs"));
             }
             self.mft_cache.insert(0, rec0.clone());
             if record_number == 0 {
                 return Ok(rec0);
             }
         }
+        let record = mft::read_record_from_runs(self.io, self.meta, record_number, &self.mft_runs)?;
 
-        let record = if !self.mft_runs.is_empty() {
-            mft::read_record_from_runs(self.io, self.meta, record_number, &self.mft_runs)?
-        } else {
-            mft::read_record_direct(self.io, self.meta, record_number)?
-        };
-
+        if self.mft_cache.len() >= 128 {
+            self.mft_cache.retain(|&k, _| k == 0);
+        }
         self.mft_cache.insert(record_number, record.clone());
         Ok(record)
     }
@@ -78,7 +75,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     pub fn find_attribute<'b>(
         &self,
         record: &'b [u8],
-        attr_type: u32,
+        attr_type: NtfsAttributeType,
     ) -> FsResolverResult<Option<AttrRef<'b>>> {
         self.find_attribute_named(record, attr_type, None)
     }
@@ -87,7 +84,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     pub fn find_attribute_named<'b>(
         &self,
         record: &'b [u8],
-        attr_type: u32,
+        attr_type: NtfsAttributeType,
         stream_name: Option<&str>,
     ) -> FsResolverResult<Option<AttrRef<'b>>> {
         let view = MftRecordView::new(record)
@@ -105,7 +102,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
     ) -> FsResolverResult<Vec<u8>> {
         let record = self.read_mft_record(record_number)?;
         let attr = self
-            .find_attribute_named(&record, ATTR_DATA, stream_name)?
+            .find_attribute_named(&record, NtfsAttributeType::Data, stream_name)?
             .ok_or(FsResolverError::NotFound)?;
 
         if attr.is_resident() {
@@ -229,14 +226,18 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             }
         }
 
-        content.resize(data_len, 0);
+        if content.len() != data_len {
+            return Err(FsResolverError::Invalid(
+                "Incomplete non-resident allocation",
+            ));
+        }
         Ok(content)
     }
 
     /// Read the index root of a directory
     pub(crate) fn _read_index_root(&self, record: &[u8]) -> FsResolverResult<Vec<u8>> {
         let attr = self
-            .find_attribute(record, ATTR_INDEX_ROOT)?
+            .find_attribute(record, NtfsAttributeType::IndexRoot)?
             .ok_or(FsResolverError::Invalid("Directory has no $INDEX_ROOT"))?;
 
         let content = self.get_resident_attribute_content(attr)?;
@@ -254,7 +255,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
 
         let record = self.read_mft_record(record_number)?;
 
-        let header = MftRecordHeader::read_from_prefix(&record)
+        let header = MftRecordHeader::ref_from_prefix(&record)
             .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
             .0;
 
@@ -266,16 +267,15 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
 
         // 1. Read Resident $INDEX_ROOT ($I30 or unnamed)
         let index_root_attr =
-            match self.find_attribute_named(&record, ATTR_INDEX_ROOT, Some("$I30"))? {
+            match self.find_attribute_named(&record, NtfsAttributeType::IndexRoot, Some("$I30"))? {
                 Some(a) => Some(a),
-                None => self.find_attribute(&record, ATTR_INDEX_ROOT)?,
+                None => self.find_attribute(&record, NtfsAttributeType::IndexRoot)?,
             };
 
         if let Some(attr) = index_root_attr {
             let content = self.get_resident_attribute_content(attr)?;
 
-            // Parse Index Root Header (16 bytes)
-            let _root_header = IndexRootHeader::read_from_prefix(content)
+            let _root_header = IndexRootHeader::ref_from_prefix(content)
                 .map_err(|_| FsResolverError::Invalid("Failed to read Index Root Header"))?
                 .0;
 
@@ -286,14 +286,16 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
         }
 
         // 2. Read Non-Resident $INDEX_ALLOCATION ($I30 or unnamed)
-        let index_alloc_attr =
-            match self.find_attribute_named(&record, ATTR_INDEX_ALLOCATION, Some("$I30"))? {
-                Some(a) => Some(a),
-                None => self.find_attribute(&record, ATTR_INDEX_ALLOCATION)?,
-            };
+        let index_alloc_attr = match self.find_attribute_named(
+            &record,
+            NtfsAttributeType::IndexAllocation,
+            Some("$I30"),
+        )? {
+            Some(a) => Some(a),
+            None => self.find_attribute(&record, NtfsAttributeType::IndexAllocation)?,
+        };
 
         if let Some(attr) = index_alloc_attr {
-            // Check if resident or non-resident (Index Allocation is typically non-resident)
             let content = if let Ok(res) = self.get_resident_attribute_content(attr) {
                 res.to_vec()
             } else {
@@ -301,53 +303,60 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             };
 
             // Look for $BITMAP for $I30 to filter active index blocks
-            let bitmap_bytes =
-                match self.find_attribute_named(&record, ATTR_BITMAP, Some("$I30"))? {
+            let bitmap_bytes = match self.find_attribute_named(
+                &record,
+                NtfsAttributeType::Bitmap,
+                Some("$I30"),
+            )? {
+                Some(b_attr) => {
+                    if let Ok(res) = self.get_resident_attribute_content(b_attr) {
+                        Some(res.to_vec())
+                    } else {
+                        Some(self.get_non_resident_attribute_content(b_attr)?)
+                    }
+                }
+                None => match self.find_attribute(&record, NtfsAttributeType::Bitmap)? {
                     Some(b_attr) => {
                         if let Ok(res) = self.get_resident_attribute_content(b_attr) {
                             Some(res.to_vec())
                         } else {
-                            self.get_non_resident_attribute_content(b_attr).ok()
+                            Some(self.get_non_resident_attribute_content(b_attr)?)
                         }
                     }
-                    None => match self.find_attribute(&record, ATTR_BITMAP)? {
-                        Some(b_attr) => {
-                            if let Ok(res) = self.get_resident_attribute_content(b_attr) {
-                                Some(res.to_vec())
-                            } else {
-                                self.get_non_resident_attribute_content(b_attr).ok()
-                            }
-                        }
-                        None => None,
-                    },
-                };
+                    None => {
+                        return Err(FsResolverError::Invalid("Missing index allocation bitmap"));
+                    }
+                },
+            };
 
             // Iterate over blocks (Index Records)
             let block_size = self.meta.index_record_size as usize;
             for (block_idx, chunk) in content.chunks(block_size).enumerate() {
                 if chunk.len() < block_size {
-                    continue;
+                    return Err(FsResolverError::Invalid("Truncated index block"));
                 }
 
                 // If bitmap is present, skip blocks whose bit is 0
                 if let Some(ref bm) = bitmap_bytes {
                     let byte_idx = block_idx / 8;
                     let bit_idx = block_idx % 8;
-                    if byte_idx >= bm.len() || (bm[byte_idx] & (1 << bit_idx)) == 0 {
+                    if byte_idx >= bm.len() {
+                        return Err(FsResolverError::Invalid("Truncated index bitmap"));
+                    }
+                    if (bm[byte_idx] & (1 << bit_idx)) == 0 {
                         continue;
                     }
                 }
 
-                // Verify "INDX" signature
-                if &chunk[0..4] != b"INDX" {
-                    continue; // Unallocated or invalid block
+                if chunk[0..4] != NTFS_INDX_SIGNATURE {
+                    return Err(FsResolverError::Invalid("Invalid active index block"));
                 }
 
                 // Decode USA fixup
                 let mut block = chunk.to_vec();
                 if !crate::utils::decode_usa_fixup(&mut block, self.meta.bytes_per_sector as usize)
                 {
-                    continue; // Invalid USA fixup
+                    return Err(FsResolverError::Invalid("Invalid index USA fixup"));
                 }
 
                 // In standard NTFS INDX records, IndexNodeHeader is at offset 24 (immediately after IndexRecordHeader)
@@ -361,6 +370,9 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
             }
         }
 
+        if self.dir_cache.len() >= 128 {
+            self.dir_cache.clear();
+        }
         self.dir_cache.insert(record_number, entries);
         Ok(())
     }
@@ -385,12 +397,12 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
         buf: &[u8],
         entries: &mut Vec<(String, u64, FileAttributes)>,
     ) -> FsResolverResult<()> {
-        let node_header = IndexNodeHeader::read_from_prefix(buf)
+        let node_header = IndexNodeHeader::ref_from_prefix(buf)
             .map_err(|_| FsResolverError::Invalid("Failed to read Index Node Header"))?
             .0;
 
-        let start_offset = node_header.entries_offset as usize;
-        let end_offset = node_header.index_length as usize; // Total used size
+        let start_offset = node_header.entries_offset.get() as usize;
+        let end_offset = node_header.index_length.get() as usize; // Total used size
 
         // Bounds check
         if start_offset >= buf.len() || end_offset > buf.len() {
@@ -404,11 +416,11 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                 break;
             }
 
-            let entry_header = IndexEntryHeader::read_from_prefix(&buf[offset..])
+            let entry_header = IndexEntryHeader::ref_from_prefix(&buf[offset..])
                 .map_err(|_| FsResolverError::Invalid("Failed to read Index Entry Header"))?
                 .0;
 
-            if entry_header.entry_length < 16 {
+            if entry_header.entry_length.get() < 16 {
                 break;
             }
 
@@ -419,11 +431,11 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
 
             // Extract filename attribute body
             let content_offset = offset + 16;
-            if content_offset + entry_header.content_length as usize > buf.len() {
+            if content_offset + entry_header.content_length.get() as usize > buf.len() {
                 break;
             }
 
-            let fn_attr = FileNameAttribute::read_from_prefix(&buf[content_offset..])
+            let fn_attr = FileNameAttribute::ref_from_prefix(&buf[content_offset..])
                 .map_err(|_| {
                     FsResolverError::Invalid("Failed to read FileName attribute in index")
                 })?
@@ -443,7 +455,7 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                 if let Ok(name) = String::from_utf16(&name_u16)
                     && name != "."
                 {
-                    let is_dir = (fn_attr.file_attributes
+                    let is_dir = (fn_attr.file_attributes.get()
                         & (NtfsFileAttributes::DIRECTORY.bits()
                             | NtfsFileAttributes::I30_INDEX.bits()))
                         != 0;
@@ -454,20 +466,20 @@ impl<'a, IO: RimRead + ?Sized> NtfsResolver<'a, IO> {
                     };
 
                     let (mft_num, _) =
-                        crate::utils::parse_mft_reference(entry_header.mft_reference);
+                        crate::mft::parse_mft_reference(entry_header.mft_reference.get());
                     entries.push((name, mft_num, attr));
                 }
             }
 
-            offset += entry_header.entry_length as usize;
+            offset += entry_header.entry_length.get() as usize;
         }
         Ok(())
     }
 
-    pub fn resolve_path_internal(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
+    pub fn resolve_path_internal(&mut self, path: &str) -> FsResolverResult<(bool, u64, usize)> {
         match crate::core::resolver::walker::walk_path(self, path) {
-            Ok(Some(entry)) => Ok((true, entry.mft_num as u32, 0)),
-            Ok(None) => Ok((true, MFT_RECORD_ROOT as u32, 0)),
+            Ok(Some(entry)) => Ok((true, entry.mft_num, 0)),
+            Ok(None) => Ok((true, MFT_RECORD_ROOT, 0)),
             Err(FsResolverError::NotFound) => Ok((false, 0, 0)),
             Err(e) => Err(e),
         }
@@ -503,13 +515,17 @@ pub struct NtfsDirEntry {
 
 impl<'a, IO: RimRead + ?Sized> WalkerDataSource for NtfsResolver<'a, IO> {
     type Entry = NtfsDirEntry;
+    type NodeId = u64;
 
-    fn root_cluster(&self) -> u32 {
-        MFT_RECORD_ROOT as u32
+    fn root_node(&self) -> Self::NodeId {
+        MFT_RECORD_ROOT
     }
 
-    fn find_entry(&mut self, dir_mft: u32, name: &str) -> FsResolverResult<Option<Self::Entry>> {
-        let dir_mft = dir_mft as u64;
+    fn find_entry(
+        &mut self,
+        dir_mft: Self::NodeId,
+        name: &str,
+    ) -> FsResolverResult<Option<Self::Entry>> {
         self.load_directory_entries(dir_mft)?;
 
         let target_u16: Vec<u16> = name.encode_utf16().collect();
@@ -532,8 +548,8 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for NtfsResolver<'a, IO> {
         entry.is_dir
     }
 
-    fn entry_cluster(&self, entry: &Self::Entry) -> u32 {
-        entry.mft_num as u32
+    fn entry_node(&self, entry: &Self::Entry) -> Self::NodeId {
+        entry.mft_num
     }
 }
 
@@ -542,8 +558,8 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
         let (found, mft_num, _) = self.resolve_path_internal(path)?;
         crate::ensure!(found, FsResolverError::NotFound);
 
-        self.load_directory_entries(mft_num as u64)?;
-        let entries = self.dir_cache.get(&(mft_num as u64)).unwrap();
+        self.load_directory_entries(mft_num)?;
+        let entries = self.dir_cache.get(&mft_num).unwrap();
         Ok(entries.iter().map(|(name, _, _)| name.clone()).collect())
     }
 
@@ -554,16 +570,22 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
         let (found, mft_num, _) = self.resolve_path_internal(path)?;
         crate::ensure!(found, FsResolverError::NotFound);
 
-        let record = self.read_mft_record(mft_num as u64)?;
-        let header = MftRecordHeader::read_from_prefix(&record)
+        let record = self.read_mft_record(mft_num)?;
+        let header = MftRecordHeader::ref_from_prefix(&record)
             .map_err(|_| FsResolverError::Invalid("Failed to read MFT header"))?
             .0;
         crate::ensure!(!header.is_dir(), FsResolverError::Invalid("Not a file"));
 
-        let Some(attr) = self.find_attribute(&record, ATTR_DATA)? else {
+        let Some(attr) = self.find_attribute(&record, NtfsAttributeType::Data)? else {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         };
 
+        if attr.header.flags
+            & (AttributeFlags::COMPRESSED.bits() | AttributeFlags::ENCRYPTED.bits())
+            != 0
+        {
+            return Err(FsResolverError::Unsupported);
+        }
         let view = attr
             .as_view()
             .map_err(|_| FsResolverError::Invalid("Malformed attribute"))?;
@@ -573,8 +595,14 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
                 Ok(alloc::boxed::Box::new(rimio::VecRimIO::new(value.to_vec())))
             }
             AttrView::NonResident {
-                runlist, data_size, ..
+                runlist,
+                data_size,
+                initialized_size,
+                ..
             } => {
+                if initialized_size > data_size {
+                    return Err(FsResolverError::Invalid("Invalid initialized size"));
+                }
                 let cluster_size = self.meta.bytes_per_cluster as u64;
                 let mut extents = Vec::new();
                 let mut logical_offset = 0u64;
@@ -589,16 +617,38 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
                         .ok_or(FsResolverError::Invalid("Run length overflow"))?;
                     let extent_len = core::cmp::min(run_bytes, data_size - logical_offset);
                     let source_offset = run.lcn.map(|lcn| self.meta.lcn_to_offset(lcn));
-                    extents.push(rimio::extent::IoExtent {
-                        logical_offset,
-                        source_offset,
-                        len: extent_len,
-                    });
+                    let valid = initialized_size
+                        .saturating_sub(logical_offset)
+                        .min(extent_len);
+                    if valid > 0 {
+                        if let Some(physical) = source_offset {
+                            let end = physical
+                                .checked_add(valid)
+                                .ok_or(FsResolverError::Invalid("Run overflow"))?;
+                            if end > self.io.total_size()? {
+                                return Err(FsResolverError::Invalid("Run exceeds volume"));
+                            }
+                        }
+                        extents.push(rimio::extent::IoExtent {
+                            logical_offset,
+                            source_offset,
+                            len: valid,
+                        });
+                    }
+                    if valid < extent_len {
+                        extents.push(rimio::extent::IoExtent::hole(
+                            logical_offset + valid,
+                            extent_len - valid,
+                        ));
+                    }
                     logical_offset = logical_offset
                         .checked_add(extent_len)
                         .ok_or(FsResolverError::Invalid("Extent offset overflow"))?;
                 }
 
+                if logical_offset != data_size {
+                    return Err(FsResolverError::Invalid("Incomplete file allocation"));
+                }
                 Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
                     &mut *self.io,
                     extents,
@@ -614,7 +664,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
             return Err(FsResolverError::NotFound);
         }
 
-        let record = self.read_mft_record(mft_num as u64)?;
+        let record = self.read_mft_record(mft_num)?;
         let view = MftRecordView::new(&record)
             .map_err(|_| FsResolverError::Invalid("Failed to parse MFT record"))?;
 
@@ -625,19 +675,21 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
             FileAttributes::new_file()
         };
 
-        if let Ok(Some(std_info_attr)) = view.find(AttributeType::StandardInformation.code())
+        if let Ok(Some(std_info_attr)) = view.find(NtfsAttributeType::StandardInformation)
             && let Ok(AttrView::Resident { value, .. }) = std_info_attr.as_view()
-            && let Ok((std_info, _)) = StandardInformation::read_from_prefix(value)
+            && let Ok((std_info, _)) = StandardInformationHeader::ref_from_prefix(value)
         {
-            let ntfs_attr = NtfsFileAttributes::from_bits_truncate(std_info.file_attributes);
+            let ntfs_attr = NtfsFileAttributes::from_bits_truncate(std_info.file_attributes.get());
             attr.read_only = ntfs_attr.contains(NtfsFileAttributes::READ_ONLY);
             attr.hidden = ntfs_attr.contains(NtfsFileAttributes::HIDDEN);
             attr.system = ntfs_attr.contains(NtfsFileAttributes::SYSTEM);
             attr.archive = ntfs_attr.contains(NtfsFileAttributes::ARCHIVE);
 
-            attr.created = crate::utils::ntfs_time_to_offset_date_time(std_info.creation_time);
-            attr.modified = crate::utils::ntfs_time_to_offset_date_time(std_info.modification_time);
-            attr.accessed = crate::utils::ntfs_time_to_offset_date_time(std_info.access_time);
+            attr.created =
+                crate::utils::ntfs_time_to_offset_date_time(std_info.creation_time.get());
+            attr.modified =
+                crate::utils::ntfs_time_to_offset_date_time(std_info.modification_time.get());
+            attr.accessed = crate::utils::ntfs_time_to_offset_date_time(std_info.access_time.get());
         }
 
         Ok(attr)
@@ -647,17 +699,24 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for NtfsResolver<'a, IO> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AttributeFlags;
+    use crate::types::AttributeHeader;
     use crate::types::MftRecordHeader;
     use crate::types::{MftRecordBuilder, NtfsAttribute};
     use rimfs_core::injector::FsTreeInjector;
     use rimfs_core::testing::file_with_attr;
     use rimio::prelude::MemRimIO;
+    use zerocopy::IntoBytes;
 
     #[test]
     fn test_ntfs_named_data_stream_resolution() {
         let meta = NtfsMeta::new(5 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0u8; 5 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut disk);
+
+        crate::formatter::NtfsFormatter::new(&mut io, &meta)
+            .format(true)
+            .unwrap();
 
         let offset = meta.lcn_to_offset(meta.mft_lcn) + (16 * meta.mft_record_size as u64);
         {
@@ -729,10 +788,6 @@ mod tests {
 
     #[test]
     fn test_ntfs_compressed_attribute_rejection() {
-        use crate::flags::AttributeFlags;
-        use crate::types::AttributeHeader;
-        use zerocopy::IntoBytes;
-
         let meta = NtfsMeta::new(10 * 1024 * 1024, None).unwrap();
         let mut disk = vec![0u8; 10 * 1024 * 1024];
         let mut io = MemRimIO::new(&mut disk);
@@ -743,24 +798,81 @@ mod tests {
 
         let resolver = NtfsResolver::new(&mut io, &meta);
         let fake_header = AttributeHeader {
-            attr_type: crate::constant::ATTR_DATA,
-            length: 24,
+            attr_type: (NtfsAttributeType::Data.code()).into(),
+            length: (24).into(),
             non_resident: 0,
             name_length: 0,
-            name_offset: 0,
-            flags: AttributeFlags::COMPRESSED.bits(),
-            attr_id: 1,
+            name_offset: (0).into(),
+            flags: (AttributeFlags::COMPRESSED.bits()).into(),
+            attr_id: (1).into(),
         };
         let mut raw = vec![0u8; 64];
         raw[..core::mem::size_of::<AttributeHeader>()].copy_from_slice(fake_header.as_bytes());
 
         let attr_ref = crate::view::attr_view::AttrRef {
             raw: &raw,
-            header: fake_header,
+            header: &fake_header,
         };
         assert!(matches!(
             resolver.get_resident_attribute_content(attr_ref),
             Err(FsResolverError::Unsupported)
         ));
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::core::traits::FsTreeInjector;
+    #[test]
+    fn public_open_honors_flags_and_initialized_length() {
+        let meta = NtfsMeta::new(32 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0; 32 * 1024 * 1024];
+        let mut io = rimio::MemRimIO::new(&mut disk);
+        crate::NtfsFormatter::new(&mut io, &meta)
+            .format(false)
+            .unwrap();
+        {
+            let mut injector = crate::NtfsInjector::new(&mut io, &meta).unwrap();
+            injector
+                .set_root_context(&FileAttributes::new_dir())
+                .unwrap();
+            let payload = vec![0x5a; 8192];
+            let mut source = rimio::SliceRimIO::new(&payload);
+            injector
+                .write_file("probe", &mut source, 8192, &FileAttributes::new_file())
+                .unwrap();
+            injector.flush().unwrap();
+        }
+        let (_, id, _) = NtfsResolver::new(&mut io, &meta)
+            .resolve_path_internal("probe")
+            .unwrap();
+        let record = crate::mft::read_record(&mut io, &meta, id).unwrap();
+        let mut offset = u16::from_le_bytes(record[20..22].try_into().unwrap()) as usize;
+        while u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap())
+            != NtfsAttributeType::Data.code()
+        {
+            offset +=
+                u32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        }
+        assert_eq!(record[offset + 8], 1);
+        for flags in [0u16, 1, 0x4000] {
+            let mut changed = record.clone();
+            changed[offset + 12..offset + 14].copy_from_slice(&flags.to_le_bytes());
+            changed[offset + 56..offset + 64].copy_from_slice(&4u64.to_le_bytes());
+            crate::utils::apply_usa_fixup(&mut changed, meta.bytes_per_sector as usize);
+            crate::mft::write_record(&mut io, &meta, id, &changed).unwrap();
+            let mut resolver = NtfsResolver::new(&mut io, &meta);
+            if flags != 0 {
+                assert!(matches!(
+                    resolver.open_file("probe"),
+                    Err(FsResolverError::Unsupported)
+                ));
+            } else {
+                let content = resolver.read_file("probe").unwrap();
+                assert_eq!(&content[..4], &[0x5a; 4]);
+                assert!(content[4..].iter().all(|b| *b == 0));
+            }
+        }
     }
 }

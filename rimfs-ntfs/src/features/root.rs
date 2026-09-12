@@ -12,17 +12,17 @@ use alloc::vec::Vec;
 use rimio::prelude::*;
 
 use crate::allocator::{FsAllocator, NtfsAllocator, NtfsHandle};
-use crate::attr::{AttributeType, NtfsFileNameNamespace};
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
-use crate::system::upcase::UpcaseHandle;
+use crate::upcase::UpcaseHandle;
 use crate::types::index::NtfsIndexEntry;
 use crate::types::security::SECURITY_DESCRIPTOR_ROOT;
-use crate::types::{IndexTreeBuilder, NtfsAttribute, NtfsMftRecord};
+use crate::types::{
+    IndexTreeBuilder, NtfsAttribute, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord,
+};
 
 pub struct NtfsRootDirFeature {
     timestamp: u64,
@@ -38,7 +38,7 @@ impl NtfsRootDirFeature {
     }
 
     pub fn root_ref() -> u64 {
-        crate::utils::build_mft_reference(MFT_RECORD_ROOT, 5)
+        crate::mft::build_mft_reference(MFT_RECORD_ROOT, 5)
     }
 
     pub fn build_root_entries(meta: &NtfsMeta, timestamp: u64) -> Vec<NtfsIndexEntry> {
@@ -165,7 +165,7 @@ impl NtfsRootDirFeature {
             .into_iter()
             .map(|item| {
                 NtfsIndexEntry::new(
-                    crate::utils::system_file_mft_reference(item.rec),
+                    crate::mft::system_file_mft_reference(item.rec),
                     root_ref,
                     item.name.encode_utf16().collect(),
                     item.attrs,
@@ -201,7 +201,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
             })?
         {
             let handle = allocator
-                .allocate_contiguous(io, layout.total_clusters as usize)
+                .allocate_contiguous(io, layout.total_clusters)
                 .map_err(crate::core::errors::FsFeatureError::Allocator)?;
             self.non_resident_handle = Some(handle);
         }
@@ -233,10 +233,9 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
             ".",
             0,
             (attrs - NtfsFileAttributes::DIRECTORY) | NtfsFileAttributes::I30_INDEX,
-            NtfsFileNameNamespace::Win32AndDos,
         ));
         record.add_attribute(NtfsAttribute::security_descriptor(
-            SECURITY_DESCRIPTOR_ROOT.to_vec(),
+            SECURITY_DESCRIPTOR_ROOT.to_bytes(),
         ));
         let clusters_per_index = meta.clusters_per_index_record_raw();
         record.add_attribute(NtfsAttribute::index_root_i30(
@@ -258,7 +257,7 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
 
             record.add_attribute(NtfsAttribute::non_resident(
-                AttributeType::IndexAllocation,
+                NtfsAttributeType::IndexAllocation,
                 "$I30",
                 meta,
                 &handle.runs,
@@ -267,10 +266,8 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
             record.add_attribute(NtfsAttribute::bitmap_named("$I30", layout.bitmap));
         }
 
-        let raw = record
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_ROOT, &raw)
+        record
+            .write_to_mft(io, meta, MFT_RECORD_ROOT)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         Ok(())

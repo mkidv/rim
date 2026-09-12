@@ -169,3 +169,19 @@ pub fn unwrap_vhd_io_with_progress<F: FnMut(u64, u64)>(
 pub fn unwrap_vhd_io(src: &mut dyn RimIO, dst: &mut dyn RimWrite) -> RimImgResult {
     unwrap_vhd_io_with_progress(src, dst, |_, _| {})
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<VhdFooter>() == 512);
+    assert!(core::mem::align_of::<VhdFooter>() == 1);
+    assert!(core::mem::offset_of!(VhdFooter, features) == 8);
+    assert!(core::mem::offset_of!(VhdFooter, data_offset) == 16);
+    assert!(core::mem::offset_of!(VhdFooter, timestamp) == 24);
+    assert!(core::mem::offset_of!(VhdFooter, orig_size) == 40);
+    assert!(core::mem::offset_of!(VhdFooter, curr_size) == 48);
+    assert!(core::mem::offset_of!(VhdFooter, geometry_cyls) == 56);
+    assert!(core::mem::offset_of!(VhdFooter, disk_type) == 60);
+    assert!(core::mem::offset_of!(VhdFooter, checksum) == 64);
+    assert!(core::mem::offset_of!(VhdFooter, unique_id) == 68);
+    assert!(core::mem::offset_of!(VhdFooter, saved_state) == 84);
+    assert!(core::mem::offset_of!(VhdFooter, reserved) == 85);
+};

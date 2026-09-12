@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 block and inode allocator.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec::Vec;
 
@@ -8,7 +10,7 @@ use rimio::prelude::*;
 use crate::constant::*;
 use crate::core::FsInjectorResult;
 use crate::core::allocator::{FsAllocator, FsAllocatorResult, FsHandle};
-use crate::core::bitmap::{BitmapDriver, BitmapFsMeta};
+use crate::core::bitmap::{BitmapDriver, BitmapFsMeta, SimpleBitmapMeta};
 use crate::core::errors::FsAllocatorError;
 use crate::meta::ExtMeta;
 use crate::types::GroupLayout;
@@ -48,7 +50,7 @@ pub struct Ext4BlockAllocator<'p> {
     pub params: &'p ExtMeta,
     last_group: usize,
     last_bit_hint: u64,
-    allocated_blocks: usize,
+    allocated_blocks: u64,
     allocated_per_group: Vec<u32>,
 }
 
@@ -74,7 +76,7 @@ impl<'p> Ext4BlockAllocator<'p> {
     pub fn allocate_blocks_list<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        mut count: usize,
+        mut count: u64,
     ) -> FsAllocatorResult<RunList> {
         if count == 0 {
             return Ok(RunList::new());
@@ -84,13 +86,11 @@ impl<'p> Ext4BlockAllocator<'p> {
         let group_count = self.params.group_count as usize;
 
         // Simple loop to satisfy allocation across groups
-        // We start from last_group to continue where we left off (optimization)
         let start_group = self.last_group;
 
         for i in 0..group_count {
             let group_idx = (start_group + i) % group_count;
 
-            // Compute layout to find bitmap block
             let layout = GroupLayout::compute(self.params, group_idx as u32);
             let bm_meta = ExtBlockBitmap {
                 meta: self.params,
@@ -99,7 +99,6 @@ impl<'p> Ext4BlockAllocator<'p> {
 
             let mut view = BitmapDriver::new(&bm_meta);
 
-            // Determine hint
             let mut hint = if group_idx == self.last_group {
                 self.last_bit_hint
             } else {
@@ -110,18 +109,17 @@ impl<'p> Ext4BlockAllocator<'p> {
 
             // Try to allocate blocks in coalesced runs
             while count > 0 && hint < max_group_blocks {
-                let max_in_group = ((max_group_blocks - hint) as usize).min(count);
+                let max_in_group = (max_group_blocks - hint).min(count);
                 if max_in_group == 0 {
                     break;
                 }
 
-                // Try to find the largest contiguous free run available
                 let mut alloc_chunk = max_in_group;
                 let mut found_run = None;
 
                 while alloc_chunk > 0 {
-                    if let Some(bit) = view.find_next_free(io, hint, alloc_chunk as u64)?
-                        && bit + alloc_chunk as u64 <= max_group_blocks
+                    if let Some(bit) = view.find_next_free(io, hint, alloc_chunk)?
+                        && bit + alloc_chunk <= max_group_blocks
                     {
                         found_run = Some((bit, alloc_chunk));
                         break;
@@ -133,18 +131,17 @@ impl<'p> Ext4BlockAllocator<'p> {
                 }
 
                 if let Some((bit, run_len)) = found_run {
-                    view.set_bits_range(io, bit, run_len as u64, true)?;
+                    view.set_bits_range(io, bit, run_len, true)?;
 
-                    // Add to runlist
                     let abs_block = layout.group_start + bit;
-                    list.push(Run::new(abs_block, run_len as u64));
+                    list.push(Run::new(abs_block, run_len));
 
                     if group_idx < self.allocated_per_group.len() {
                         self.allocated_per_group[group_idx] += run_len as u32;
                     }
 
                     count -= run_len;
-                    hint = bit + run_len as u64;
+                    hint = bit + run_len;
                     self.last_bit_hint = hint;
                     self.last_group = group_idx;
                 } else {
@@ -153,7 +150,6 @@ impl<'p> Ext4BlockAllocator<'p> {
                 }
             }
 
-            // Flush changes to this group's bitmap
             view.flush(io)?;
 
             if count == 0 {
@@ -162,7 +158,6 @@ impl<'p> Ext4BlockAllocator<'p> {
         }
 
         if count > 0 {
-            // Failed to allocate all needed blocks
             return Err(FsAllocatorError::OutOfBlocks);
         }
 
@@ -177,7 +172,7 @@ impl<'p> Ext4BlockAllocator<'p> {
     }
 
     // Usage tracking
-    pub fn used_units(&self) -> usize {
+    pub fn used_units(&self) -> u64 {
         self.allocated_blocks
     }
 }
@@ -202,7 +197,7 @@ pub struct ExtMetadataAllocator {
     pub total_inodes: u64,
     last_group: usize,
     last_inode_hint: u64,
-    allocated_inodes: usize,
+    allocated_inodes: u64,
     allocated_per_group: Vec<u32>,
 }
 
@@ -235,7 +230,6 @@ impl ExtMetadataAllocator {
 
             let mut view = BitmapDriver::new(&bm_meta);
 
-            // In group 0, reserved inodes 1..10 (bits 0..9) must not be allocated to user files
             let min_hint = if group_idx == 0 {
                 (EXT_FIRST_INODE - 1) as u64
             } else {
@@ -264,7 +258,6 @@ impl ExtMetadataAllocator {
                 self.last_inode_hint = bit + 1;
                 self.allocated_inodes += 1;
 
-                // Inode Number Calculation (1-based)
                 let inode = (group_idx as u32 * meta.inodes_per_group) + (bit as u32) + 1;
                 return Ok(inode);
             }
@@ -273,7 +266,7 @@ impl ExtMetadataAllocator {
         Err(FsAllocatorError::OutOfBlocks)
     }
 
-    pub fn used_metadata(&self) -> usize {
+    pub fn used_metadata(&self) -> u64 {
         self.allocated_inodes
     }
 
@@ -298,6 +291,87 @@ impl<'p> ExtAllocator<'p> {
     }
 
     /// Flush free block and inode counts to primary and backup superblocks on disk.
+    /// Validate the supported mutation layout and restore allocation accounting.
+    pub(crate) fn load_existing<IO: RimIO + ?Sized>(
+        &mut self,
+        io: &mut IO,
+        meta: &ExtMeta,
+    ) -> FsInjectorResult<Vec<u16>> {
+        let mut dirs = Vec::new();
+        for g in 0..meta.group_count() {
+            let desc = crate::utils::read_group_descriptor(io, meta, g as u32)?;
+            let layout = GroupLayout::compute(meta, g as u32);
+            for (lo, hi, expected) in [
+                (
+                    desc.bg_block_bitmap_lo.get(),
+                    desc.bg_block_bitmap_hi.get(),
+                    layout.block_bitmap_block,
+                ),
+                (
+                    desc.bg_inode_bitmap_lo.get(),
+                    desc.bg_inode_bitmap_hi.get(),
+                    layout.inode_bitmap_block,
+                ),
+                (
+                    desc.bg_inode_table_lo.get(),
+                    desc.bg_inode_table_hi.get(),
+                    layout.inode_table_block,
+                ),
+            ] {
+                let low = u32::from_le(lo) as u64;
+                let high = if meta.features.has_64bit {
+                    u32::from_le(hi) as u64
+                } else {
+                    0
+                };
+                if low | (high << 32) != expected {
+                    return Err(crate::core::FsInjectorError::Unsupported(
+                        "Mutation of relocated EXT metadata is unsupported",
+                    ));
+                }
+            }
+            let block_bm_meta = SimpleBitmapMeta::new(
+                layout.block_bitmap_block * meta.block_size as u64,
+                meta.block_size as u64,
+                meta.group_total_blocks(g) as u64,
+            );
+            let mut block_driver = BitmapDriver::new(block_bm_meta);
+            let used = block_driver
+                .count_ones_ro(io)
+                .map_err(crate::core::FsInjectorError::IO)? as usize;
+            let data_used = used.saturating_sub(layout.metadata_blocks() as usize);
+            // allocated_in_group adds the two preformatted directory blocks.
+            self.blocks.allocated_per_group[g] =
+                data_used.saturating_sub(if g == 0 { 2 } else { 0 }) as u32;
+
+            let inode_bm_meta = SimpleBitmapMeta::new(
+                layout.inode_bitmap_block * meta.block_size as u64,
+                meta.block_size as u64,
+                meta.group_total_inodes(g) as u64,
+            );
+            let mut inode_driver = BitmapDriver::new(inode_bm_meta);
+            let used_inodes = inode_driver
+                .count_ones_ro(io)
+                .map_err(crate::core::FsInjectorError::IO)? as usize;
+            self.meta.allocated_per_group[g] =
+                used_inodes.saturating_sub(if g == 0 { 11 } else { 0 }) as u32;
+            dirs.push(desc.bg_used_dirs_count_lo.get());
+        }
+        self.blocks.allocated_blocks = self
+            .blocks
+            .allocated_per_group
+            .iter()
+            .map(|n| *n as u64)
+            .sum();
+        self.meta.allocated_inodes = self
+            .meta
+            .allocated_per_group
+            .iter()
+            .map(|n| *n as u64)
+            .sum();
+        Ok(dirs)
+    }
+
     pub fn flush_superblock<IO: RimIO + ?Sized>(
         &self,
         io: &mut IO,
@@ -406,10 +480,8 @@ pub fn flush_bgdt<IO: RimIO + ?Sized>(
             .copy_from_slice(&bgd.as_bytes()[..bgdt_entry_size]);
     }
 
-    // Write Primary BGDT
     io.write_at(bgdt_start_offset, &bgdt_buf)?;
 
-    // Write Backup BGDTs
     for group_id in 1..count {
         let layout = GroupLayout::compute(meta, group_id as u32);
         if layout.reserved_blocks > 0 {
@@ -428,12 +500,10 @@ impl<'p> FsAllocator<ExtHandle> for ExtAllocator<'p> {
     fn allocate<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<ExtHandle> {
-        // Allocate 1 inode
         let inode = self.meta.allocate_metadata_id(io, self.blocks.params)?;
 
-        // Allocate blocks
         let blks = self.blocks.allocate_blocks_list(io, count)?;
 
         Ok(ExtHandle {
@@ -445,16 +515,16 @@ impl<'p> FsAllocator<ExtHandle> for ExtAllocator<'p> {
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<ExtHandle> {
         self.allocate(io, count)
     }
 
-    fn used_units(&self) -> usize {
+    fn used_units(&self) -> u64 {
         self.blocks.used_units()
     }
 
-    fn remaining_units(&self) -> usize {
-        (self.blocks.params.block_count as usize).saturating_sub(self.used_units())
+    fn remaining_units(&self) -> u64 {
+        (self.blocks.params.block_count).saturating_sub(self.used_units())
     }
 }

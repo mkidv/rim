@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT directory and stream extension resolver.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
@@ -15,21 +18,26 @@ pub struct ExFatResolver<'a, IO: RimRead + ?Sized> {
     meta: &'a ExFatMeta,
     upcase: Option<crate::upcase::UpcaseHandle>,
     dir_streams: Vec<(u32, bool, u64)>,
+    status: FsResolverResult<()>,
 }
 
 impl<'a, IO: RimRead + ?Sized> ExFatResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExFatMeta) -> Self {
-        let upcase = crate::upcase::UpcaseHandle::from_io(io, meta).ok();
+        let upcase = crate::upcase::UpcaseHandle::from_io(io, meta);
+        let status = upcase.as_ref().map(|_| ()).map_err(|e| *e);
+        let upcase = upcase.ok();
         Self {
             io,
             meta,
             upcase,
             dir_streams: Vec::new(),
+            status,
         }
     }
 
     /// Internal helper to get the entry details
     pub fn resolve_entry(&mut self, path: &str) -> FsResolverResult<ExFatEntries> {
+        self.status?;
         let entry = crate::core::resolver::walker::walk_path(self, path)?.ok_or(
             FsResolverError::Invalid("Cannot resolve file entry for root"),
         )?;
@@ -37,6 +45,7 @@ impl<'a, IO: RimRead + ?Sized> ExFatResolver<'a, IO> {
     }
 
     pub fn resolve_entry_info(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
+        self.status?;
         if path.is_empty() || path == "/" {
             return Ok((true, self.meta.root_unit(), 0));
         }
@@ -50,14 +59,15 @@ use crate::core::resolver::walker::WalkerDataSource;
 
 impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
     type Entry = ExFatEntries;
+    type NodeId = u32;
 
-    fn root_cluster(&self) -> u32 {
+    fn root_node(&self) -> Self::NodeId {
         self.meta.root_unit()
     }
 
     fn find_entry(
         &mut self,
-        dir_cluster: u32,
+        dir_cluster: Self::NodeId,
         name: &str,
     ) -> FsResolverResult<Option<Self::Entry>> {
         let (is_contiguous, data_len) = self
@@ -78,10 +88,15 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
         if let Some(ref e) = res
             && e.is_dir()
         {
+            if self.dir_streams.len() >= 256 {
+                self.dir_streams.clear();
+            }
+            self.dir_streams
+                .retain(|(cluster, _, _)| *cluster != e.first_cluster());
             self.dir_streams.push((
                 e.first_cluster(),
                 e.stream.is_contiguous(),
-                e.stream.data_length,
+                e.stream.data_length.get(),
             ));
         }
         Ok(res)
@@ -91,7 +106,7 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExFatResolver<'a, IO> {
         entry.is_dir()
     }
 
-    fn entry_cluster(&self, entry: &Self::Entry) -> u32 {
+    fn entry_node(&self, entry: &Self::Entry) -> Self::NodeId {
         entry.first_cluster()
     }
 }
@@ -123,17 +138,30 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
         let entry = self.resolve_entry(path)?;
         crate::ensure!(!entry.is_dir(), FsResolverError::Invalid("Not a file"));
 
-        let size = entry.size();
+        let size = entry.stream.data_length.get();
+        if entry.stream.valid_data_length.get() > size {
+            return Err(FsResolverError::Invalid("Invalid valid data length"));
+        }
         if size == 0 {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
 
         let first_cluster = entry.first_cluster();
         let is_contiguous = entry.stream.is_contiguous();
-        let total_size = size as u64;
-        let valid_size = entry.stream.valid_data_length.min(total_size);
+        let total_size = entry.stream.data_length.get();
+        let valid_size = entry.stream.valid_data_length.get();
+        if valid_size > total_size {
+            return Err(FsResolverError::Invalid("Invalid valid data length"));
+        }
 
+        if first_cluster < 2 || first_cluster > self.meta.last_data_unit() {
+            return Err(FsResolverError::Invalid("Invalid first cluster"));
+        }
         if is_contiguous {
+            let count = total_size.div_ceil(self.meta.unit_size());
+            if first_cluster as u64 + count > self.meta.last_data_unit() as u64 + 1 {
+                return Err(FsResolverError::Invalid("Contiguous file exceeds volume"));
+            }
             let phys_offset = self.meta.unit_offset(first_cluster);
             if valid_size == total_size {
                 return Ok(alloc::boxed::Box::new(
@@ -164,7 +192,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
             }
         }
 
-        let cs = self.meta.unit_size() as u64;
+        let cs = self.meta.unit_size();
         let mut extents = Vec::new();
         let mut logical_offset = 0u64;
         let mut cur = ClusterCursor::new_safe(self.meta, first_cluster);
@@ -201,12 +229,8 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExFatResolver<'a, IO> {
             Ok(())
         })?;
 
-        if logical_offset < total_size {
-            extents.push(rimio::extent::IoExtent {
-                logical_offset,
-                source_offset: None,
-                len: total_size - logical_offset,
-            });
+        if logical_offset != total_size {
+            return Err(FsResolverError::Invalid("Incomplete file allocation"));
         }
 
         Ok(alloc::boxed::Box::new(rimio::extent::ExtentRimRead::new(
@@ -237,7 +261,7 @@ where
     F: FnMut(&mut IO, u32, u32) -> Result<(), FsCursorError>,
 {
     if is_contiguous {
-        let cs = meta.unit_size() as u64;
+        let cs = meta.unit_size();
         let num_clusters = if data_len > 0 {
             data_len.div_ceil(cs) as u32
         } else {
@@ -277,7 +301,7 @@ fn read_dir_entries<IO: RimRead + ?Sized>(
 ) -> FsResolverResult<Vec<ExFatEntries>> {
     const ERR_EOD: &str = "eod";
 
-    let cs = meta.unit_size();
+    let cs = meta.unit_size() as usize;
     let mut entries: Vec<ExFatEntries> = Vec::new();
 
     let mut lfn_stack: Vec<[u8; 32]> = Vec::with_capacity(16);
@@ -379,7 +403,7 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
     target: &str,
     upcase: Option<&crate::upcase::UpcaseHandle>,
 ) -> FsResolverResult<Option<ExFatEntries>> {
-    let cs = meta.unit_size();
+    let cs = meta.unit_size() as usize;
 
     // Assembly state persistent across runs
     let mut lfn_stack = vec![];
@@ -397,7 +421,6 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
         is_contiguous,
         data_len,
         |io, run_start, run_len| {
-            // Read the run as a single block
             let total = (run_len as usize) * cs;
             if data.len() != total {
                 data.resize(total, 0u8);
@@ -439,7 +462,7 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
                                 return Err(FsCursorError::Other("found"));
                             }
                         }
-                        return Ok(()); // Nothing follows
+                        return Err(FsCursorError::Other("eod")); // Stop the entire chain
                     }
                     _ => {
                         // Unknown entry or padding -> if an entry was being assembled, reset it
@@ -457,6 +480,7 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
     );
 
     match res {
+        Err(FsCursorError::Other("eod")) => Ok(None),
         Ok(()) => {
             // End of chain without EOD: final flush in case PRIMARY/STREAM was in progress
             if let (Some(p), Some(s)) = (raw_primary, raw_stream)

@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 volume formatter and descriptor table generator.
+
+use crate::records::{IsoPathTableHeaderBe, IsoPathTableHeaderLe};
+use rimio::RimWriteStructExt;
+use zerocopy::IntoBytes;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -27,83 +33,89 @@ impl<'a, IO: RimIO + ?Sized> FsFormatter for IsoFormatter<'a, IO> {
         let now_text = format_iso_text_datetime(now);
         let now_bin = format_iso_binary_datetime(now);
 
-        // Clear sectors 0..15 (System Area)
-        let zeros = [0u8; ISO_SECTOR_SIZE];
-        for lba in 0..16 {
-            self.io.write_at(lba * ISO_SECTOR_SIZE as u64, &zeros)?;
-        }
+        self.io.zero_at(0, 16 * ISO_SECTOR_SIZE as u64)?;
 
         // Sector 16: Primary Volume Descriptor (PVD)
-        let mut pvd = [0u8; ISO_SECTOR_SIZE];
-        pvd[0] = VD_PRIMARY;
-        pvd[1..6].copy_from_slice(ISO_STANDARD_ID);
-        pvd[6] = 1; // Version
+        let mut pvd = IsoVolumeDescriptor {
+            kind: VD_PRIMARY,
+            ..Default::default()
+        };
+        pvd.standard_id.copy_from_slice(ISO_STANDARD_ID);
+        pvd.version = 1; // Version
 
         // System Identifier (8..40, 32 bytes)
         let sys_id = b"LINUX                           ";
-        pvd[8..40].copy_from_slice(sys_id);
+        pvd.system_id.copy_from_slice(sys_id);
 
         // Volume Identifier (40..72, 32 bytes)
         let mut vol_id = [b' '; 32];
         let label_bytes = self.meta.volume_id.as_bytes();
         let len = label_bytes.len().min(32);
         vol_id[..len].copy_from_slice(&label_bytes[..len]);
-        pvd[40..72].copy_from_slice(&vol_id);
+        pvd.volume_id.copy_from_slice(&vol_id);
 
         let total_sectors = 25u32;
-        put_both_u32(&mut pvd[80..88], total_sectors); // Volume Space Size
-        put_both_u16(&mut pvd[120..124], 1); // Volume Set Size
-        put_both_u16(&mut pvd[124..128], 1); // Volume Sequence Number
-        put_both_u16(&mut pvd[128..132], ISO_SECTOR_SIZE as u16); // Logical Block Size
-        put_both_u32(&mut pvd[132..140], 10); // Path Table Size (10 bytes)
+        pvd.volume_space_size = (total_sectors).into(); // Volume Space Size
+        pvd.volume_set_size = (1).into(); // Volume Set Size
+        pvd.volume_sequence = (1).into(); // Volume Sequence Number
+        pvd.logical_block_size = (ISO_SECTOR_SIZE as u16).into(); // Logical Block Size
+        pvd.path_table_size = (10).into(); // Path Table Size (10 bytes)
 
         // Type L and Type M Path Table LBAs
-        pvd[140..144].copy_from_slice(&18u32.to_le_bytes()); // Type L Path Table at sector 18
-        pvd[148..152].copy_from_slice(&19u32.to_be_bytes()); // Type M Path Table at sector 19
+        pvd.path_table_l = (18u32).into(); // Type L Path Table at sector 18
+        pvd.path_table_m = (19u32).into(); // Type M Path Table at sector 19
 
         // Root Directory Record in PVD (156..190, 34 bytes)
         let root_lba = 20u32;
         let root_size = ISO_SECTOR_SIZE as u32;
-        pvd[156] = 34; // Record length
-        pvd[157] = 0; // Extended attr length
-        put_both_u32(&mut pvd[158..166], root_lba);
-        put_both_u32(&mut pvd[166..174], root_size);
-        pvd[174..181].copy_from_slice(&now_bin);
-        pvd[181] = DIR_FLAG_DIRECTORY;
-        put_both_u16(&mut pvd[184..188], 1);
-        pvd[188] = 1; // File ID length
-        pvd[189] = 0; // Root directory ID (\0)
+        pvd.root.header.record_len = 34; // Record length
+        pvd.root.header.extended_attr_len = 0; // Extended attr length
+        pvd.root.header.extent_lba = (root_lba).into();
+        pvd.root.header.data_length = (root_size).into();
+        pvd.root.header.recorded.copy_from_slice(&now_bin);
+        pvd.root.header.flags = DIR_FLAG_DIRECTORY;
+        pvd.root.header.volume_sequence = (1).into();
+        pvd.root.header.name_len = 1; // File ID length
+        pvd.root.identifier = 0; // Root directory ID (\0)
 
         // Dates
-        pvd[813..830].copy_from_slice(&now_text); // Creation date
-        pvd[830..847].copy_from_slice(&now_text); // Mod date
-        pvd[881] = 1; // File structure version
+        pvd.created.copy_from_slice(&now_text); // Creation date
+        pvd.modified.copy_from_slice(&now_text); // Mod date
+        pvd.file_structure_version = 1; // File structure version
 
-        self.io.write_at(16 * ISO_SECTOR_SIZE as u64, &pvd)?;
+        self.io.write_struct(16 * ISO_SECTOR_SIZE as u64, &pvd)?;
 
         // Sector 17: Terminator
-        let mut term = [0u8; ISO_SECTOR_SIZE];
-        term[0] = VD_TERMINATOR;
-        term[1..6].copy_from_slice(ISO_STANDARD_ID);
-        term[6] = 1;
-        self.io.write_at(17 * ISO_SECTOR_SIZE as u64, &term)?;
+        let mut term = IsoTerminator {
+            kind: VD_TERMINATOR,
+            ..Default::default()
+        };
+        term.standard_id.copy_from_slice(ISO_STANDARD_ID);
+        term.version = 1;
+        self.io.write_struct(17 * ISO_SECTOR_SIZE as u64, &term)?;
 
         // Sector 18: Type L Path Table (LE)
         let mut pt_l = [0u8; ISO_SECTOR_SIZE];
-        pt_l[0] = 1; // Name len
-        pt_l[1] = 0; // Ext attr len
-        pt_l[2..6].copy_from_slice(&root_lba.to_le_bytes());
-        pt_l[6..8].copy_from_slice(&1u16.to_le_bytes()); // Parent directory number = 1
+        let header = IsoPathTableHeaderLe {
+            identifier_len: 1,
+            extended_attribute_len: 0,
+            extent_lba: root_lba.into(),
+            parent_number: 1.into(),
+        };
+        pt_l[..8].copy_from_slice(header.as_bytes());
         pt_l[8] = 0; // Name (\0)
         pt_l[9] = 0; // Pad
         self.io.write_at(18 * ISO_SECTOR_SIZE as u64, &pt_l)?;
 
         // Sector 19: Type M Path Table (BE)
         let mut pt_m = [0u8; ISO_SECTOR_SIZE];
-        pt_m[0] = 1;
-        pt_m[1] = 0;
-        pt_m[2..6].copy_from_slice(&root_lba.to_be_bytes());
-        pt_m[6..8].copy_from_slice(&1u16.to_be_bytes());
+        let header = IsoPathTableHeaderBe {
+            identifier_len: 1,
+            extended_attribute_len: 0,
+            extent_lba: root_lba.into(),
+            parent_number: 1.into(),
+        };
+        pt_m[..8].copy_from_slice(header.as_bytes());
         pt_m[8] = 0;
         pt_m[9] = 0;
         self.io.write_at(19 * ISO_SECTOR_SIZE as u64, &pt_m)?;

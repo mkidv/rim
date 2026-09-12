@@ -10,18 +10,24 @@ pub trait WalkerDataSource {
     /// The specific Entry type returned by the filesystem (e.g. FatEntries).
     type Entry;
 
-    /// Get the starting directory cluster (usually root).
-    fn root_cluster(&self) -> u32;
+    /// Node identifier type (e.g. cluster number `u32` for FAT/exFAT, inode `u32` for EXT, MFT record `u64` for NTFS).
+    type NodeId: Copy + Eq;
 
-    /// Find a child entry by name in the given directory cluster.
-    fn find_entry(&mut self, dir_cluster: u32, name: &str)
-    -> FsResolverResult<Option<Self::Entry>>;
+    /// Get the starting directory node (usually root).
+    fn root_node(&self) -> Self::NodeId;
+
+    /// Find a child entry by name in the given parent node.
+    fn find_entry(
+        &mut self,
+        parent: Self::NodeId,
+        name: &str,
+    ) -> FsResolverResult<Option<Self::Entry>>;
 
     /// Check if the entry represents a directory.
     fn is_dir(&self, entry: &Self::Entry) -> bool;
 
-    /// Get the starting particular cluster of the entry (to continue traversal).
-    fn entry_cluster(&self, entry: &Self::Entry) -> u32;
+    /// Get the starting node identifier of the entry (to continue traversal).
+    fn entry_node(&self, entry: &Self::Entry) -> Self::NodeId;
 }
 
 /// Generic path walker.
@@ -38,11 +44,11 @@ pub fn walk_path<S: WalkerDataSource>(
     }
 
     let components = split_path(path);
-    let mut cluster = source.root_cluster();
+    let mut node = source.root_node();
 
     for (i, comp) in components.iter().enumerate() {
         let entry = source
-            .find_entry(cluster, comp)?
+            .find_entry(node, comp)?
             .ok_or(FsResolverError::NotFound)?;
 
         let is_last = i == components.len() - 1;
@@ -57,7 +63,7 @@ pub fn walk_path<S: WalkerDataSource>(
             ));
         }
 
-        cluster = source.entry_cluster(&entry);
+        node = source.entry_node(&entry);
     }
 
     // Should be unreachable if components is not empty

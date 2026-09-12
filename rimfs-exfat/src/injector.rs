@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT directory tree and file stream injector.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::{
     string::{String, ToString},
@@ -11,7 +14,7 @@ use rimio::prelude::*;
 use crate::core::{fat::*, injector::*, resolver::*};
 
 use crate::upcase::UpcaseHandle;
-use crate::{allocator::*, constant::*, meta::*, types::*, utils};
+use crate::{allocator::*, constant::*, meta::*, types::*};
 
 struct PendingDir {
     name: String,
@@ -43,12 +46,8 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
         })
     }
 
-    fn ensure_chain_capacity(
-        &mut self,
-        handle: &mut ExFatHandle,
-        needed: usize,
-    ) -> FsInjectorResult {
-        let current_len = handle.cluster_chain.total_units() as usize;
+    fn ensure_chain_capacity(&mut self, handle: &mut ExFatHandle, needed: u64) -> FsInjectorResult {
+        let current_len = handle.cluster_chain.total_units();
         if current_len >= needed {
             return Ok(());
         }
@@ -59,34 +58,28 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
     }
 
     fn write_chain_buffer(&mut self, handle: &ExFatHandle, buf: &[u8]) -> FsInjectorResult {
-        let cs = self.meta.unit_size();
-
-        // Zero-pad to avoid trailing junk entries from previous content
-        let mut padded = buf.to_vec();
-        let target_size = buf.len().div_ceil(cs) * cs;
-        if padded.len() < target_size {
-            padded.resize(target_size, 0);
-        }
-
-        if !handle.cluster_chain.is_contiguous() {
-            let mut offsets = Vec::with_capacity(handle.cluster_chain.len());
-            for run in handle.cluster_chain.iter() {
-                for i in 0..run.length {
-                    offsets.push(self.meta.unit_offset((run.start + i) as u32));
+        let mut buf_offset = 0;
+        for run in handle.cluster_chain.iter() {
+            let run_offset = self.meta.unit_offset(run.start as u32);
+            let run_bytes = (run.length * self.meta.unit_size()) as usize;
+            if buf_offset < buf.len() {
+                let chunk_len = (buf.len() - buf_offset).min(run_bytes);
+                self.io
+                    .write_at(run_offset, &buf[buf_offset..buf_offset + chunk_len])?;
+                if chunk_len < run_bytes {
+                    self.io.zero_at(
+                        run_offset + chunk_len as u64,
+                        (run_bytes - chunk_len) as u64,
+                    )?;
                 }
+                buf_offset += chunk_len;
+            } else {
+                self.io.zero_at(run_offset, run_bytes as u64)?;
             }
-
-            self.io.write_multi_at(&offsets, cs, &padded)?;
-        } else {
-            let c = handle.cluster_chain.get_unit(0).unwrap() as u32;
-            self.io
-                .write_block_best_effort(self.meta.unit_offset(c), &padded, cs)?;
         }
 
-        // Update FAT + bitmap for the entire chain
-        let mut driver = FatDriver::new(self.meta);
-        driver.write_run_list(self.io, &handle.cluster_chain)?;
-        utils::write_bitmap(self.io, self.meta, &handle.cluster_chain)?;
+        let mut fd = FatDriver::new(self.meta);
+        fd.write_run_list(self.io, &handle.cluster_chain)?;
         Ok(())
     }
 }
@@ -94,26 +87,15 @@ impl<'a, IO: RimIO + ?Sized> ExFatInjector<'a, IO> {
 impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, IO> {
     fn set_root_context(&mut self, _: &FileAttributes) -> FsInjectorResult {
         let root = self.meta.root_unit();
-        let mut driver = FatDriver::new(self.meta);
-        let mut clusters = Vec::new();
-        let mut cur = root;
-        while cur >= 2 && cur <= self.meta.last_data_unit() && !self.meta.is_eoc(cur) {
-            clusters.push(cur);
-            if clusters.len() >= 100_000 {
-                break;
-            }
-            match driver.get(self.io, cur) {
-                Ok(next) => cur = next,
-                Err(_) => break,
-            }
-        }
-        let chain_clusters = if clusters.is_empty() {
-            vec![root]
-        } else {
-            clusters
-        };
-
-        let cs = self.meta.unit_size();
+        let mut chain_clusters = Vec::new();
+        let mut cursor = crate::core::cursor::ClusterCursor::new(self.meta, root);
+        cursor
+            .for_each_cluster(self.io, |_, cluster| {
+                chain_clusters.push(cluster);
+                Ok(())
+            })
+            .map_err(crate::core::FsResolverError::from)?;
+        let cs = self.meta.unit_size() as usize;
         let mut buf = vec![0u8; chain_clusters.len() * cs];
         for (i, &c) in chain_clusters.iter().enumerate() {
             let offset = self.meta.unit_offset(c);
@@ -161,7 +143,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
             ExFatEntries::file(name, 0, 0, attr, &self.upcase)
         } else {
             let cs = self.meta.unit_size();
-            let need = size.div_ceil(cs as u64) as usize;
+            let need = size.div_ceil(cs);
             let handle: ExFatHandle = self.allocator.allocate(self.io, need)?;
 
             use crate::core::utils::stream_copy::write_stream_to_run_list;
@@ -194,14 +176,13 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
 
     fn flush_current(&mut self) -> FsInjectorResult {
         if let Some(mut ctx) = self.stack.pop() {
-            // Check if the last entry is an EOD marker
-            if ctx.buf.len() >= 32 && ctx.buf[ctx.buf.len() - 32] != EXFAT_EOD {
+            if ctx.buf.is_empty() || ctx.buf[ctx.buf.len() - 32] != EXFAT_EOD {
                 ExFatEodEntry::new().to_raw_buffer(&mut ctx.buf);
             }
 
-            let cs = self.meta.unit_size();
+            let cs = self.meta.unit_size() as usize;
             let used = ctx.buf.len();
-            let need_clusters = used.div_ceil(cs).max(1);
+            let need_clusters = used.div_ceil(cs).max(1) as u64;
 
             self.ensure_chain_capacity(&mut ctx.handle, need_clusters)?;
             self.write_chain_buffer(&ctx.handle, &ctx.buf)?;
@@ -214,7 +195,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
                 let bytes_used = ctx.buf.len() as u64;
                 let cluster_size = self.meta.unit_size();
                 // Round up to the next cluster
-                let data_len = bytes_used.div_ceil(cluster_size as u64) * cluster_size as u64;
+                let data_len = bytes_used.div_ceil(cluster_size) * cluster_size;
 
                 ExFatEntries::dir_with_len(
                     &pd.name,
@@ -231,39 +212,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExFatHandle> for ExFatInjector<'a, I
     }
 
     fn flush(&mut self) -> FsInjectorResult {
-        while let Some(mut ctx) = self.stack.pop() {
-            // Check if the last entry is an EOD marker
-            if ctx.buf.len() >= 32 && ctx.buf[ctx.buf.len() - 32] != EXFAT_EOD {
-                ExFatEodEntry::new().to_raw_buffer(&mut ctx.buf);
-            }
-
-            let cs = self.meta.unit_size();
-            let used = ctx.buf.len();
-            let need_clusters = used.div_ceil(cs).max(1);
-
-            self.ensure_chain_capacity(&mut ctx.handle, need_clusters)?;
-            self.write_chain_buffer(&ctx.handle, &ctx.buf)?;
-
-            let pending = self.pending_dirs.pop().unwrap_or(None);
-
-            if let Some(pd) = pending
-                && let Some(parent) = self.stack.last_mut()
-            {
-                let bytes_used = ctx.buf.len() as u64;
-                let cluster_size = self.meta.unit_size();
-                // Round up to the next cluster
-                let data_len = bytes_used.div_ceil(cluster_size as u64) * cluster_size as u64;
-
-                ExFatEntries::dir_with_len(
-                    &pd.name,
-                    pd.first_cluster,
-                    &pd.attr,
-                    data_len,
-                    &self.upcase,
-                )
-                .map_err(FsResolverError::Parsing)?
-                .to_raw_buffer(&mut parent.buf);
-            }
+        while !self.stack.is_empty() {
+            self.flush_current()?;
         }
         self.io.flush()?;
         Ok(())
@@ -285,7 +235,6 @@ mod tests {
 
         let mut io = MemRimIO::new(&mut buf);
 
-        // Format the filesystem first
         ExFatFormatter::new(&mut io, &meta)
             .format(false)
             .expect("Format failed");
@@ -341,12 +290,11 @@ mod tests {
             )
             .expect("write_file failed");
 
-        // flush to ensure root dir entry is written
         injector.flush().expect("flush failed");
 
         // Now manually verify FAT and Bitmap
         // 1. Find the file's first cluster from Root Directory
-        let mut root_data = vec![0u8; meta.unit_size()];
+        let mut root_data = vec![0u8; meta.unit_size() as usize];
         io.read_at(meta.unit_offset(meta.root_unit()), &mut root_data)
             .unwrap();
 
@@ -356,7 +304,7 @@ mod tests {
         for chunk in root_data.chunks(32) {
             if chunk[0] == EXFAT_ENTRY_STREAM {
                 let entry = ExFatStreamEntry::read_from_bytes(chunk).unwrap();
-                first_cluster = entry.first_cluster;
+                first_cluster = entry.first_cluster.get();
                 found = true;
                 break;
             }

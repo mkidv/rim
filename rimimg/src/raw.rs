@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Raw unencapsulated disk image format support.
+
 use rimio::prelude::*;
 
 use crate::errors::RimImgResult;

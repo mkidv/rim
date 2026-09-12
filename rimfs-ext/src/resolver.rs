@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 directory tree and extent resolver.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{
     string::{String, ToString},
@@ -10,8 +12,12 @@ use alloc::{
 use crate::constant::*;
 use crate::core::resolver::*;
 use crate::core::traits::FsMeta;
-use crate::types::{BlockMapArray, ExtExtent, ExtExtentHeader, ExtExtentIndex};
-use crate::{meta::ExtMeta, types::GroupLayout};
+use crate::meta::ExtMeta;
+#[cfg(test)]
+use crate::types::GroupLayout;
+use crate::types::{
+    BlockMapArray, ExtDirEntryHeader, ExtExtent, ExtExtentHeader, ExtExtentIndex, ExtInodeHeader,
+};
 use rimio::prelude::*;
 use zerocopy::FromBytes;
 
@@ -37,12 +43,17 @@ use crate::core::resolver::walker::WalkerDataSource;
 
 impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
     type Entry = ExtDirEntry;
+    type NodeId = u32;
 
-    fn root_cluster(&self) -> u32 {
+    fn root_node(&self) -> Self::NodeId {
         EXT_ROOT_INODE
     }
 
-    fn find_entry(&mut self, dir_inode: u32, name: &str) -> FsResolverResult<Option<Self::Entry>> {
+    fn find_entry(
+        &mut self,
+        dir_inode: Self::NodeId,
+        name: &str,
+    ) -> FsResolverResult<Option<Self::Entry>> {
         self.find_in_dir(dir_inode, name)
     }
 
@@ -50,35 +61,25 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for ExtResolver<'a, IO> {
         entry.is_dir()
     }
 
-    fn entry_cluster(&self, entry: &Self::Entry) -> u32 {
+    fn entry_node(&self, entry: &Self::Entry) -> Self::NodeId {
         entry.inode
     }
 }
 
 impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
-    fn get_inode_table_block(&mut self, group: u32) -> u64 {
-        let bgdt_offset = (self.meta.first_data_block + 1) as u64 * self.meta.block_size as u64;
-        let entry_offset = bgdt_offset + (group as u64 * self.meta.bgdt_entry_size as u64);
-        let mut entry = [0u8; 64];
-        let read_len = self.meta.bgdt_entry_size.min(64);
-        if self
-            .io
-            .read_at(entry_offset, &mut entry[..read_len])
-            .is_ok()
-        {
-            let itable_lo = u32::from_le_bytes(entry[8..12].try_into().unwrap_or([0; 4]));
-            let itable_hi = if self.meta.features.has_64bit && read_len >= 44 {
-                u32::from_le_bytes(entry[40..44].try_into().unwrap_or([0; 4]))
-            } else {
-                0
-            };
-            let itable = (itable_lo as u64) | ((itable_hi as u64) << 32);
-            if itable != 0 && itable < self.meta.block_count {
-                return itable;
-            }
+    fn get_inode_table_block(&mut self, group: u32) -> FsResolverResult<u64> {
+        let entry = crate::utils::read_group_descriptor(self.io, self.meta, group)?;
+        let lo = entry.bg_inode_table_lo.get() as u64;
+        let hi = if self.meta.features.has_64bit {
+            entry.bg_inode_table_hi.get() as u64
+        } else {
+            0
+        };
+        let block = lo | (hi << 32);
+        if block == 0 || block >= self.meta.block_count {
+            return Err(FsResolverError::Invalid("Invalid inode table block"));
         }
-        let layout = GroupLayout::compute(self.meta, group);
-        layout.inode_table_block
+        Ok(block)
     }
 
     /// Read inode raw bytes from inode table (with MRU cache)
@@ -97,7 +98,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let group = inode_index / self.meta.inodes_per_group;
         let index_in_group = inode_index % self.meta.inodes_per_group;
 
-        let inode_table_block = self.get_inode_table_block(group);
+        let inode_table_block = self.get_inode_table_block(group)?;
 
         let inode_size = self.meta.inode_size as u64;
         let offset = (inode_table_block * self.meta.block_size as u64)
@@ -116,19 +117,17 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
     /// Check if inode is a directory
     fn inode_is_dir(&self, inode_buf: &[u8]) -> bool {
-        let mode = u16::from_le_bytes(inode_buf[0..2].try_into().unwrap_or([0; 2]));
+        let mode = ExtInodeHeader::ref_from_prefix(inode_buf)
+            .map(|(h, _)| h.i_mode.get())
+            .unwrap_or(0);
         (mode & 0xF000) == 0x4000
     }
 
     /// Get size of file from inode
     fn inode_size(&self, inode_buf: &[u8]) -> u64 {
-        let size_lo = u32::from_le_bytes(inode_buf[4..8].try_into().unwrap_or([0; 4])) as u64;
-        let size_hi = if inode_buf.len() >= 112 {
-            u32::from_le_bytes(inode_buf[108..112].try_into().unwrap_or([0; 4])) as u64
-        } else {
-            0
-        };
-        (size_hi << 32) | size_lo
+        ExtInodeHeader::ref_from_prefix(inode_buf)
+            .map(|(h, _)| (h.i_size_high.get() as u64) << 32 | h.i_size_lo.get() as u64)
+            .unwrap_or(0)
     }
 
     /// Recursively collect leaf extents from an extent node
@@ -139,59 +138,35 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         max_depth: u16,
         out: &mut Vec<ExtExtent>,
     ) -> FsResolverResult<()> {
-        if header.eh_magic != EXT_EXTENT_HEADER_MAGIC {
+        if header.eh_magic.get() != EXT_EXTENT_HEADER_MAGIC {
             return Err(FsResolverError::Invalid("Invalid extent header magic"));
         }
 
-        let entries_count = header.eh_entries as usize;
+        let entries_count = header.eh_entries.get() as usize;
 
-        if header.eh_depth == 0 {
-            // Leaf node: entries are ExtExtent
-            for i in 0..entries_count {
-                let offset = i * core::mem::size_of::<ExtExtent>();
-                if offset + core::mem::size_of::<ExtExtent>() <= entries_buf.len()
-                    && let Ok(extent) = ExtExtent::read_from_bytes(
-                        &entries_buf[offset..offset + core::mem::size_of::<ExtExtent>()],
-                    )
-                {
-                    out.push(extent);
-                }
-            }
+        if header.eh_depth.get() == 0 {
+            let bytes = entries_buf
+                .get(..entries_count * core::mem::size_of::<ExtExtent>())
+                .ok_or(FsResolverError::Invalid("Truncated extent array"))?;
+            let entries = <[ExtExtent]>::ref_from_bytes(bytes)
+                .map_err(|_| FsResolverError::Invalid("Invalid extent array"))?;
+            out.extend_from_slice(entries);
         } else {
-            // Index node: entries are ExtExtentIndex
             if max_depth == 0 {
                 return Err(FsResolverError::Invalid("Extent tree depth exceeded limit"));
             }
-
-            let block_size = self.meta.block_size as usize;
-            let mut child_buf = vec![0u8; block_size];
-
-            for i in 0..entries_count {
-                let offset = i * core::mem::size_of::<ExtExtentIndex>();
-                if offset + core::mem::size_of::<ExtExtentIndex>() <= entries_buf.len()
-                    && let Ok(index_entry) = ExtExtentIndex::read_from_bytes(
-                        &entries_buf[offset..offset + core::mem::size_of::<ExtExtentIndex>()],
-                    )
-                {
-                    let child_block = index_entry.leaf_physical_block();
-                    let child_offset = child_block * (self.meta.block_size as u64);
-                    self.io
-                        .read_at(child_offset, &mut child_buf)
-                        .map_err(FsResolverError::IO)?;
-
-                    let child_header = ExtExtentHeader::read_from_bytes(&child_buf[0..12])
-                        .ok()
-                        .ok_or(FsResolverError::Invalid(
-                            "Failed to read child extent header",
-                        ))?;
-
-                    self.collect_extents_from_node(
-                        &child_header,
-                        &child_buf[12..],
-                        max_depth - 1,
-                        out,
-                    )?;
-                }
+            let bytes = entries_buf
+                .get(..entries_count * core::mem::size_of::<ExtExtentIndex>())
+                .ok_or(FsResolverError::Invalid("Truncated extent index array"))?;
+            let entries = <[ExtExtentIndex]>::ref_from_bytes(bytes)
+                .map_err(|_| FsResolverError::Invalid("Invalid extent index array"))?;
+            let mut child_buf = vec![0u8; self.meta.block_size as usize];
+            for entry in entries {
+                let child_offset = entry.leaf_physical_block() * self.meta.block_size as u64;
+                self.io.read_at(child_offset, &mut child_buf)?;
+                let (child_header, tail) = ExtExtentHeader::ref_from_prefix(&child_buf)
+                    .map_err(|_| FsResolverError::Invalid("Failed to read child extent header"))?;
+                self.collect_extents_from_node(child_header, tail, max_depth - 1, out)?;
             }
         }
 
@@ -200,11 +175,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
     /// Read extents from inode buffer
     pub(crate) fn read_extents(&mut self, inode_buf: &[u8]) -> FsResolverResult<Vec<ExtExtent>> {
-        // Check inode uses extents
-        let i_flags = inode_buf
-            .get(32..36)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_flags = ExtInodeHeader::ref_from_prefix(inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_flags.get())
             .unwrap_or(0);
         if i_flags & EXT_INODE_FLAG_EXTENTS == 0 {
             return Err(FsResolverError::Invalid(
@@ -213,26 +186,36 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         }
 
         // Extent header is at offset 40 in inode
-        let header = ExtExtentHeader::read_from_bytes(&inode_buf[40..52])
-            .ok()
-            .ok_or(FsResolverError::Invalid("Failed to read extent header"))?;
+        let header = ExtExtentHeader::ref_from_bytes(
+            inode_buf
+                .get(40..52)
+                .ok_or(FsResolverError::Invalid("Truncated inode extent header"))?,
+        )
+        .ok()
+        .ok_or(FsResolverError::Invalid("Failed to read extent header"))?;
 
-        if header.eh_magic != EXT_EXTENT_HEADER_MAGIC {
+        if header.eh_magic.get() != EXT_EXTENT_HEADER_MAGIC {
             return Err(FsResolverError::Invalid("Invalid extent header magic"));
         }
 
         let mut extents = Vec::new();
         // Inode extent buffer is at offset 52..100 (48 bytes max in 128/256-byte inode header)
-        let entries_slice = inode_buf.get(52..100).unwrap_or(&inode_buf[52..]);
-        self.collect_extents_from_node(&header, entries_slice, 5, &mut extents)?;
+        let entries_slice = inode_buf
+            .get(52..100)
+            .ok_or(FsResolverError::Invalid("Truncated inode extent table"))?;
+        self.collect_extents_from_node(header, entries_slice, 5, &mut extents)?;
 
         Ok(extents)
     }
 
     /// Read blocks from Block Map (Ext2/3)
     fn read_block_map(&mut self, inode_buf: &[u8], size: usize) -> FsResolverResult<Vec<u32>> {
-        let map = BlockMapArray::read_from_bytes(&inode_buf[40..100])
-            .map_err(|_| FsResolverError::Invalid("Failed to read block map"))?;
+        let map = BlockMapArray::ref_from_bytes(
+            inode_buf
+                .get(40..100)
+                .ok_or(FsResolverError::Invalid("Truncated inode block map"))?,
+        )
+        .map_err(|_| FsResolverError::Invalid("Failed to read block map"))?;
 
         let block_size = self.meta.block_size as usize;
         let ptrs_per_block = block_size / 4;
@@ -247,7 +230,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             if blocks.len() >= blocks_count {
                 break;
             }
-            blocks.push(blk);
+            blocks.push(blk.get());
         }
 
         if blocks.len() >= blocks_count {
@@ -256,8 +239,8 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
         // 2. Single Indirect Block
         let ind_limit = blocks_count.min(12 + ptrs_per_block);
-        if map.indirect != 0 {
-            self.read_indirect_block(map.indirect, &mut blocks, ind_limit)?;
+        if map.indirect.get() != 0 {
+            self.read_indirect_block(map.indirect.get(), &mut blocks, ind_limit)?;
         }
         while blocks.len() < ind_limit {
             blocks.push(0);
@@ -269,9 +252,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
         // 3. Double Indirect Block
         let dbl_limit = blocks_count.min(12 + ptrs_per_block + dbl_ptrs);
-        if map.double_indirect != 0 {
+        if map.double_indirect.get() != 0 {
             let mut indirects = Vec::new();
-            self.read_indirect_block(map.double_indirect, &mut indirects, ptrs_per_block)?;
+            self.read_indirect_block(map.double_indirect.get(), &mut indirects, ptrs_per_block)?;
             while indirects.len() < ptrs_per_block {
                 indirects.push(0);
             }
@@ -299,9 +282,13 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
         // 4. Triple Indirect Block
         let trpl_limit = blocks_count.min(12 + ptrs_per_block + dbl_ptrs + trpl_ptrs);
-        if map.triple_indirect != 0 {
+        if map.triple_indirect.get() != 0 {
             let mut double_indirects = Vec::new();
-            self.read_indirect_block(map.triple_indirect, &mut double_indirects, ptrs_per_block)?;
+            self.read_indirect_block(
+                map.triple_indirect.get(),
+                &mut double_indirects,
+                ptrs_per_block,
+            )?;
             while double_indirects.len() < ptrs_per_block {
                 double_indirects.push(0);
             }
@@ -385,11 +372,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let block_size = self.meta.block_size as usize;
         let blocks_needed = size.div_ceil(block_size);
 
-        // Check if using extents
-        let i_flags = inode_buf
-            .get(32..36)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_flags = ExtInodeHeader::ref_from_prefix(&inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_flags.get())
             .unwrap_or(0);
 
         if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
@@ -460,10 +445,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let blocks_needed = dir_size.div_ceil(block_size);
 
         // Check flags again (duplicated logic, could be helper)
-        let i_flags = inode_buf
-            .get(32..36)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_flags = ExtInodeHeader::ref_from_prefix(&inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_flags.get())
             .unwrap_or(0);
 
         if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
@@ -509,14 +493,13 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
             let buf = chunk; // Already read
             let mut pos = 0usize;
             while pos + 8 <= buf.len() && total_read + pos < dir_size {
-                let entry_inode_bytes: [u8; 4] = buf[pos..pos + 4].try_into().unwrap_or([0; 4]);
-                let entry_inode = u32::from_le_bytes(entry_inode_bytes);
-
-                let rec_len_bytes: [u8; 2] = buf[pos + 4..pos + 6].try_into().unwrap_or([0; 2]);
-                let rec_len = u16::from_le_bytes(rec_len_bytes) as usize;
-
-                let name_len = buf[pos + 6] as usize;
-                let file_type = buf[pos + 7];
+                let Some((header, _)) = ExtDirEntryHeader::from_record(&buf[pos..]) else {
+                    break;
+                };
+                let entry_inode = header.inode.get();
+                let rec_len = header.rec_len.get() as usize;
+                let name_len = header.name_len as usize;
+                let file_type = header.file_type;
 
                 if rec_len == 0 || rec_len > buf.len() - pos {
                     break; // End of directory or corrupt entry
@@ -524,15 +507,15 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
                 if entry_inode != 0 && name_len > 0 && pos + 8 + name_len <= buf.len() {
                     let name_bytes = &buf[pos + 8..pos + 8 + name_len];
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        // Skip . and ..
-                        if name != "." && name != ".." {
-                            entries.push(ExtDirEntry {
-                                inode: entry_inode,
-                                name: name.to_string(),
-                                file_type,
-                            });
-                        }
+                    if let Ok(name) = core::str::from_utf8(name_bytes)
+                        && name != "."
+                        && name != ".."
+                    {
+                        entries.push(ExtDirEntry {
+                            inode: entry_inode,
+                            name: name.to_string(),
+                            file_type,
+                        });
                     }
                 }
 
@@ -564,10 +547,9 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let block_size = self.meta.block_size as usize;
         let blocks_needed = dir_size.div_ceil(block_size);
 
-        let i_flags = inode_buf
-            .get(32..36)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_flags = ExtInodeHeader::ref_from_prefix(&inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_flags.get())
             .unwrap_or(0);
 
         let mut offsets = Vec::new();
@@ -607,14 +589,13 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
             let mut pos = 0usize;
             while pos + 8 <= buf.len() && total_read + pos < dir_size {
-                let entry_inode_bytes: [u8; 4] = buf[pos..pos + 4].try_into().unwrap_or([0; 4]);
-                let entry_inode = u32::from_le_bytes(entry_inode_bytes);
-
-                let rec_len_bytes: [u8; 2] = buf[pos + 4..pos + 6].try_into().unwrap_or([0; 2]);
-                let rec_len = u16::from_le_bytes(rec_len_bytes) as usize;
-
-                let name_len = buf[pos + 6] as usize;
-                let file_type = buf[pos + 7];
+                let Some((header, _)) = ExtDirEntryHeader::from_record(&buf[pos..]) else {
+                    break;
+                };
+                let entry_inode = header.inode.get();
+                let rec_len = header.rec_len.get() as usize;
+                let name_len = header.name_len as usize;
+                let file_type = header.file_type;
 
                 if rec_len == 0 || rec_len > buf.len() - pos {
                     break;
@@ -672,7 +653,6 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     pub fn resolve_entry_info(&mut self, path: &str) -> FsResolverResult<(bool, u32, usize)> {
         match crate::core::resolver::walker::walk_path(self, path)? {
             Some(entry) => {
-                // Get size from inode
                 let inode_buf = self.read_inode(entry.inode)?;
                 let size = self.inode_size(&inode_buf) as usize;
                 Ok((entry.is_dir(), entry.inode, size))
@@ -688,16 +668,15 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let block_size = self.meta.block_size as u64;
         let mut fs_extents = Vec::new();
 
-        let i_flags = inode_buf
-            .get(32..36)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_flags = ExtInodeHeader::ref_from_prefix(inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_flags.get())
             .unwrap_or(0);
 
         if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
             let extents = self.read_extents(inode_buf)?;
             for ext in extents {
-                let logical_offset = ext.ee_block as u64 * block_size;
+                let logical_offset = ext.ee_block.get() as u64 * block_size;
                 if logical_offset >= total_size {
                     break;
                 }
@@ -775,10 +754,9 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
             .ok_or(FsResolverError::NotFound)?;
 
         let inode_buf = self.read_inode(entry.inode)?;
-        let i_mode = inode_buf
-            .get(0..2)
-            .and_then(|b| b.try_into().ok())
-            .map(u16::from_le_bytes)
+        let i_mode = ExtInodeHeader::ref_from_prefix(&inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_mode.get())
             .unwrap_or(0);
 
         crate::ensure!(
@@ -787,10 +765,9 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
         );
 
         let size = self.inode_size(&inode_buf) as usize;
-        let i_blocks = inode_buf
-            .get(28..32)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+        let i_blocks = ExtInodeHeader::ref_from_prefix(&inode_buf)
+            .ok()
+            .map(|(h, _)| h.i_blocks_lo.get())
             .unwrap_or(0);
 
         if i_blocks == 0 && size < 60 {
@@ -829,23 +806,14 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ExtResolver<'a, IO> {
 impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
     /// Parse file attributes from inode buffer
     fn parse_attributes(&self, inode_buf: &[u8], is_dir: bool) -> FileAttributes {
-        let i_mode = inode_buf
-            .get(0..2)
-            .and_then(|b| b.try_into().ok())
-            .map(u16::from_le_bytes)
-            .unwrap_or(0);
+        let inode = ExtInodeHeader::ref_from_prefix(inode_buf)
+            .ok()
+            .map(|(h, _)| h);
+        let i_mode = inode.map(|h| h.i_mode.get()).unwrap_or(0);
 
-        let i_uid_lo = inode_buf
-            .get(2..4)
-            .and_then(|b| b.try_into().ok())
-            .map(u16::from_le_bytes)
-            .unwrap_or(0) as u32;
+        let i_uid_lo = inode.map(|h| h.i_uid.get()).unwrap_or(0) as u32;
 
-        let i_gid_lo = inode_buf
-            .get(24..26)
-            .and_then(|b| b.try_into().ok())
-            .map(u16::from_le_bytes)
-            .unwrap_or(0) as u32;
+        let i_gid_lo = inode.map(|h| h.i_gid.get()).unwrap_or(0) as u32;
 
         let (uid_hi, gid_hi) = if inode_buf.len() >= 128 {
             let u_hi = inode_buf
@@ -866,23 +834,11 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
         let uid = (uid_hi << 16) | i_uid_lo;
         let gid = (gid_hi << 16) | i_gid_lo;
 
-        let i_atime = inode_buf
-            .get(8..12)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-            .unwrap_or(0);
+        let i_atime = inode.map(|h| h.i_atime.get()).unwrap_or(0);
 
-        let i_ctime = inode_buf
-            .get(12..16)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-            .unwrap_or(0);
+        let i_ctime = inode.map(|h| h.i_ctime.get()).unwrap_or(0);
 
-        let i_mtime = inode_buf
-            .get(16..20)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-            .unwrap_or(0);
+        let i_mtime = inode.map(|h| h.i_mtime.get()).unwrap_or(0);
 
         let kind = match i_mode & 0xF000 {
             0x4000 => crate::core::traits::NodeKind::Directory,
@@ -929,6 +885,7 @@ impl<'a, IO: RimRead + ?Sized> ExtResolver<'a, IO> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use zerocopy::IntoBytes;
 
@@ -943,11 +900,11 @@ mod tests {
         inode[32..36].copy_from_slice(&EXT_INODE_FLAG_EXTENTS.to_le_bytes());
 
         let header = ExtExtentHeader {
-            eh_magic: EXT_EXTENT_HEADER_MAGIC,
-            eh_entries: 2,
-            eh_max: 4,
-            eh_depth: 0,
-            eh_generation: 0,
+            eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+            eh_entries: 2.into(),
+            eh_max: 4.into(),
+            eh_depth: 0.into(),
+            eh_generation: 0.into(),
         };
         inode[40..52].copy_from_slice(header.as_bytes());
 
@@ -959,9 +916,9 @@ mod tests {
         let extents = resolver.read_extents(&inode).unwrap();
         assert_eq!(extents.len(), 2);
         assert_eq!(extents[0].physical_start(), 100);
-        assert_eq!({ extents[0].ee_len }, 5);
+        assert_eq!({ extents[0].ee_len.get() }, 5);
         assert_eq!(extents[1].physical_start(), 200);
-        assert_eq!({ extents[1].ee_len }, 10);
+        assert_eq!({ extents[1].ee_len.get() }, 10);
     }
 
     #[test]
@@ -975,11 +932,11 @@ mod tests {
         let child_offset = child_block_num * 4096;
 
         let child_header = ExtExtentHeader {
-            eh_magic: EXT_EXTENT_HEADER_MAGIC,
-            eh_entries: 2,
-            eh_max: 340,
-            eh_depth: 0,
-            eh_generation: 0,
+            eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+            eh_entries: 2.into(),
+            eh_max: 340.into(),
+            eh_depth: 0.into(),
+            eh_generation: 0.into(),
         };
         let ext1 = ExtExtent::new_48(0, 1000, 20);
         let ext2 = ExtExtent::new_48(20, 2000, 30);
@@ -996,11 +953,11 @@ mod tests {
         inode[32..36].copy_from_slice(&EXT_INODE_FLAG_EXTENTS.to_le_bytes());
 
         let root_header = ExtExtentHeader {
-            eh_magic: EXT_EXTENT_HEADER_MAGIC,
-            eh_entries: 1,
-            eh_max: 4,
-            eh_depth: 1,
-            eh_generation: 0,
+            eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+            eh_entries: 1.into(),
+            eh_max: 4.into(),
+            eh_depth: 1.into(),
+            eh_generation: 0.into(),
         };
         inode[40..52].copy_from_slice(root_header.as_bytes());
 
@@ -1010,9 +967,9 @@ mod tests {
         let extents = resolver.read_extents(&inode).unwrap();
         assert_eq!(extents.len(), 2);
         assert_eq!(extents[0].physical_start(), 1000);
-        assert_eq!({ extents[0].ee_len }, 20);
+        assert_eq!({ extents[0].ee_len.get() }, 20);
         assert_eq!(extents[1].physical_start(), 2000);
-        assert_eq!({ extents[1].ee_len }, 30);
+        assert_eq!({ extents[1].ee_len.get() }, 30);
     }
 
     #[test]
@@ -1020,8 +977,8 @@ mod tests {
         let large_phys = 0x1_0000_2000u64;
         let ext = ExtExtent::new_48(0, large_phys, 8);
         assert_eq!(ext.physical_start(), large_phys);
-        assert_eq!({ ext.ee_start_hi }, 1);
-        assert_eq!({ ext.ee_start_lo }, 0x2000);
+        assert_eq!({ ext.ee_start_hi.get() }, 1);
+        assert_eq!({ ext.ee_start_lo.get() }, 0x2000);
     }
 
     #[test]
@@ -1036,11 +993,11 @@ mod tests {
         inode[32..36].copy_from_slice(&EXT_INODE_FLAG_EXTENTS.to_le_bytes());
 
         let header = ExtExtentHeader {
-            eh_magic: EXT_EXTENT_HEADER_MAGIC,
-            eh_entries: 1,
-            eh_max: 4,
-            eh_depth: 0,
-            eh_generation: 0,
+            eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+            eh_entries: 1.into(),
+            eh_max: 4.into(),
+            eh_depth: 0.into(),
+            eh_generation: 0.into(),
         };
         inode[40..52].copy_from_slice(header.as_bytes());
 
@@ -1050,8 +1007,14 @@ mod tests {
         assert_eq!(uninit_ext.len(), 2);
         inode[52..64].copy_from_slice(uninit_ext.as_bytes());
 
-        // Write inode into group 0 inode table (inode 12)
         let layout = GroupLayout::compute(&meta, 0);
+        let mut descriptor = [0u8; 64];
+        descriptor[8..12].copy_from_slice(&(layout.inode_table_block as u32).to_le_bytes());
+        io.write_at(
+            (meta.first_data_block as u64 + 1) * meta.block_size as u64,
+            &descriptor[..meta.bgdt_entry_size],
+        )
+        .unwrap();
         let inode_offset = (layout.inode_table_block * 4096) + (11 * 256);
         io.write_at(inode_offset, &inode).unwrap();
 

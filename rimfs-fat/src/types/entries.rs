@@ -1,13 +1,17 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT directory entry and long filename (LFN) structures.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
+use zerocopy::byteorder::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
     FsMeta, Validate,
     core::{errors::*, resolver::*},
     {
-        attr::FatFileAttributesExt,
         attr::*,
         constant::{FAT_DOT_NAME, FAT_DOTDOT_NAME, FAT_EOD, FAT_FIRST_CLUSTER},
         meta::*,
@@ -41,17 +45,28 @@ impl FatEntries {
     }
 
     pub fn size(&self) -> usize {
-        self.entry.file_size as usize
+        self.entry.file_size.get() as usize
     }
 
     pub fn attr(&self) -> FileAttributes {
-        let mut attr = FileAttributes::from_fat_attr(self.entry.attr);
+        let fat_attr = FatFileAttributes::from_bits_truncate(self.entry.attr);
+        let mut attr = FileAttributes::from_fat_attr(fat_attr);
         attr.contiguous = self.contiguous_hint;
+        attr.modified = rimfs_core::utils::time_utils::dos_to_datetime(
+            self.entry.write_time.get(),
+            self.entry.write_date.get(),
+        );
+        attr.created = rimfs_core::utils::time_utils::dos_to_datetime(
+            self.entry.creation_time.get(),
+            self.entry.creation_date.get(),
+        );
+        attr.accessed =
+            rimfs_core::utils::time_utils::dos_date_to_datetime(self.entry.access_date.get());
         attr
     }
 
     pub fn is_dir(&self) -> bool {
-        self.entry.attr & FatAttributes::DIRECTORY.bits() != 0
+        self.entry.attr & FatFileAttributes::DIRECTORY.bits() != 0
     }
 
     pub fn first_cluster(&self) -> u32 {
@@ -72,7 +87,7 @@ impl FatEntries {
         };
         let entry = FatEntry::new(
             short_name,
-            FatAttributes::DIRECTORY.bits(),
+            FatFileAttributes::DIRECTORY.bits(),
             cluster,
             0,
             date,
@@ -91,7 +106,7 @@ impl FatEntries {
         cluster: u32,
         attr: &FileAttributes,
         existing_buf: &[u8],
-    ) -> Self {
+    ) -> FsParsingResult<Self> {
         let (date, time, fine) = utils::datetime_from_attr(attr);
         let is_taken = |cand: &[u8; 11]| -> bool {
             for chunk in existing_buf.chunks_exact(32) {
@@ -105,7 +120,7 @@ impl FatEntries {
             }
             false
         };
-        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken);
+        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken)?;
         let lfn = if is_lfn {
             utils::lfn_entries(name, &short_name)
         } else {
@@ -113,22 +128,23 @@ impl FatEntries {
         };
         let entry = FatEntry::new(
             short_name,
-            FatAttributes::DIRECTORY.bits(),
+            FatFileAttributes::DIRECTORY.bits(),
             cluster,
             0,
             date,
             time,
             fine,
         );
-        Self {
+        Ok(Self {
             lfn,
             entry,
             contiguous_hint: false,
-        }
+        })
     }
 
     pub fn file(name: &str, cluster: u32, size: u32, attr: &FileAttributes) -> Self {
         Self::file_with_existing(name, cluster, size, attr, &[])
+            .expect("An empty directory always has a free alias")
     }
 
     pub fn file_with_existing(
@@ -137,7 +153,7 @@ impl FatEntries {
         size: u32,
         attr: &FileAttributes,
         existing_buf: &[u8],
-    ) -> Self {
+    ) -> FsParsingResult<Self> {
         let (date, time, fine) = utils::datetime_from_attr(attr);
         let is_taken = |cand: &[u8; 11]| -> bool {
             for chunk in existing_buf.chunks_exact(32) {
@@ -151,7 +167,7 @@ impl FatEntries {
             }
             false
         };
-        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken);
+        let (short_name, is_lfn) = utils::to_short_name_unique(name, is_taken)?;
         let lfn = if is_lfn {
             utils::lfn_entries(name, &short_name)
         } else {
@@ -159,22 +175,22 @@ impl FatEntries {
         };
         let entry = FatEntry::new(
             short_name,
-            attr.as_fat_attr(),
+            attr.as_fat_attr().bits(),
             cluster,
             size,
             date,
             time,
             fine,
         );
-        Self {
+        Ok(Self {
             lfn,
             entry,
             contiguous_hint: attr.contiguous,
-        }
+        })
     }
 
     pub fn volume_label(name: [u8; 11]) -> Self {
-        let entry = FatEntry::new(name, FatAttributes::VOLUME_ID.bits(), 0, 0, 0, 0, 0);
+        let entry = FatEntry::new(name, FatFileAttributes::VOLUME_ID.bits(), 0, 0, 0, 0, 0);
         Self {
             lfn: vec![],
             entry,
@@ -186,7 +202,7 @@ impl FatEntries {
         let (date, time, fine) = utils::datetime_from_attr(attr);
         let entry = FatEntry::new(
             *FAT_DOT_NAME,
-            FatAttributes::DIRECTORY.bits(),
+            FatFileAttributes::DIRECTORY.bits(),
             current_cluster,
             0,
             date,
@@ -204,7 +220,7 @@ impl FatEntries {
         let (date, time, fine) = utils::datetime_from_attr(attr);
         let entry = FatEntry::new(
             *FAT_DOTDOT_NAME,
-            FatAttributes::DIRECTORY.bits(),
+            FatFileAttributes::DIRECTORY.bits(),
             parent_cluster,
             0,
             date,
@@ -303,20 +319,20 @@ impl FatEntries {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct FatEntry {
     pub name: [u8; 11],
     pub attr: u8,
     pub nt_reserved: u8,
     pub integrity_checksum: u8, // creation_time_tenth: CRC%100 + (contiguous?100:0)
-    pub creation_time: u16,
-    pub creation_date: u16,
-    pub access_date: u16,
-    pub first_cluster_high: u16,
-    pub write_time: u16,
-    pub write_date: u16,
-    pub first_cluster_low: u16,
-    pub file_size: u32,
+    pub creation_time: U16,
+    pub creation_date: U16,
+    pub access_date: U16,
+    pub first_cluster_high: U16,
+    pub write_time: U16,
+    pub write_date: U16,
+    pub first_cluster_low: U16,
+    pub file_size: U32,
 }
 
 impl FatEntry {
@@ -336,19 +352,19 @@ impl FatEntry {
             attr,
             nt_reserved: 0,
             integrity_checksum: fine,
-            creation_time: time,
-            creation_date: date,
-            access_date: date,
-            first_cluster_high: high,
-            write_time: time,
-            write_date: date,
-            first_cluster_low: low,
-            file_size: size,
+            creation_time: time.into(),
+            creation_date: date.into(),
+            access_date: date.into(),
+            first_cluster_high: high.into(),
+            write_time: time.into(),
+            write_date: date.into(),
+            first_cluster_low: low.into(),
+            file_size: size.into(),
         }
     }
 
     pub fn first_cluster(&self) -> u32 {
-        ((self.first_cluster_high as u32) << 16) | (self.first_cluster_low as u32)
+        ((self.first_cluster_high.get() as u32) << 16) | (self.first_cluster_low.get() as u32)
     }
 
     #[inline(always)]
@@ -408,16 +424,16 @@ impl Validate<FatMeta> for FatEntry {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct FatLFNEntry {
     pub order: u8,
-    pub name1: [u16; 5],
+    pub name1: [U16; 5],
     pub attr: u8,
     pub type_field: u8,
     pub checksum: u8,
-    pub name2: [u16; 6],
-    pub zero: u16,
-    pub name3: [u16; 2],
+    pub name2: [U16; 6],
+    pub zero: U16,
+    pub name3: [U16; 2],
 }
 
 impl FatLFNEntry {
@@ -427,16 +443,16 @@ impl FatLFNEntry {
         name_chunk: &[u16], // max 13
         checksum: u8,
     ) -> Self {
-        let mut name1 = [0xFFFFu16; 5];
-        let mut name2 = [0xFFFFu16; 6];
-        let mut name3 = [0xFFFFu16; 2];
+        let mut name1 = [U16::new(0xFFFF); 5];
+        let mut name2 = [U16::new(0xFFFF); 6];
+        let mut name3 = [U16::new(0xFFFF); 2];
 
         // Fill unicode name chunk
         for (i, &c) in name_chunk.iter().enumerate() {
             match i {
-                0..=4 => name1[i] = c,
-                5..=10 => name2[i - 5] = c,
-                11..=12 => name3[i - 11] = c,
+                0..=4 => name1[i] = c.into(),
+                5..=10 => name2[i - 5] = c.into(),
+                11..=12 => name3[i - 11] = c.into(),
                 _ => break,
             }
         }
@@ -444,20 +460,20 @@ impl FatLFNEntry {
         Self {
             order: if is_last { order | 0x40 } else { order },
             name1,
-            attr: FatAttributes::LFN.bits(),
+            attr: FatFileAttributes::LFN.bits(),
             type_field: 0x00,
             checksum,
             name2,
-            zero: 0,
+            zero: 0.into(),
             name3,
         }
     }
 
     pub fn extract_utf16(&self) -> [u16; 13] {
         let mut out = [0xFFFFu16; 13];
-        let name1 = self.name1;
-        let name2 = self.name2;
-        let name3 = self.name3;
+        let name1 = self.name1.map(|unit| unit.get());
+        let name2 = self.name2.map(|unit| unit.get());
+        let name3 = self.name3.map(|unit| unit.get());
         out[0..5].copy_from_slice(&name1);
         out[5..11].copy_from_slice(&name2);
         out[11..13].copy_from_slice(&name3);
@@ -471,7 +487,7 @@ impl FatLFNEntry {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, Default)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct FatEodEntry {
     pub marker: u8,
     pub reserved: [u8; 31],
@@ -490,10 +506,49 @@ impl FatEodEntry {
     }
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<FatEntry>() == 32);
+    assert!(core::mem::align_of::<FatEntry>() == 1);
+    assert!(core::mem::offset_of!(FatEntry, creation_time) == 14);
+    assert!(core::mem::offset_of!(FatEntry, first_cluster_high) == 20);
+    assert!(core::mem::offset_of!(FatEntry, first_cluster_low) == 26);
+    assert!(core::mem::offset_of!(FatEntry, file_size) == 28);
+    assert!(core::mem::size_of::<FatLFNEntry>() == 32);
+    assert!(core::mem::align_of::<FatLFNEntry>() == 1);
+    assert!(core::mem::offset_of!(FatLFNEntry, name1) == 1);
+    assert!(core::mem::offset_of!(FatLFNEntry, name2) == 14);
+    assert!(core::mem::offset_of!(FatLFNEntry, name3) == 28);
+};
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::{core::utils::checksum_utils::checksum, utils::*};
+
+    #[test]
+    fn entries_have_explicit_little_endian_bytes() {
+        let entry = FatEntry::new(
+            *b"TEST    BIN",
+            0x20,
+            0x12345678,
+            0x11223344,
+            0x5678,
+            0x1234,
+            0,
+        );
+        let bytes = entry.as_bytes();
+        assert_eq!(&bytes[14..18], &[0x34, 0x12, 0x78, 0x56]);
+        assert_eq!(&bytes[20..22], &[0x34, 0x12]);
+        assert_eq!(&bytes[26..32], &[0x78, 0x56, 0x44, 0x33, 0x22, 0x11]);
+        let lfn = FatLFNEntry::new(1, true, &[0xd83d, 0xde00, 0], 0xab);
+        assert_eq!(&lfn.as_bytes()[1..7], &[0x3d, 0xd8, 0, 0xde, 0, 0]);
+        let mut unaligned = [0; 33];
+        unaligned[1..].copy_from_slice(lfn.as_bytes());
+        let view = FatLFNEntry::ref_from_bytes(&unaligned[1..]).unwrap();
+        assert_eq!(&view.extract_utf16()[..3], &[0xd83d, 0xde00, 0]);
+        assert!(FatLFNEntry::ref_from_bytes(&unaligned[1..32]).is_err());
+    }
 
     #[test]
     fn test_lfn_entry_serialization() {
@@ -522,7 +577,7 @@ mod tests {
         let (date, time, fine) = datetime_from_attr(&attr);
         let entry = FatEntry::new(
             short,
-            attr.as_fat_attr(),
+            attr.as_fat_attr().bits(),
             /*cluster*/ 5,
             /*size*/ 42,
             date,
@@ -594,7 +649,7 @@ mod tests {
     #[test]
     fn test_sfn_only_roundtrip() {
         // ASCII 8.3 name → no LFN
-        let e = build_entries_for_name("FOO.TXT");
+        let e = build_entries_for_name("foo.txt");
         assert!(e.lfn.is_empty(), "SFN-only should not create LFN entries");
 
         let decoded = e.name().expect("decode SFN");
@@ -603,6 +658,12 @@ mod tests {
             e.name_bytes_eq("Foo.TXT"),
             "ASCII case-insensitive equality for SFN"
         );
+    }
+
+    #[test]
+    fn test_uppercase_short_name_preserves_spelling() {
+        let e = build_entries_for_name("FOO.TXT");
+        assert_eq!(e.name().unwrap(), "FOO.TXT");
     }
 
     #[test]
@@ -670,7 +731,6 @@ mod tests {
         let self_cluster: u32 = 5;
         let parent_cluster: u32 = 2;
 
-        // Build a minimal "directory head" buffer: '.', '..', EOD
         let mut buf = Vec::with_capacity(3 * 32);
         let dir_attr = FileAttributes::new_dir();
         FatEntries::dot(self_cluster, &dir_attr).to_raw_buffer(&mut buf); // slot 0
@@ -679,12 +739,11 @@ mod tests {
 
         assert!(buf.len() >= 96, "dir head too small ({} bytes)", buf.len());
 
-        // -------- slot 0: '.' --------
         let s0 = &buf[0..32];
         // SFN Name = ".          " (1 dot + 10 spaces)
         assert_eq!(&s0[0..11], b".          ");
         // ATTR = DIRECTORY only
-        assert_eq!(s0[11], FatAttributes::DIRECTORY.bits());
+        assert_eq!(s0[11], FatFileAttributes::DIRECTORY.bits());
         // NTRes = 0
         assert_eq!(s0[12], 0);
         // file_size = 0
@@ -694,12 +753,11 @@ mod tests {
         let lo = u16::from_le_bytes([s0[26], s0[27]]) as u32;
         assert_eq!((hi << 16) | lo, self_cluster, "'.' cluster mismatch");
 
-        // -------- slot 1: '..' --------
         let s1 = &buf[32..64];
         // SFN Name = "..         " (2 dots + 9 spaces)
         assert_eq!(&s1[0..11], b"..         ");
         // ATTR = DIRECTORY only
-        assert_eq!(s1[11], FatAttributes::DIRECTORY.bits());
+        assert_eq!(s1[11], FatFileAttributes::DIRECTORY.bits());
         // NTRes = 0
         assert_eq!(s1[12], 0);
         // file_size = 0
@@ -709,7 +767,6 @@ mod tests {
         let lo = u16::from_le_bytes([s1[26], s1[27]]) as u32;
         assert_eq!((hi << 16) | lo, parent_cluster, "'..' cluster mismatch");
 
-        // -------- slot 2: EOD --------
         let s2 = &buf[64..96];
         assert_eq!(s2[0], FAT_EOD, "EOD marker must be 0x00");
         assert!(
@@ -738,7 +795,7 @@ mod tests {
 
         // Builds entries: first LFN(s), then SFN
         let lfns = lfn_entries(name, &short);
-        let entry = FatEntry::new(short, attr.as_fat_attr(), 7, 123, date, time, fine);
+        let entry = FatEntry::new(short, attr.as_fat_attr().bits(), 7, 123, date, time, fine);
 
         // Serialization into a buffer
         let mut buf = Vec::new();
@@ -791,8 +848,8 @@ mod tests {
         let dd_file_size = dd.entry.file_size;
         assert_eq!(dot_file_size, 0);
         assert_eq!(dd_file_size, 0);
-        assert_eq!(dot.entry.attr, FatAttributes::DIRECTORY.bits());
-        assert_eq!(dd.entry.attr, FatAttributes::DIRECTORY.bits());
+        assert_eq!(dot.entry.attr, FatFileAttributes::DIRECTORY.bits());
+        assert_eq!(dd.entry.attr, FatFileAttributes::DIRECTORY.bits());
         assert_eq!(dot.first_cluster(), 100);
         assert_eq!(dd.first_cluster(), 50);
         assert_eq!(dot.entry.nt_reserved, 0);

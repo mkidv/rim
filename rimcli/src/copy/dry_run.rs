@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Simulated in-memory copy injector for dry-run validation.
+
 use std::path::{Component, Path, PathBuf};
 
 use rimfs_core::StdOverwritePolicy;
@@ -21,7 +23,6 @@ pub struct DryRunStdInjector {
 }
 
 impl DryRunStdInjector {
-    /// Creates a new simulation host injector.
     pub fn new(root_path: impl AsRef<Path>) -> Self {
         let root = root_path.as_ref();
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -39,7 +40,6 @@ impl DryRunStdInjector {
         self
     }
 
-    /// Sets the overwrite policy.
     pub fn set_overwrite_policy(&mut self, policy: StdOverwritePolicy) {
         self.overwrite_policy = policy;
     }
@@ -49,7 +49,6 @@ impl DryRunStdInjector {
         self.skipped_count
     }
 
-    /// Returns the canonical root path.
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }

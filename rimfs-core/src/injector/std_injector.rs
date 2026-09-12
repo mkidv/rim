@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Host filesystem injector confined to a root directory.
+
 #[cfg(feature = "std")]
 use std::{
     fs,
@@ -67,7 +69,6 @@ impl StdInjector {
         self
     }
 
-    /// Sets the overwrite policy.
     pub fn set_overwrite_policy(&mut self, policy: StdOverwritePolicy) {
         self.overwrite_policy = policy;
     }
@@ -77,18 +78,15 @@ impl StdInjector {
         self.skipped_count
     }
 
-    /// Returns the current overwrite policy.
     pub fn overwrite_policy(&self) -> StdOverwritePolicy {
         self.overwrite_policy
     }
 
-    /// Returns the canonical root path this injector is confined to.
     #[inline]
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }
 
-    /// Returns the current directory path on top of the directory context stack.
     #[inline]
     pub fn current_dir(&self) -> &Path {
         self.dir_stack.last().unwrap_or(&self.root_path)
@@ -184,7 +182,6 @@ impl FsTreeInjector<()> for StdInjector {
                         "Cannot replace regular file with directory",
                     ));
                 }
-                // Verify existing directory canonicalizes inside root
                 let canon = target.canonicalize()?;
                 if !canon.starts_with(&self.root_path) {
                     return Err(FsInjectorError::Invalid(
@@ -407,7 +404,6 @@ mod tests {
         injector.flush_current().unwrap();
         injector.flush().unwrap();
 
-        // Verify with StdResolver
         let mut resolver = StdResolver::new();
         let sub_path = temp_dir.join("sub").to_str().unwrap().to_string();
         let entries = resolver.read_dir(&sub_path).unwrap();
@@ -453,7 +449,6 @@ mod tests {
             res
         );
 
-        // Create a regular file
         let mut src = VecRimIO::new(b"hello".to_vec());
         injector
             .write_file("real_file.txt", &mut src, 5, &file_attr)
@@ -505,7 +500,6 @@ mod tests {
                 res
             );
 
-            // Verify no file was created in outside_dir
             let outside_entries: Vec<_> = fs::read_dir(&outside_dir).unwrap().collect();
             assert!(
                 outside_entries.is_empty(),
@@ -556,7 +550,6 @@ mod tests {
             .write_file("data.bin", &mut src_small, small_size as u64, &file_attr)
             .unwrap();
 
-        // Verify: size is exactly 1 KiB, content is B, no stale data
         let replaced_content = fs::read(&file_path).unwrap();
         assert_eq!(replaced_content.len(), small_size);
         assert_eq!(replaced_content, small_payload);

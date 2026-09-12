@@ -7,13 +7,15 @@ use rimio::RimIO;
 use zerocopy::FromBytes;
 
 use super::NtfsChecker;
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
-use crate::core::bitmap::BitmapOps;
+use crate::core::bitmap::{BitmapDriver, BitmapOps, SimpleBitmapMeta};
 use crate::core::checker::{Finding, FsCheckerResult, VerifyReport};
-use crate::flags::{MftRecordFlags, NtfsFileAttributes};
+use crate::flags::MftRecordFlags;
 use crate::mft;
 use crate::types::{
-    FileNameAttribute, IndexEntryHeader, IndexNodeHeader, IndexRootHeader, StandardInformation,
+    FileNameAttribute, IndexEntryHeader, IndexNodeHeader, IndexRootHeader, NtfsAttributeType,
+    StandardInformationHeader,
 };
 
 pub struct IndexFileNameCopy {
@@ -74,7 +76,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
 
         match file_name_attr(&view) {
             Some(file_name) => {
-                if file_name.file_attributes & NtfsFileAttributes::VIEW_INDEX.bits() == 0 {
+                if file_name.file_attributes.get() & NtfsFileAttributes::VIEW_INDEX.bits() == 0 {
                     rep.push(Finding::err(
                         "SYS.SECURE.FLAGS",
                         "$Secure $FILE_NAME lacks VIEW_INDEX",
@@ -85,7 +87,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
         }
 
         let sds = view
-            .find_named(ATTR_DATA, Some("$SDS"))
+            .find_named(NtfsAttributeType::Data, Some("$SDS"))
             .ok()
             .flatten()
             .and_then(|attr| attr.as_view().ok());
@@ -113,7 +115,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
 
         for name in ["$SDH", "$SII"] {
             if view
-                .find_named(ATTR_INDEX_ROOT, Some(name))
+                .find_named(NtfsAttributeType::IndexRoot, Some(name))
                 .ok()
                 .flatten()
                 .is_none()
@@ -147,7 +149,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
         };
 
         let unnamed = view
-            .find_named(ATTR_DATA, None)
+            .find_named(NtfsAttributeType::Data, None)
             .ok()
             .flatten()
             .and_then(|attr| attr.as_view().ok());
@@ -161,7 +163,10 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
             ));
         }
 
-        let bad_attr = view.find_named(ATTR_DATA, Some("$Bad")).ok().flatten();
+        let bad_attr = view
+            .find_named(NtfsAttributeType::Data, Some("$Bad"))
+            .ok()
+            .flatten();
         match bad_attr.and_then(|attr| {
             let flags = attr.header.flags;
             attr.as_view().ok().map(|view| (flags, view))
@@ -299,7 +304,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
             return;
         };
 
-        let bmp_attr = match mft_view.find_named(ATTR_BITMAP, None) {
+        let bmp_attr = match mft_view.find_named(NtfsAttributeType::Bitmap, None) {
             Ok(Some(a)) => a,
             _ => {
                 rep.push(Finding::err(
@@ -310,44 +315,83 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
             }
         };
 
-        let mut resolver = crate::resolver::NtfsResolver::new(self.io, self.meta);
-        let bmp_bytes = match bmp_attr.is_resident() {
-            true => resolver
-                .get_resident_attribute_content(bmp_attr)
-                .map(|b| b.to_vec()),
-            false => resolver.get_non_resident_attribute_content(bmp_attr),
+        let attr_view = match bmp_attr.as_view() {
+            Ok(v) => v,
+            Err(_) => {
+                rep.push(Finding::err(
+                    "SYS.MFT_BMP",
+                    "Malformed $MFT::$BITMAP attribute",
+                ));
+                return;
+            }
         };
 
-        let Ok(bitmap) = bmp_bytes else {
-            rep.push(Finding::err(
-                "SYS.MFT_BMP",
-                "Failed to read $MFT::$BITMAP stream",
-            ));
-            return;
-        };
-
-        let records_to_check = (bitmap.len() * 8).min(256);
         let mut checked = 0usize;
         let mut mismatches = 0usize;
 
-        for rec_num in 0..records_to_check as u64 {
-            let Ok(rec_data) = mft::read_record(self.io, self.meta, rec_num) else {
-                continue;
-            };
-            let Ok(rec_view) = crate::view::mft_view::MftRecordView::new(&rec_data) else {
-                continue;
-            };
-            let is_in_use = (rec_view.header().flags & MftRecordFlags::IN_USE.bits()) != 0;
-            let bit_is_set = bitmap.get_bit(rec_num as usize);
+        match attr_view {
+            crate::view::attr_view::AttrView::Resident { value, .. } => {
+                let records_to_check = (value.len() * 8).min(256);
+                for rec_num in 0..records_to_check as u64 {
+                    let Ok(rec_data) = mft::read_record(self.io, self.meta, rec_num) else {
+                        continue;
+                    };
+                    let Ok(rec_view) = crate::view::mft_view::MftRecordView::new(&rec_data) else {
+                        continue;
+                    };
+                    let is_in_use = (rec_view.header().flags & MftRecordFlags::IN_USE.bits()) != 0;
+                    let bit_is_set = value.get_bit(rec_num as usize);
 
-            if is_in_use != bit_is_set {
-                mismatches += 1;
-                rep.push(Finding::err(
-                    "SYS.MFT_BMP.MISMATCH",
-                    format!("MFT Record {rec_num}: IN_USE is {is_in_use} but $MFT::$BITMAP bit is {bit_is_set}"),
-                ));
+                    if is_in_use != bit_is_set {
+                        mismatches += 1;
+                        rep.push(Finding::err(
+                            "SYS.MFT_BMP.MISMATCH",
+                            format!("MFT Record {rec_num}: IN_USE is {is_in_use} but $MFT::$BITMAP bit is {bit_is_set}"),
+                        ));
+                    }
+                    checked += 1;
+                }
             }
-            checked += 1;
+            crate::view::attr_view::AttrView::NonResident { runlist, .. } => {
+                let mut first_lcn = None;
+                for run in runlist.iter() {
+                    if let Some(lcn) = run.lcn {
+                        first_lcn = Some(lcn);
+                        break;
+                    }
+                }
+                let Some(lcn) = first_lcn else {
+                    rep.push(Finding::err(
+                        "SYS.MFT_BMP",
+                        "$MFT::$BITMAP has no valid cluster run",
+                    ));
+                    return;
+                };
+                let offset = self.meta.lcn_to_offset(lcn);
+                let bitmap_meta =
+                    SimpleBitmapMeta::new(offset, self.meta.bytes_per_cluster as u64, 256);
+                let mut driver = BitmapDriver::new(bitmap_meta);
+
+                for rec_num in 0..256u64 {
+                    let Ok(rec_data) = mft::read_record(self.io, self.meta, rec_num) else {
+                        continue;
+                    };
+                    let Ok(rec_view) = crate::view::mft_view::MftRecordView::new(&rec_data) else {
+                        continue;
+                    };
+                    let is_in_use = (rec_view.header().flags & MftRecordFlags::IN_USE.bits()) != 0;
+                    let bit_is_set = driver.get_bit_ro(self.io, rec_num).unwrap_or(false);
+
+                    if is_in_use != bit_is_set {
+                        mismatches += 1;
+                        rep.push(Finding::err(
+                            "SYS.MFT_BMP.MISMATCH",
+                            format!("MFT Record {rec_num}: IN_USE is {is_in_use} but $MFT::$BITMAP bit is {bit_is_set}"),
+                        ));
+                    }
+                    checked += 1;
+                }
+            }
         }
 
         if mismatches == 0 {
@@ -363,18 +407,21 @@ impl<'a, IO: RimIO + ?Sized> NtfsChecker<'a, IO> {
 
 pub(crate) fn standard_info_attrs(view: &crate::view::mft_view::MftRecordView<'_>) -> Option<u32> {
     let attr = view
-        .find_named(ATTR_STANDARD_INFORMATION, None)
+        .find_named(NtfsAttributeType::StandardInformation, None)
         .ok()
         .flatten()?;
     let value = attr.as_view().ok()?.as_resident()?;
-    let info = *StandardInformation::ref_from_prefix(value).ok()?.0;
-    Some(info.file_attributes)
+    let info = StandardInformationHeader::ref_from_prefix(value).ok()?.0;
+    Some(info.file_attributes.get())
 }
 
 pub(crate) fn file_name_attr(
     view: &crate::view::mft_view::MftRecordView<'_>,
 ) -> Option<FileNameAttribute> {
-    let attr = view.find_named(ATTR_FILE_NAME, None).ok().flatten()?;
+    let attr = view
+        .find_named(NtfsAttributeType::FileName, None)
+        .ok()
+        .flatten()?;
     let value = attr.as_view().ok()?.as_resident()?;
     Some(*FileNameAttribute::ref_from_prefix(value).ok()?.0)
 }
@@ -384,7 +431,7 @@ pub(crate) fn resident_index_root_entries(
     name: &str,
 ) -> Option<alloc::vec::Vec<IndexFileNameCopy>> {
     let attr = view
-        .find_named(ATTR_INDEX_ROOT, Some(name))
+        .find_named(NtfsAttributeType::IndexRoot, Some(name))
         .ok()
         .flatten()?;
     let value = attr.as_view().ok()?.as_resident()?;
@@ -398,8 +445,8 @@ pub(crate) fn resident_index_root_entries(
     let node = *IndexNodeHeader::ref_from_prefix(&value[node_offset..])
         .ok()?
         .0;
-    let mut pos = node_offset.checked_add(node.entries_offset as usize)?;
-    let end = node_offset.checked_add(node.index_length as usize)?;
+    let mut pos = node_offset.checked_add(node.entries_offset.get() as usize)?;
+    let end = node_offset.checked_add(node.index_length.get() as usize)?;
     if pos > end || end > value.len() {
         return None;
     }
@@ -407,7 +454,7 @@ pub(crate) fn resident_index_root_entries(
     let mut entries = alloc::vec::Vec::new();
     while pos + core::mem::size_of::<IndexEntryHeader>() <= end {
         let header = *IndexEntryHeader::ref_from_prefix(&value[pos..]).ok()?.0;
-        if header.entry_length == 0 {
+        if header.entry_length.get() == 0 {
             return None;
         }
         if header.flags & crate::flags::IndexEntryFlags::LAST_ENTRY.bits() != 0 {
@@ -415,9 +462,9 @@ pub(crate) fn resident_index_root_entries(
         }
 
         let content_start = pos + core::mem::size_of::<IndexEntryHeader>();
-        let content_end = content_start.checked_add(header.content_length as usize)?;
+        let content_end = content_start.checked_add(header.content_length.get() as usize)?;
         if content_end > end
-            || (header.content_length as usize) < core::mem::size_of::<FileNameAttribute>()
+            || (header.content_length.get() as usize) < core::mem::size_of::<FileNameAttribute>()
         {
             return None;
         }
@@ -437,11 +484,11 @@ pub(crate) fn resident_index_root_entries(
         let entry_name = alloc::string::String::from_utf16(&utf16).ok()?;
         entries.push(IndexFileNameCopy {
             name: entry_name,
-            mft_reference: header.mft_reference,
+            mft_reference: header.mft_reference.get(),
             file_name,
         });
 
-        pos = pos.checked_add(header.entry_length as usize)?;
+        pos = pos.checked_add(header.entry_length.get() as usize)?;
     }
 
     Some(entries)

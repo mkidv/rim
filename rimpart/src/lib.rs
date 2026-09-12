@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimpart: MBR, Protective MBR, and GPT partition table parser and generator.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Master Boot Record (MBR) and Protective MBR parsing and formatting.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
@@ -7,12 +9,12 @@ use alloc::vec::Vec;
 
 use crate::errors::*;
 use rimio::prelude::*;
+use zerocopy::byteorder::little_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub const MBR_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 pub const PROTECTIVE_GPT: u8 = 0xEE;
 
-// ---------- Helpers "legacy" ----------
 #[inline]
 fn lba_end_inclusive(start_lba: u32, sectors: u32) -> PartResult<u64> {
     if sectors == 0 {
@@ -58,8 +60,8 @@ fn is_known_legacy_type(t: u8) -> bool {
 fn check_overlaps_legacy(entries: &[MbrEntry]) -> PartResult<()> {
     let mut segs: Vec<(u64, u64)> = Vec::with_capacity(entries.len());
     for e in entries.iter().filter(|e| !e.is_empty()) {
-        let end = lba_end_inclusive(e.start_lba, e.sectors)?;
-        segs.push((e.start_lba as u64, end));
+        let end = lba_end_inclusive(e.start_lba.get(), e.sectors.get())?;
+        segs.push((e.start_lba.get() as u64, end));
     }
     if segs.len() <= 1 {
         return Ok(());
@@ -89,19 +91,19 @@ fn check_overlaps_legacy(entries: &[MbrEntry]) -> PartResult<()> {
         if a.is_empty() {
             continue;
         }
-        let a_end = lba_end_inclusive(a.start_lba, a.sectors)?;
+        let a_end = lba_end_inclusive(a.start_lba.get(), a.sectors.get())?;
         for j in (i + 1)..n {
             let b = &entries[j];
             if b.is_empty() {
                 continue;
             }
-            let b_end = lba_end_inclusive(b.start_lba, b.sectors)?;
+            let b_end = lba_end_inclusive(b.start_lba.get(), b.sectors.get())?;
             // inclusive: overlap iff a.start <= b.end && b.start <= a.end
-            if (a.start_lba as u64) <= b_end && (b.start_lba as u64) <= a_end {
+            if (a.start_lba.get() as u64) <= b_end && (b.start_lba.get() as u64) <= a_end {
                 return Err(MbrError::Overlap {
-                    a_start: a.start_lba as u64,
+                    a_start: a.start_lba.get() as u64,
                     a_end,
-                    b_start: b.start_lba as u64,
+                    b_start: b.start_lba.get() as u64,
                     b_end,
                 }
                 .into());
@@ -112,14 +114,14 @@ fn check_overlaps_legacy(entries: &[MbrEntry]) -> PartResult<()> {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(C)] // 16 bytes, correctly aligned
+#[repr(C)] // 16 bytes, alignment 1 on every host
 pub struct MbrEntry {
     pub boot_flag: u8,
     pub starting_chs: [u8; 3],
     pub part_type: u8,
     pub end_chs: [u8; 3],
-    pub start_lba: u32,
-    pub sectors: u32,
+    pub start_lba: U32,
+    pub sectors: U32,
 }
 
 impl MbrEntry {
@@ -137,8 +139,8 @@ impl MbrEntry {
             starting_chs,
             part_type,
             end_chs,
-            start_lba,
-            sectors,
+            start_lba: start_lba.into(),
+            sectors: sectors.into(),
         }
     }
 
@@ -179,7 +181,7 @@ impl MbrEntry {
         if self.is_empty() {
             return Ok(());
         }
-        if self.sectors == 0 {
+        if self.sectors.get() == 0 {
             return Err(MbrError::ZeroSectors.into());
         }
         if !(self.boot_flag == 0x00 || self.boot_flag == 0x80) {
@@ -192,43 +194,6 @@ impl MbrEntry {
     }
 }
 
-#[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
-pub struct MbrEntryPacked {
-    pub boot_flag: u8,
-    pub starting_chs: [u8; 3],
-    pub part_type: u8,
-    pub end_chs: [u8; 3],
-    pub start_lba: u32,
-    pub sectors: u32,
-}
-
-impl MbrEntryPacked {
-    #[inline]
-    pub fn to_aligned(self) -> MbrEntry {
-        MbrEntry {
-            boot_flag: self.boot_flag,
-            starting_chs: self.starting_chs,
-            part_type: self.part_type,
-            end_chs: self.end_chs,
-            start_lba: u32::from_le(self.start_lba),
-            sectors: u32::from_le(self.sectors),
-        }
-    }
-
-    #[inline]
-    pub fn from_aligned(e: &MbrEntry) -> Self {
-        Self {
-            boot_flag: e.boot_flag,
-            starting_chs: e.starting_chs,
-            part_type: e.part_type,
-            end_chs: e.end_chs,
-            start_lba: e.start_lba.to_le(),
-            sectors: e.sectors.to_le(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MbrKind {
     Empty,
@@ -237,20 +202,19 @@ pub enum MbrKind {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct Mbr {
     pub boot_code: [u8; 446],
-    pub entries: [MbrEntryPacked; 4],
+    pub entries: [MbrEntry; 4],
     pub signature: [u8; 2],
 }
 
 impl Mbr {
     #[inline]
     pub fn new_from_entries(entries: [MbrEntry; 4]) -> Self {
-        let packed = entries.map(|e| MbrEntryPacked::from_aligned(&e));
         Self {
             boot_code: [0u8; 446],
-            entries: packed,
+            entries,
             signature: MBR_SIGNATURE,
         }
     }
@@ -274,12 +238,7 @@ impl Mbr {
 
     #[inline]
     pub fn aligned_entries(&self) -> [MbrEntry; 4] {
-        [
-            self.entries[0].to_aligned(),
-            self.entries[1].to_aligned(),
-            self.entries[2].to_aligned(),
-            self.entries[3].to_aligned(),
-        ]
+        self.entries
     }
 
     #[inline]
@@ -337,18 +296,18 @@ impl Mbr {
         if total_sectors > 0 {
             let expected = total_sectors.saturating_sub(1);
             if total_sectors > u32::MAX as u64 {
-                if first.sectors != u32::MAX {
+                if first.sectors.get() != u32::MAX {
                     return Err(MbrError::ProtectiveSizeMismatch {
                         expected: u32::MAX,
-                        got: first.sectors,
+                        got: first.sectors.get(),
                         gt_2tib: true,
                     }
                     .into());
                 }
-            } else if first.sectors != expected as u32 {
+            } else if first.sectors.get() != expected as u32 {
                 return Err(MbrError::ProtectiveSizeMismatch {
                     expected: expected as u32,
-                    got: first.sectors,
+                    got: first.sectors.get(),
                     gt_2tib: false,
                 }
                 .into());
@@ -425,7 +384,7 @@ mod tests {
     fn validate_mbr_invalid_signature() {
         let bad = Mbr {
             boot_code: [0; 446],
-            entries: [MbrEntryPacked::from_aligned(&MbrEntry::new_protective(1)); 4],
+            entries: [MbrEntry::new_protective(1); 4],
             signature: [0x00, 0x00],
         };
         assert!(&bad.validate_header().is_err());
@@ -462,5 +421,42 @@ mod tests {
         let e0 = mbr.first_non_empty().unwrap();
         assert_eq!(e0.part_type, 0x83);
         assert_eq!(e0.boot_flag, 0x80);
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<MbrEntry>() == 16);
+    assert!(core::mem::align_of::<MbrEntry>() == 1);
+    assert!(core::mem::offset_of!(MbrEntry, starting_chs) == 1);
+    assert!(core::mem::offset_of!(MbrEntry, part_type) == 4);
+    assert!(core::mem::offset_of!(MbrEntry, end_chs) == 5);
+    assert!(core::mem::offset_of!(MbrEntry, start_lba) == 8);
+    assert!(core::mem::offset_of!(MbrEntry, sectors) == 12);
+    assert!(core::mem::size_of::<Mbr>() == 512);
+    assert!(core::mem::align_of::<Mbr>() == 1);
+    assert!(core::mem::offset_of!(Mbr, entries) == 446);
+    assert!(core::mem::offset_of!(Mbr, signature) == 510);
+};
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn canonical_entry_matches_mbr_bytes_without_repacking() {
+        let entry = MbrEntry::new(0x80, [0; 3], 0x83, [0; 3], 0x12345678, 0x01020304);
+        assert_eq!(
+            &entry.as_bytes()[8..],
+            &[0x78, 0x56, 0x34, 0x12, 4, 3, 2, 1]
+        );
+        let mbr = Mbr::new_from_entries([
+            entry,
+            MbrEntry::new_empty(),
+            MbrEntry::new_empty(),
+            MbrEntry::new_empty(),
+        ]);
+        let parsed = MbrEntry::ref_from_bytes(&mbr.as_bytes()[446..462]).unwrap();
+        assert_eq!(parsed, &entry);
+        assert_eq!(&mbr.as_bytes()[510..], &[0x55, 0xaa]);
+        assert!(MbrEntry::ref_from_bytes(&entry.as_bytes()[..15]).is_err());
     }
 }

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+//! TAR archive stream injector with USTAR and GNU longlink support.
+
+use rimio::RimWriteStructExt;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -57,7 +61,6 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
         let name_bytes = name.as_bytes();
         let link_bytes = linkname.as_bytes();
 
-        // Check if name can be split into USTAR prefix (<= 155) + name (<= 100)
         let mut ustar_prefix: Option<(&str, &str)> = None;
         if name_bytes.len() > 100 {
             for (idx, &b) in name_bytes.iter().enumerate().rev() {
@@ -79,20 +82,20 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
         // If name > 100 and cannot be split via USTAR prefix, emit a GNU LongLink entry
         if name_bytes.len() > 100 && ustar_prefix.is_none() {
             let long_name_len = name_bytes.len() + 1;
-            let mut long_hdr = [0u8; TAR_BLOCK_SIZE];
-            long_hdr[..13].copy_from_slice(b"././@LongLink");
-            format_octal(&mut long_hdr[100..108], 0o644);
-            format_octal(&mut long_hdr[108..116], 0);
-            format_octal(&mut long_hdr[116..124], 0);
-            format_octal(&mut long_hdr[124..136], long_name_len as u64);
-            format_octal(&mut long_hdr[136..148], 0);
-            long_hdr[156] = GNULONGNAME;
-            long_hdr[257..263].copy_from_slice(USTAR_MAGIC);
-            long_hdr[263..265].copy_from_slice(USTAR_VERSION);
-            let chk = calculate_checksum(&long_hdr);
-            format_octal(&mut long_hdr[148..156], chk as u64);
+            let mut long_hdr = UstarHeader::default();
+            long_hdr.name[..13].copy_from_slice(b"././@LongLink");
+            format_octal(&mut long_hdr.mode, 0o644);
+            format_octal(&mut long_hdr.uid, 0);
+            format_octal(&mut long_hdr.gid, 0);
+            format_octal(&mut long_hdr.size, long_name_len as u64);
+            format_octal(&mut long_hdr.mtime, 0);
+            long_hdr.typeflag = GNULONGNAME;
+            long_hdr.magic.copy_from_slice(USTAR_MAGIC);
+            long_hdr.version.copy_from_slice(USTAR_VERSION);
+            let chk = long_hdr.calculate_checksum();
+            format_octal(&mut long_hdr.checksum, chk as u64);
 
-            self.io.write_at(self.current_offset, &long_hdr)?;
+            self.io.write_struct(self.current_offset, &long_hdr)?;
             self.current_offset += TAR_BLOCK_SIZE as u64;
 
             let padded_len = (long_name_len + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
@@ -106,20 +109,20 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
         // If linkname > 100, emit a GNU LongLink entry for the link target
         if link_bytes.len() > 100 {
             let long_link_len = link_bytes.len() + 1;
-            let mut long_hdr = [0u8; TAR_BLOCK_SIZE];
-            long_hdr[..13].copy_from_slice(b"././@LongLink");
-            format_octal(&mut long_hdr[100..108], 0o644);
-            format_octal(&mut long_hdr[108..116], 0);
-            format_octal(&mut long_hdr[116..124], 0);
-            format_octal(&mut long_hdr[124..136], long_link_len as u64);
-            format_octal(&mut long_hdr[136..148], 0);
-            long_hdr[156] = GNULONGLINK_TARGET;
-            long_hdr[257..263].copy_from_slice(USTAR_MAGIC);
-            long_hdr[263..265].copy_from_slice(USTAR_VERSION);
-            let chk = calculate_checksum(&long_hdr);
-            format_octal(&mut long_hdr[148..156], chk as u64);
+            let mut long_hdr = UstarHeader::default();
+            long_hdr.name[..13].copy_from_slice(b"././@LongLink");
+            format_octal(&mut long_hdr.mode, 0o644);
+            format_octal(&mut long_hdr.uid, 0);
+            format_octal(&mut long_hdr.gid, 0);
+            format_octal(&mut long_hdr.size, long_link_len as u64);
+            format_octal(&mut long_hdr.mtime, 0);
+            long_hdr.typeflag = GNULONGLINK_TARGET;
+            long_hdr.magic.copy_from_slice(USTAR_MAGIC);
+            long_hdr.version.copy_from_slice(USTAR_VERSION);
+            let chk = long_hdr.calculate_checksum();
+            format_octal(&mut long_hdr.checksum, chk as u64);
 
-            self.io.write_at(self.current_offset, &long_hdr)?;
+            self.io.write_struct(self.current_offset, &long_hdr)?;
             self.current_offset += TAR_BLOCK_SIZE as u64;
 
             let padded_len = (long_link_len + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
@@ -130,35 +133,35 @@ impl<'a, IO: RimIO + ?Sized> TarInjector<'a, IO> {
             self.current_offset += padded_len as u64;
         }
 
-        let mut header = [0u8; TAR_BLOCK_SIZE];
+        let mut header = UstarHeader::default();
 
         if let Some((prefix, subname)) = ustar_prefix {
             let sub_bytes = subname.as_bytes();
-            header[..sub_bytes.len()].copy_from_slice(sub_bytes);
+            header.name[..sub_bytes.len()].copy_from_slice(sub_bytes);
             let pref_bytes = prefix.as_bytes();
-            header[345..345 + pref_bytes.len()].copy_from_slice(pref_bytes);
+            header.prefix[..pref_bytes.len()].copy_from_slice(pref_bytes);
         } else {
             let name_len = name_bytes.len().min(100);
-            header[..name_len].copy_from_slice(&name_bytes[..name_len]);
+            header.name[..name_len].copy_from_slice(&name_bytes[..name_len]);
         }
 
-        format_octal(&mut header[100..108], mode as u64);
-        format_octal(&mut header[108..116], uid as u64);
-        format_octal(&mut header[116..124], gid as u64);
-        format_octal(&mut header[124..136], size);
-        format_octal(&mut header[136..148], mtime);
-        header[156] = typeflag;
+        format_octal(&mut header.mode, mode as u64);
+        format_octal(&mut header.uid, uid as u64);
+        format_octal(&mut header.gid, gid as u64);
+        format_octal(&mut header.size, size);
+        format_octal(&mut header.mtime, mtime);
+        header.typeflag = typeflag;
 
         let link_len = link_bytes.len().min(100);
-        header[157..157 + link_len].copy_from_slice(&link_bytes[..link_len]);
+        header.link_name[..link_len].copy_from_slice(&link_bytes[..link_len]);
 
-        header[257..263].copy_from_slice(USTAR_MAGIC);
-        header[263..265].copy_from_slice(USTAR_VERSION);
+        header.magic.copy_from_slice(USTAR_MAGIC);
+        header.version.copy_from_slice(USTAR_VERSION);
 
-        let chksum = calculate_checksum(&header);
-        format_octal(&mut header[148..156], chksum as u64);
+        let chksum = header.calculate_checksum();
+        format_octal(&mut header.checksum, chksum as u64);
 
-        self.io.write_at(self.current_offset, &header)?;
+        self.io.write_struct(self.current_offset, &header)?;
         self.current_offset += TAR_BLOCK_SIZE as u64;
         Ok(())
     }
@@ -200,7 +203,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
         let gid = attr.gid.unwrap_or(0);
         self.write_header(&file_name, size, mode, uid, gid, mtime, REGTYPE, "")?;
 
-        // Stream file payload
         let mut buf = [0u8; 4096];
         let mut remaining = size;
         let mut src_off = 0;
@@ -253,7 +255,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<TarHandle> for TarInjector<'a, IO> {
     }
 
     fn flush(&mut self) -> FsInjectorResult {
-        // Write two 512-byte zero blocks to finish TAR
         let trailer = [0u8; 1024];
         self.io.write_at(self.current_offset, &trailer)?;
         self.current_offset += 1024;

@@ -1,11 +1,13 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT cluster allocator and free-chain tracker.
+
 pub use crate::core::allocator::*;
 use alloc::vec::Vec;
 use rimio::prelude::*;
 
 use crate::core::fat::*;
 use crate::meta::*;
-
-// pub use crate::core::allocator::linear_allocator::LinearAllocator;
 
 #[derive(Debug, Clone)]
 pub struct FatHandle {
@@ -49,7 +51,7 @@ impl FsHandle for FatHandle {}
 pub struct FatAllocator<'a> {
     pub meta: &'a FatMeta,
     pub next_free_hint: u32,
-    pub free_count: usize,
+    pub free_count: u64,
 }
 
 impl<'a> FatAllocator<'a> {
@@ -57,9 +59,10 @@ impl<'a> FatAllocator<'a> {
         Self {
             meta,
             next_free_hint: meta.first_data_unit() + meta.system_used_clusters(),
-            free_count: meta
-                .cluster_count
-                .saturating_sub(meta.system_used_clusters()) as usize,
+            free_count: u64::from(
+                meta.cluster_count
+                    .saturating_sub(meta.system_used_clusters()),
+            ),
         }
     }
 
@@ -68,14 +71,13 @@ impl<'a> FatAllocator<'a> {
     pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO, meta: &'a FatMeta) -> FsAllocatorResult<Self> {
         let mut allocator = Self::new(meta);
 
-        // Scan for the first free cluster
         // Efficiently scan for free clusters
         let (free_count, next_hint) = FatDriver::new(meta).find_next_free(io)?;
 
-        allocator.free_count = free_count;
+        allocator.free_count = free_count as u64;
         allocator.next_free_hint = next_hint;
 
-        Ok(allocator) // Return early as we scanned everything
+        Ok(allocator)
     }
 }
 
@@ -83,48 +85,32 @@ impl<'a> FsAllocator<FatHandle> for FatAllocator<'a> {
     fn allocate<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<FatHandle> {
         crate::ensure!(count > 0, FsAllocatorError::InvalidSize);
 
-        let mut chain = RunList::new();
-        let start = self.next_free_hint;
-        let end = self.meta.last_data_unit();
-        let wrap_limit = self.meta.first_data_unit();
-
-        let mut current_search = start;
-        let mut searched_count = 0;
-        let total_units = (end - wrap_limit) + 1;
-
-        let mut driver = FatDriver::new(self.meta);
-
-        while chain.total_units() < count as u64 {
-            crate::ensure!(searched_count <= total_units, FsAllocatorError::OutOfBlocks);
-
-            // Check if cluster is free using buffered view
-            let val = driver
-                .get(io, current_search)
-                .map_err(FsAllocatorError::IO)?;
-
-            if val == 0 {
-                // Found free cluster
-                chain.push_unit(current_search as u64);
-                self.free_count = self.free_count.saturating_sub(1);
-            }
-
-            // Advance search cursor
-            current_search += 1;
-            if current_search > end {
-                current_search = self.meta.first_data_unit();
-            }
-            searched_count += 1;
+        // Prefer contiguous first
+        match self.allocate_contiguous(io, count) {
+            Ok(handle) => return Ok(handle),
+            Err(FsAllocatorError::OutOfBlocks) => {}
+            Err(e) => return Err(e),
         }
 
-        // Update the hint to the next potential free block (optimization)
-        self.next_free_hint = current_search;
+        let mut driver = FatDriver::new(self.meta);
+        let chain = driver
+            .find_free_runs(io, self.next_free_hint, count)?
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
 
-        // Write the chain to disk
         driver.write_run_list(io, &chain)?;
+        self.free_count = self.free_count.saturating_sub(count);
+        if let Some(last_run) = chain.0.last() {
+            let next_hint = (last_run.start + last_run.length) as u32;
+            self.next_free_hint = if next_hint > self.meta.last_data_unit() {
+                self.meta.first_data_unit()
+            } else {
+                next_hint
+            };
+        }
 
         Ok(FatHandle::from(chain))
     }
@@ -132,72 +118,45 @@ impl<'a> FsAllocator<FatHandle> for FatAllocator<'a> {
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<FatHandle> {
         crate::ensure!(count > 0, FsAllocatorError::InvalidSize);
 
-        let start = self.next_free_hint;
-        let end = self.meta.last_data_unit();
-        let wrap_limit = self.meta.first_data_unit();
-
+        let count_u32 = u32::try_from(count).map_err(|_| FsAllocatorError::InvalidSize)?;
         let mut driver = FatDriver::new(self.meta);
 
-        // Find contiguous range
-        let mut searched_count = 0;
-        let total_units = (end - wrap_limit) + 1;
-        let mut current = start;
+        // Search from hint, wrap to beginning if needed
+        let range_start = match driver.find_next_free_run(io, self.next_free_hint, count_u32)? {
+            Some(start) => start,
+            None if self.next_free_hint != self.meta.first_data_unit() => driver
+                .find_next_free_run(io, self.meta.first_data_unit(), count_u32)?
+                .ok_or(FsAllocatorError::OutOfBlocks)?,
+            None => return Err(FsAllocatorError::OutOfBlocks),
+        };
 
-        while searched_count < total_units {
-            let mut found_count = 0;
-            let range_start = current;
+        let mut chain = RunList::new();
+        chain.push(rimio::run::Run {
+            start: range_start as u64,
+            length: count,
+        });
+        driver.write_run_list(io, &chain)?;
 
-            for i in 0..count {
-                let check_unit = current + i as u32;
-                if check_unit > end {
-                    break;
-                }
+        self.free_count = self.free_count.saturating_sub(count);
+        let next_hint = range_start + count_u32;
+        self.next_free_hint = if next_hint > self.meta.last_data_unit() {
+            self.meta.first_data_unit()
+        } else {
+            next_hint
+        };
 
-                let val = driver.get(io, check_unit).map_err(FsAllocatorError::IO)?;
-                if val != 0 {
-                    break;
-                }
-                found_count += 1;
-            }
-
-            if found_count == count {
-                // Found it!
-                let mut chain = RunList::new();
-                chain.push(rimio::run::Run {
-                    start: range_start as u64,
-                    length: count as u64,
-                });
-                driver.write_run_list(io, &chain)?;
-
-                self.free_count = self.free_count.saturating_sub(count);
-                self.next_free_hint = range_start + count as u32;
-                if self.next_free_hint > end {
-                    self.next_free_hint = wrap_limit;
-                }
-
-                return Ok(FatHandle::from(chain));
-            }
-
-            // Advance
-            current += 1;
-            if current > end {
-                current = wrap_limit;
-            }
-            searched_count += 1;
-        }
-
-        Err(FsAllocatorError::OutOfBlocks)
+        Ok(FatHandle::from(chain))
     }
 
-    fn used_units(&self) -> usize {
-        (self.meta.cluster_count as usize).saturating_sub(self.free_count)
+    fn used_units(&self) -> u64 {
+        (self.meta.cluster_count as u64).saturating_sub(self.free_count)
     }
 
-    fn remaining_units(&self) -> usize {
+    fn remaining_units(&self) -> u64 {
         self.free_count
     }
 }

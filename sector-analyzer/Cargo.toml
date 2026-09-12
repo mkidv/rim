@@ -12,7 +12,8 @@ publish = false
 [dependencies]
 rimpart = { workspace = true, features = ["std"] }
 rimio = { workspace = true, features = ["std"] }
-rimfs = { workspace = true, features = ["std"] }
+rimimg = { workspace = true, features = ["std"] }
+rimfs = { workspace = true, features = ["std", "fat", "exfat", "ext", "ntfs", "iso"] }
 zerocopy = { version = "0.8.25", features = ["derive"] }
 memchr = "2.7"
 

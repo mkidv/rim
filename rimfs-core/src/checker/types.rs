@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Verification diagnostics, finding severity levels, and report types.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec::Vec};
 use core::cmp::Ordering;

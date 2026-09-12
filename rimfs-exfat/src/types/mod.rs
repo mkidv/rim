@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! On-disk exFAT structures and entry definitions.
+
 mod boot;
 mod entries;
 mod flags;

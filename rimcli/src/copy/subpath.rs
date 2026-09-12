@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Subpath confinement wrapper around filesystem tree injectors.
+
 use rimfs_core::allocator::FsHandle;
 use rimfs_core::errors::FsInjectorResult;
 use rimfs_core::injector::FsTreeInjector;
@@ -14,7 +16,6 @@ pub struct SubpathInjector<'a, H: FsHandle, I: FsTreeInjector<H> + ?Sized> {
 }
 
 impl<'a, H: FsHandle, I: FsTreeInjector<H> + ?Sized> SubpathInjector<'a, H, I> {
-    /// Creates a new subpath wrapper around an injector.
     pub fn new(inner: &'a mut I, subpath: &str) -> Self {
         let components = subpath
             .split('/')

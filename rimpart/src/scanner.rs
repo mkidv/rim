@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Partition table auto-detection scanner (GPT and MBR).
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -122,7 +126,6 @@ pub fn scan_disk_with_sector<IO: RimRead + ?Sized>(
     io: &mut IO,
     sector_size: u64,
 ) -> PartResult<DiskInfo> {
-    // Read raw MBR (don't fail if non-protective)
     let mbr: Mbr = io.read_struct(0)?;
     let mbr_kind = {
         if mbr.signature != mbr::MBR_SIGNATURE {
@@ -146,8 +149,8 @@ pub fn scan_disk_with_sector<IO: RimRead + ?Sized>(
         gpt_header = Some(header);
 
         for (idx, e) in entries.iter().enumerate() {
-            let start_lba = e.start_lba;
-            let end_lba = e.end_lba;
+            let start_lba = e.start_lba.get();
+            let end_lba = e.end_lba.get();
             let start_bytes = start_lba
                 .checked_mul(sector_size)
                 .ok_or(PartError::Other("start_bytes overflow"))?;
@@ -169,7 +172,7 @@ pub fn scan_disk_with_sector<IO: RimRead + ?Sized>(
                 end_lba,
                 start_bytes,
                 size_bytes,
-                attrs: e.attributes,
+                attrs: e.attributes.get(),
                 name: gpt::decode_gpt_name(&name),
             });
         }
@@ -240,7 +243,7 @@ mod tests {
 
     #[test]
     fn scan_protective_gpt() {
-        let mut buf = vec![0u8; 512 * 20_000];
+        let mut buf = alloc::vec![0u8; 512 * 20_000];
         let mut io = rimio::prelude::MemRimIO::new(&mut buf);
 
         // Protective MBR
@@ -279,6 +282,7 @@ mod tests {
         assert_eq!(info.partitions[1].name, "rootfs");
 
         // Display (smoke)
+        #[cfg(feature = "std")]
         println!("{info}");
     }
 }

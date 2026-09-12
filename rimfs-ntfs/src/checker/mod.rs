@@ -1,10 +1,9 @@
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::format;
-use rimio::RimIO;
-use zerocopy::FromBytes;
+// SPDX-License-Identifier: MIT
+
+//! NTFS filesystem consistency and metadata integrity checker.
 
 use crate::constant::*;
-use crate::core::bitmap::BitmapOps;
+use crate::core::bitmap::BitmapDriver;
 use crate::core::checker::{
     Finding, FsCheckerError, FsCheckerResult, VerifierOptionsLike, VerifyPhases, VerifyReport,
 };
@@ -12,6 +11,12 @@ use crate::core::traits::FsChecker;
 use crate::meta::NtfsMeta;
 use crate::mft;
 use crate::types::NtfsBootSector;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::format;
+use rimio::RimIO;
+use rimio::RimReadStructExt;
+use zerocopy::FromBytes;
+use zerocopy::IntoBytes;
 
 #[derive(Debug, Clone)]
 pub struct NtfsCheckerOptions {
@@ -72,21 +77,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
     type Options = NtfsCheckerOptions;
 
     fn check_boot(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
-        let mut boot_buf = [0u8; 512];
-        self.io
-            .read_at(0, &mut boot_buf)
-            .map_err(FsCheckerError::IO)?;
-
-        let boot = match NtfsBootSector::read_from_bytes(&boot_buf) {
-            Ok(b) => b,
-            Err(_) => {
-                rep.push(Finding::err(
-                    "BOOT.PRIMARY",
-                    "Failed to parse primary NTFS boot sector",
-                ));
-                return Ok(());
-            }
-        };
+        let boot: NtfsBootSector = self.io.read_struct(0).map_err(FsCheckerError::IO)?;
 
         let mut primary_valid = true;
         let oem_id = boot.oem_id;
@@ -100,7 +91,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             rep.push(Finding::info("BOOT.OEM", "NTFS OEM ID OK"));
         }
 
-        let end_marker = boot.end_marker;
+        let end_marker = boot.end_marker.get();
         if end_marker != 0xAA55 {
             rep.push(Finding::err(
                 "BOOT.SIG",
@@ -111,7 +102,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             rep.push(Finding::info("BOOT.SIG", "Boot signature 0xAA55 OK"));
         }
 
-        let bps = boot.bytes_per_sector;
+        let bps = boot.bytes_per_sector.get();
         if bps != 512 && bps != 1024 && bps != 2048 && bps != 4096 {
             rep.push(Finding::warn(
                 "BOOT.BPS",
@@ -145,26 +136,11 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
             ));
         }
 
-        // Check alternate (backup) boot sector
         let backup_offset = self.meta.backup_boot_sector_offset();
-        let mut backup_buf = [0u8; 512];
-        match self.io.read_at(backup_offset, &mut backup_buf) {
-            Ok(_) => {
-                let backup_boot = match NtfsBootSector::read_from_bytes(&backup_buf) {
-                    Ok(b) => b,
-                    Err(_) => {
-                        rep.push(Finding::err(
-                            "BOOT.BACKUP",
-                            format!(
-                                "Failed to parse alternate NTFS boot sector at offset {backup_offset}"
-                            ),
-                        ));
-                        return Ok(());
-                    }
-                };
-
+        match self.io.read_struct::<NtfsBootSector>(backup_offset) {
+            Ok(backup_boot) => {
                 let mut backup_valid = true;
-                if &backup_boot.oem_id != b"NTFS    " {
+                if backup_boot.oem_id != NTFS_BOOT_SIGNATURE {
                     rep.push(Finding::err(
                         "BOOT.BACKUP",
                         format!(
@@ -174,7 +150,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                     ));
                     backup_valid = false;
                 }
-                let backup_end_marker = backup_boot.end_marker;
+                let backup_end_marker = backup_boot.end_marker.get();
                 if backup_end_marker != 0xAA55 {
                     rep.push(Finding::err(
                         "BOOT.BACKUP",
@@ -193,8 +169,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                     ));
                 }
 
-                // Verify primary and alternate match
-                if boot_buf == backup_buf {
+                if boot.as_bytes() == backup_boot.as_bytes() {
                     rep.push(Finding::info(
                         "BOOT.MIRROR",
                         "Primary and alternate boot sectors match",
@@ -273,7 +248,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                 continue;
             }
 
-            if &raw[0..4] != b"FILE" {
+            if raw[0..4] != NTFS_FILE_SIGNATURE {
                 rep.push(Finding::err(
                     "MFT.SIG",
                     format!(
@@ -284,8 +259,10 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                 continue;
             }
 
-            let usa_ofs = u16::from_le_bytes([raw[4], raw[5]]) as usize;
-            let usa_cnt = u16::from_le_bytes([raw[6], raw[7]]) as usize;
+            let (header, _) = crate::types::MftRecordHeader::ref_from_prefix(&raw)
+                .map_err(|_| FsCheckerError::Invalid("Truncated MFT header"))?;
+            let usa_ofs = header.usa_offset.get() as usize;
+            let usa_cnt = header.usa_count.get() as usize;
             let expected_usa_cnt = (record_size / sector_size) + 1;
 
             if usa_cnt != expected_usa_cnt {
@@ -349,7 +326,7 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
                         "UPCASE.SIZE",
                         "$UpCase size OK (131072 bytes)",
                     ));
-                    if crate::system::upcase::UpcaseHandle::from_le_bytes(&upcase_bytes).is_ok() {
+                    if crate::upcase::UpcaseHandle::from_le_bytes(&upcase_bytes).is_ok() {
                         rep.push(Finding::info(
                             "UPCASE.DATA",
                             "$UpCase data stream structurally valid",
@@ -402,67 +379,63 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for NtfsChecker<'a, IO> {
     }
 
     fn check_chain(&mut self, _opt: &Self::Options, rep: &mut VerifyReport) -> FsCheckerResult<()> {
-        let mut resolver = crate::resolver::NtfsResolver::new(self.io, self.meta);
-
-        // 1. Read $Bitmap content (record 6)
-        let bitmap_bytes = match resolver.read_file_stream(MFT_RECORD_BITMAP, None) {
-            Ok(b) => b,
-            Err(e) => {
-                rep.push(Finding::err(
-                    "CHAIN.BITMAP",
-                    format!("Failed to read $Bitmap data stream: {e}"),
-                ));
-                return Ok(());
-            }
-        };
-
-        let min_expected_bytes = (self.meta.total_clusters).div_ceil(8) as usize;
-        if bitmap_bytes.len() < min_expected_bytes {
+        let min_expected_bytes = self.meta.total_clusters.div_ceil(8);
+        if self.meta.bitmap_size_bytes < min_expected_bytes {
             rep.push(Finding::warn(
                 "CHAIN.BITMAP",
                 format!(
                     "$Bitmap size {} < total cluster bytes {}",
-                    bitmap_bytes.len(),
-                    min_expected_bytes
+                    self.meta.bitmap_size_bytes, min_expected_bytes
                 ),
             ));
         } else {
             rep.push(Finding::info(
                 "CHAIN.BITMAP",
-                format!("$Bitmap data stream size OK ({} bytes)", bitmap_bytes.len()),
+                format!("$Bitmap size OK ({} bytes)", self.meta.bitmap_size_bytes),
             ));
         }
 
-        // 2. Scan records 0..16 to verify non-resident runs are marked in $Bitmap
-        let mut checked_runs = 0usize;
-        for rec_num in 0..16 {
-            if let Ok(rec) = resolver.read_mft_record(rec_num) {
-                let view = match crate::view::mft_view::MftRecordView::new(&rec) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                for attr in view.attrs().flatten() {
-                    if let Ok(crate::view::attr_view::AttrView::NonResident { runlist, .. }) =
-                        attr.as_view()
-                    {
-                        for run in runlist.iter() {
-                            if let Some(lcn) = run.lcn {
-                                checked_runs += 1;
-                                for i in 0..run.len {
-                                    let cluster = lcn + i;
-                                    let is_set = bitmap_bytes.get_bit(cluster as usize);
-                                    if !is_set {
-                                        rep.push(Finding::err(
-                                            "CHAIN.ALLOC",
-                                            format!(
-                                                "Record {rec_num} uses cluster {cluster} but marked free in $Bitmap"
-                                            ),
-                                        ));
-                                    }
+        // 1. Scan records 0..16 to collect non-resident runs
+        let mut runs_to_check = alloc::vec::Vec::new();
+        {
+            let mut resolver = crate::resolver::NtfsResolver::new(self.io, self.meta);
+            for rec_num in 0..16 {
+                if let Ok(rec) = resolver.read_mft_record(rec_num) {
+                    let view = match crate::view::mft_view::MftRecordView::new(&rec) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    for attr in view.attrs().flatten() {
+                        if let Ok(crate::view::attr_view::AttrView::NonResident {
+                            runlist, ..
+                        }) = attr.as_view()
+                        {
+                            for run in runlist.iter() {
+                                if let Some(lcn) = run.lcn {
+                                    runs_to_check.push((rec_num, lcn, run.len));
                                 }
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // 2. Verify non-resident runs are marked in $Bitmap using BitmapDriver
+        let mut driver = BitmapDriver::new(self.meta);
+        let mut checked_runs = 0usize;
+        for (rec_num, lcn, len) in runs_to_check {
+            checked_runs += 1;
+            for i in 0..len {
+                let cluster = lcn + i;
+                let is_set = driver.get_bit_ro(self.io, cluster).unwrap_or(false);
+                if !is_set {
+                    rep.push(Finding::err(
+                        "CHAIN.ALLOC",
+                        format!(
+                            "Record {rec_num} uses cluster {cluster} but marked free in $Bitmap"
+                        ),
+                    ));
                 }
             }
         }

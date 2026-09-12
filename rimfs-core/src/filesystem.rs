@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Unified filesystem driver interfaces (FsFormatter, FsInjector, FsResolver, FsChecker).
+
 use rimio::RimIO;
 
 use crate::traits::*;

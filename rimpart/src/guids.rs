@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Standard partition type GUIDs and helpers.
+
 crate::define_partition_types! {
     Esp => "EFI System Partition", [
         0x28, 0x73, 0x2A, 0xC1,

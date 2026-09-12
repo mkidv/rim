@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! File copy subsystem module.
+
 pub mod dry_run;
 pub mod endpoint;
 pub mod engine;

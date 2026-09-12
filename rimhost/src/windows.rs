@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Windows PowerShell and diskpart automation scripts.
+
 use rimgen::LayoutConfig;
 use std::path::Path;
 use std::process::Command;

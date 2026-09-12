@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Sequential run and range abstraction for contiguous extents.
+
 #[cfg(feature = "alloc")]
 use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite};
 #[cfg(feature = "alloc")]

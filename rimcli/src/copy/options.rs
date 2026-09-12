@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Overwrite policy, metadata preservation, and symlink copy options.
+
 use std::str::FromStr;
 
 /// Policy for handling entry metadata (timestamps, unix permissions/modes, ownership).

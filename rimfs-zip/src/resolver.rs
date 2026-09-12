@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 
+//! ZIP archive central directory parser and path resolver.
+
+use rimio::RimReadStructExt;
+use zerocopy::FromBytes;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{
     boxed::Box,
-    collections::BTreeMap,
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -16,13 +20,10 @@ use crate::meta::ZipMeta;
 use crate::types::*;
 use rimfs_core::errors::{FsResolverError, FsResolverResult};
 use rimfs_core::normalize_fs_path;
-use rimfs_core::resolver::{FsTreeResolver, attr::FileAttributes, attr::NodeKind};
+use rimfs_core::resolver::{FsTreeResolver, PathIndex, attr::FileAttributes, attr::NodeKind};
 use rimio::RimRead;
 use rimio::prelude::*;
 
-/// Filesystem resolver for ZIP archives and streams.
-///
-/// Parses the Central Directory into memory for fast $O(1)$ path and file resolution.
 #[inline]
 fn is_all_zeros(buf: &[u8]) -> bool {
     buf.iter().all(|&b| b == 0)
@@ -31,22 +32,32 @@ fn is_all_zeros(buf: &[u8]) -> bool {
 pub struct ZipResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     _meta: &'a ZipMeta,
-    entries: BTreeMap<String, ZipEntry>,
-    dir_children: BTreeMap<String, Vec<String>>,
+    index: PathIndex<ZipEntry>,
     status: FsResolverResult<()>,
+    payload_budget: usize,
 }
 
 impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ZipMeta) -> Self {
+        Self::with_payload_budget(io, meta, 1024 * 1024 * 1024)
+    }
+
+    /// Limit the decoded payload allocation. Compressed input uses a fixed 8 KiB scratch buffer; decoder state and metadata are separate.
+    pub fn with_payload_budget(io: &'a mut IO, meta: &'a ZipMeta, payload_budget: usize) -> Self {
         let mut resolver = Self {
             io,
             _meta: meta,
-            entries: BTreeMap::new(),
-            dir_children: BTreeMap::new(),
+            index: PathIndex::new(),
             status: Ok(()),
+            payload_budget,
         };
         resolver.status = resolver.load_central_directory();
         resolver
+    }
+
+    /// Maximum decoded payload allocation; compressed input is read in bounded chunks.
+    pub fn payload_budget(&self) -> usize {
+        self.payload_budget
     }
 
     /// Try to construct a new ZipResolver, returning an error if central directory is invalid
@@ -99,78 +110,26 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
             "End of Central Directory record not found",
         ))?;
 
-        let mut eocd_buf = [0u8; END_OF_CENTRAL_DIR_FIXED_SIZE];
-        self.io.read_at(eocd_offset, &mut eocd_buf)?;
+        let eocd_buf: ZipEocd = self.io.read_struct(eocd_offset)?;
 
-        let mut total_entries = u16::from_le_bytes([eocd_buf[10], eocd_buf[11]]) as u64;
-        let mut cd_size =
-            u32::from_le_bytes([eocd_buf[12], eocd_buf[13], eocd_buf[14], eocd_buf[15]]) as u64;
-        let mut cd_offset =
-            u32::from_le_bytes([eocd_buf[16], eocd_buf[17], eocd_buf[18], eocd_buf[19]]) as u64;
+        let mut total_entries = eocd_buf.total_entries.get() as u64;
+        let mut cd_size = eocd_buf.directory_size.get() as u64;
+        let mut cd_offset = eocd_buf.directory_offset.get() as u64;
 
-        // Check for ZIP64 EOCD Locator right before standard EOCD
         if (total_entries == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF)
             && eocd_offset >= ZIP64_LOCATOR_FIXED_SIZE as u64
         {
             let locator_offset = eocd_offset - ZIP64_LOCATOR_FIXED_SIZE as u64;
-            let mut locator_buf = [0u8; ZIP64_LOCATOR_FIXED_SIZE];
-            if self.io.read_at(locator_offset, &mut locator_buf).is_ok() {
-                let sig = u32::from_le_bytes([
-                    locator_buf[0],
-                    locator_buf[1],
-                    locator_buf[2],
-                    locator_buf[3],
-                ]);
+            if let Ok(locator_buf) = self.io.read_struct::<Zip64Locator>(locator_offset) {
+                let sig = locator_buf.signature.get();
                 if sig == ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIG {
-                    let eocd64_offset = u64::from_le_bytes([
-                        locator_buf[8],
-                        locator_buf[9],
-                        locator_buf[10],
-                        locator_buf[11],
-                        locator_buf[12],
-                        locator_buf[13],
-                        locator_buf[14],
-                        locator_buf[15],
-                    ]);
-                    let mut eocd64_buf = [0u8; ZIP64_EOCD_FIXED_SIZE];
-                    if self.io.read_at(eocd64_offset, &mut eocd64_buf).is_ok() {
-                        let sig64 = u32::from_le_bytes([
-                            eocd64_buf[0],
-                            eocd64_buf[1],
-                            eocd64_buf[2],
-                            eocd64_buf[3],
-                        ]);
+                    let eocd64_offset = locator_buf.eocd_offset.get();
+                    if let Ok(eocd64_buf) = self.io.read_struct::<Zip64Eocd>(eocd64_offset) {
+                        let sig64 = eocd64_buf.signature.get();
                         if sig64 == ZIP64_END_OF_CENTRAL_DIR_SIG {
-                            total_entries = u64::from_le_bytes([
-                                eocd64_buf[32],
-                                eocd64_buf[33],
-                                eocd64_buf[34],
-                                eocd64_buf[35],
-                                eocd64_buf[36],
-                                eocd64_buf[37],
-                                eocd64_buf[38],
-                                eocd64_buf[39],
-                            ]);
-                            cd_size = u64::from_le_bytes([
-                                eocd64_buf[40],
-                                eocd64_buf[41],
-                                eocd64_buf[42],
-                                eocd64_buf[43],
-                                eocd64_buf[44],
-                                eocd64_buf[45],
-                                eocd64_buf[46],
-                                eocd64_buf[47],
-                            ]);
-                            cd_offset = u64::from_le_bytes([
-                                eocd64_buf[48],
-                                eocd64_buf[49],
-                                eocd64_buf[50],
-                                eocd64_buf[51],
-                                eocd64_buf[52],
-                                eocd64_buf[53],
-                                eocd64_buf[54],
-                                eocd64_buf[55],
-                            ]);
+                            total_entries = eocd64_buf.total_entries.get();
+                            cd_size = eocd64_buf.directory_size.get();
+                            cd_offset = eocd64_buf.directory_offset.get();
                         }
                     }
                 }
@@ -188,43 +147,43 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
         let mut cd_pos = 0usize;
         for _ in 0..total_entries {
             let Some(cdh_end) = cd_pos.checked_add(CENTRAL_DIR_HEADER_FIXED_SIZE) else {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             };
             if cdh_end > cd_buf.len() {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             }
-            let cdh_buf = &cd_buf[cd_pos..cdh_end];
+            let cdh_buf = ZipCentralDirectoryHeader::ref_from_bytes(&cd_buf[cd_pos..cdh_end])
+                .map_err(|_| rimio::RimIOError::Invalid("Invalid ZIP central header"))?;
 
-            let sig = u32::from_le_bytes([cdh_buf[0], cdh_buf[1], cdh_buf[2], cdh_buf[3]]);
+            let sig = cdh_buf.signature.get();
             if sig != CENTRAL_DIR_HEADER_SIG {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             }
 
-            let compression_method = u16::from_le_bytes([cdh_buf[10], cdh_buf[11]]);
-            let time_dos = u16::from_le_bytes([cdh_buf[12], cdh_buf[13]]);
-            let date_dos = u16::from_le_bytes([cdh_buf[14], cdh_buf[15]]);
-            let crc32 = u32::from_le_bytes([cdh_buf[16], cdh_buf[17], cdh_buf[18], cdh_buf[19]]);
-            let comp_32 =
-                u32::from_le_bytes([cdh_buf[20], cdh_buf[21], cdh_buf[22], cdh_buf[23]]) as u64;
-            let uncomp_32 =
-                u32::from_le_bytes([cdh_buf[24], cdh_buf[25], cdh_buf[26], cdh_buf[27]]) as u64;
-            let name_len = u16::from_le_bytes([cdh_buf[28], cdh_buf[29]]) as usize;
-            let extra_len = u16::from_le_bytes([cdh_buf[30], cdh_buf[31]]) as usize;
-            let comment_len = u16::from_le_bytes([cdh_buf[32], cdh_buf[33]]) as usize;
-            let external_attr =
-                u32::from_le_bytes([cdh_buf[38], cdh_buf[39], cdh_buf[40], cdh_buf[41]]);
-            let lfh_32 =
-                u32::from_le_bytes([cdh_buf[42], cdh_buf[43], cdh_buf[44], cdh_buf[45]]) as u64;
+            if cdh_buf.flags.get() & 0x41 != 0 {
+                return Err(FsResolverError::Unsupported);
+            }
+            let compression_method = cdh_buf.compression_method.get();
+            let time_dos = cdh_buf.mtime.get();
+            let date_dos = cdh_buf.mdate.get();
+            let crc32 = cdh_buf.crc32.get();
+            let comp_32 = cdh_buf.compressed_size.get() as u64;
+            let uncomp_32 = cdh_buf.uncompressed_size.get() as u64;
+            let name_len = cdh_buf.name_len.get() as usize;
+            let extra_len = cdh_buf.extra_len.get() as usize;
+            let comment_len = cdh_buf.comment_len.get() as usize;
+            let external_attr = cdh_buf.external_attributes.get();
+            let lfh_32 = cdh_buf.local_header_offset.get() as u64;
 
             let name_start = cdh_end;
             let Some(name_end) = name_start.checked_add(name_len) else {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             };
             let Some(extra_end) = name_end.checked_add(extra_len) else {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             };
             if extra_end > cd_buf.len() {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             }
 
             let name_buf = &cd_buf[name_start..name_end];
@@ -262,35 +221,13 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
 
             parse_extra_fields(extra_buf, &mut zip_entry, false);
 
-            self.entries.insert(name_str, zip_entry);
+            self.index.insert_with_kind(&name_str, zip_entry, is_dir);
 
             let Some(next_pos) = extra_end.checked_add(comment_len) else {
-                break;
+                return Err(FsResolverError::Invalid("Incomplete central directory"));
             };
             cd_pos = next_pos;
         }
-
-        // Build O(1) parent -> children index
-        let mut dir_children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for key in self.entries.keys() {
-            if key.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = key.split('/').collect();
-            for i in 0..parts.len() {
-                let parent = if i == 0 {
-                    String::new()
-                } else {
-                    parts[..i].join("/")
-                };
-                let child = parts[i].to_string();
-                let children = dir_children.entry(parent).or_default();
-                if !children.contains(&child) {
-                    children.push(child);
-                }
-            }
-        }
-        self.dir_children = dir_children;
 
         Ok(())
     }
@@ -305,18 +242,17 @@ impl<'a, IO: RimRead + ?Sized> ZipResolver<'a, IO> {
             "Local File Header exceeds archive bounds",
         )?;
 
-        let mut lfh_buf = [0u8; LOCAL_FILE_HEADER_FIXED_SIZE];
-        self.io.read_at(entry.local_header_offset, &mut lfh_buf)?;
+        let lfh_buf: ZipLocalFileHeader = self.io.read_struct(entry.local_header_offset)?;
 
-        let sig = u32::from_le_bytes([lfh_buf[0], lfh_buf[1], lfh_buf[2], lfh_buf[3]]);
+        let sig = lfh_buf.signature.get();
         if sig != LOCAL_FILE_HEADER_SIG {
             return Err(FsResolverError::Invalid(
                 "Invalid Local File Header signature",
             ));
         }
 
-        let name_len = u16::from_le_bytes([lfh_buf[26], lfh_buf[27]]) as u64;
-        let extra_len = u16::from_le_bytes([lfh_buf[28], lfh_buf[29]]) as u64;
+        let name_len = lfh_buf.name_len.get() as u64;
+        let extra_len = lfh_buf.extra_len.get() as u64;
         let data_offset = entry
             .local_header_offset
             .checked_add(LOCAL_FILE_HEADER_FIXED_SIZE as u64)
@@ -340,30 +276,30 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
         if self.status.is_err() {
             return false;
         }
-        let clean = normalize_fs_path(path);
-        if clean.is_empty() {
-            return true;
-        }
-        self.entries.contains_key(clean) || self.dir_children.contains_key(clean)
+        self.index.contains_path(path)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         self.status?;
         let clean = normalize_fs_path(path);
-        if let Some(children) = self.dir_children.get(clean) {
-            return Ok(children.clone());
+        let trimmed = clean.trim_end_matches('/');
+        if self
+            .index
+            .get(trimmed)
+            .is_some_and(|entry| !entry.is_directory())
+        {
+            return Err(FsResolverError::Invalid("Path is not a directory"));
         }
-        if clean.is_empty() || self.entries.contains_key(clean) {
-            return Ok(Vec::new());
-        }
-        Err(FsResolverError::NotFound)
+        self.index
+            .children(trimmed)
+            .ok_or(FsResolverError::NotFound)
     }
 
     fn open_file<'c>(&'c mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'c>> {
         self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
-            .entries
+            .index
             .get(clean)
             .cloned()
             .ok_or(FsResolverError::NotFound)?;
@@ -375,6 +311,21 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
         let (data_offset, comp_size) = self.get_data_location(&entry)?;
 
         if entry.compression_method == METHOD_STORE {
+            if comp_size != entry.uncompressed_size {
+                return Err(FsResolverError::Invalid("Stored size mismatch"));
+            }
+            let mut scratch = [0u8; 8192];
+            let mut hasher = crc32fast::Hasher::new();
+            let mut done = 0u64;
+            while done < comp_size {
+                let n = (comp_size - done).min(scratch.len() as u64) as usize;
+                self.io.read_at(data_offset + done, &mut scratch[..n])?;
+                hasher.update(&scratch[..n]);
+                done += n as u64;
+            }
+            if hasher.finalize() != entry.crc32 {
+                return Err(FsResolverError::Invalid("CRC32 checksum mismatch"));
+            }
             return Ok(Box::new(ExtentRimRead::from_contiguous(
                 &mut *self.io,
                 data_offset,
@@ -384,25 +335,20 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
 
         #[cfg(feature = "deflate")]
         if entry.compression_method == METHOD_DEFLATE {
-            let raw_len = usize::try_from(comp_size)
-                .map_err(|_| FsResolverError::Invalid("Compressed entry is too large"))?;
-            let mut raw_bytes = vec![0u8; raw_len];
-            self.io.read_at(data_offset, &mut raw_bytes)?;
-
-            let budget = usize::try_from(entry.uncompressed_size)
-                .map_err(|_| FsResolverError::Invalid("Uncompressed size too large"))?
-                .min(1024 * 1024 * 1024); // 1GB memory limit
-
-            let decompressed =
-                miniz_oxide::inflate::decompress_to_vec_with_limit(&raw_bytes, budget).map_err(
-                    |_| FsResolverError::Invalid("Deflate decompression failed or exceeded budget"),
-                )?;
+            let output_len = usize::try_from(entry.uncompressed_size)
+                .map_err(|_| FsResolverError::Invalid("Uncompressed size too large"))?;
+            if output_len > self.payload_budget {
+                return Err(FsResolverError::Invalid(
+                    "ZIP payload exceeds memory budget",
+                ));
+            }
+            let decompressed = inflate_payload(self.io, data_offset, comp_size, output_len)?;
 
             if decompressed.len() as u64 != entry.uncompressed_size {
                 return Err(FsResolverError::Invalid("Decompressed size mismatch"));
             }
 
-            if entry.crc32 != 0 {
+            {
                 let mut hasher = crc32fast::Hasher::new();
                 hasher.update(&decompressed);
                 if hasher.finalize() != entry.crc32 {
@@ -421,7 +367,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
         self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
-            .entries
+            .index
             .get(clean)
             .cloned()
             .ok_or(FsResolverError::NotFound)?;
@@ -430,64 +376,26 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
             return Err(FsResolverError::Invalid("Entry is not a symbolic link"));
         }
 
-        let (data_offset, comp_size) = self.get_data_location(&entry)?;
-        let raw_len = usize::try_from(comp_size)
-            .map_err(|_| FsResolverError::Invalid("Symlink target is too large"))?;
-        let mut raw_bytes = vec![0; raw_len];
-        self.io.read_at(data_offset, &mut raw_bytes)?;
-
-        let target_bytes = if entry.compression_method == METHOD_STORE {
-            raw_bytes
-        } else if entry.compression_method == METHOD_DEFLATE {
-            #[cfg(feature = "deflate")]
-            {
-                let budget = usize::try_from(entry.uncompressed_size)
-                    .map_err(|_| FsResolverError::Invalid("Symlink target too large"))?
-                    .min(65536);
-                let decompressed =
-                    miniz_oxide::inflate::decompress_to_vec_with_limit(&raw_bytes, budget)
-                        .map_err(|_| {
-                            FsResolverError::Invalid(
-                                "Deflate decompression of symlink target failed",
-                            )
-                        })?;
-                if decompressed.len() as u64 != entry.uncompressed_size {
-                    return Err(FsResolverError::Invalid(
-                        "Decompressed symlink size mismatch",
-                    ));
-                }
-                if entry.crc32 != 0 {
-                    let mut hasher = crc32fast::Hasher::new();
-                    hasher.update(&decompressed);
-                    if hasher.finalize() != entry.crc32 {
-                        return Err(FsResolverError::Invalid("Symlink CRC32 checksum mismatch"));
-                    }
-                }
-                decompressed
-            }
-            #[cfg(not(feature = "deflate"))]
-            return Err(FsResolverError::Invalid(
-                "Deflate decompression not enabled",
-            ));
-        } else {
-            return Err(FsResolverError::Invalid(
-                "Unsupported compression method for symlink",
-            ));
-        };
-
-        let target_str = core::str::from_utf8(&target_bytes)
-            .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 symlink target"))?;
-        Ok(target_str.to_string())
+        let mut reader = self.open_file(path)?;
+        let size = reader.total_size()?;
+        if size > 65536 {
+            return Err(FsResolverError::Invalid("Symlink target exceeds limit"));
+        }
+        let mut target = vec![0; size as usize];
+        reader.read_at(0, &mut target)?;
+        String::from_utf8(target)
+            .map_err(|_| FsResolverError::Invalid("Invalid UTF-8 symlink target"))
     }
 
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
         self.status?;
         let clean = normalize_fs_path(path);
-        if clean.is_empty() {
+        let trimmed = clean.trim_end_matches('/');
+        if trimmed.is_empty() {
             return Ok(FileAttributes::new_dir());
         }
 
-        if let Some(entry) = self.entries.get(clean) {
+        if let Some(entry) = self.index.get(trimmed) {
             let kind = if entry.is_symbolic_link() {
                 NodeKind::Symlink
             } else if entry.is_directory() {
@@ -502,6 +410,12 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
                 _ => FileAttributes::new_file(),
             };
 
+            let dos_attr = (entry.external_attributes & 0xFF) as u8;
+            attr.read_only = dos_attr & 0x01 != 0;
+            attr.hidden = dos_attr & 0x02 != 0;
+            attr.system = dos_attr & 0x04 != 0;
+            attr.archive = dos_attr & 0x20 != 0;
+
             attr.mode = entry.unix_mode;
             attr.uid = entry.uid;
             attr.gid = entry.gid;
@@ -510,7 +424,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for ZipResolver<'a, IO> {
             return Ok(attr);
         }
 
-        if self.dir_children.contains_key(clean) {
+        if self.index.is_dir(trimmed) {
             return Ok(FileAttributes::new_dir());
         }
 
@@ -531,4 +445,81 @@ fn checked_region_len(
         return Err(FsResolverError::Invalid(msg));
     }
     usize::try_from(len).map_err(|_| FsResolverError::Invalid(msg))
+}
+
+/// Retain decoded bytes for random access without materializing compressed input.
+#[cfg(feature = "deflate")]
+fn inflate_payload<IO: RimRead + ?Sized>(
+    io: &mut IO,
+    offset: u64,
+    compressed_len: u64,
+    output_len: usize,
+) -> FsResolverResult<Vec<u8>> {
+    use miniz_oxide::inflate::{
+        TINFLStatus,
+        core::{DecompressorOxide, decompress, inflate_flags::*},
+    };
+    let mut state = DecompressorOxide::new();
+    let mut output = vec![0; output_len];
+    let mut input = [0u8; 8192];
+    let (mut loaded, mut start, mut end, mut written) = (0u64, 0usize, 0usize, 0usize);
+    loop {
+        if start == end && loaded < compressed_len {
+            end = (compressed_len - loaded).min(input.len() as u64) as usize;
+            io.read_at(offset + loaded, &mut input[..end])?;
+            loaded += end as u64;
+            start = 0;
+        }
+        let flags = TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF
+            | if loaded < compressed_len {
+                TINFL_FLAG_HAS_MORE_INPUT
+            } else {
+                0
+            };
+        let (status, consumed, produced) =
+            decompress(&mut state, &input[start..end], &mut output, written, flags);
+        start += consumed;
+        written += produced;
+        match status {
+            TINFLStatus::Done
+                if written == output_len && start == end && loaded == compressed_len =>
+            {
+                return Ok(output);
+            }
+            TINFLStatus::NeedsMoreInput if consumed != 0 || produced != 0 => {}
+            _ => {
+                return Err(FsResolverError::Invalid(
+                    "Deflate stream or declared size is invalid",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "deflate"))]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn bounded_input_decodes_chunks_and_enforces_sizes() {
+        let mut seed = 7u32;
+        let random: Vec<u8> = (0..50000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        for data in [Vec::new(), vec![42; 50000], random] {
+            let mut compressed = miniz_oxide::deflate::compress_to_vec(&data, 6);
+            let size = compressed.len() as u64;
+            let mut io = rimio::MemRimIO::new(&mut compressed);
+            assert_eq!(inflate_payload(&mut io, 0, size, data.len()).unwrap(), data);
+            assert!(inflate_payload(&mut io, 0, size, data.len() + 1).is_err());
+            if !data.is_empty() {
+                assert!(inflate_payload(&mut io, 0, size, data.len() - 1).is_err());
+            }
+            assert!(inflate_payload(&mut io, 0, size - 1, data.len()).is_err());
+        }
+    }
 }

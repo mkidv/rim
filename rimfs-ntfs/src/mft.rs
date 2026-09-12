@@ -9,9 +9,11 @@ use alloc::{vec, vec::Vec};
 use rimio::errors::{RimIOError, RimIOResult};
 use zerocopy::FromBytes;
 
+use crate::constant::MFT_RECORD_USNJRNL;
 use crate::core::allocator::{FsAllocator, FsAllocatorError, FsAllocatorResult, FsHandle};
+use crate::core::bitmap::{BitmapDriver, SimpleBitmapMeta};
 use crate::meta::NtfsMeta;
-use crate::types::MftRecordHeader;
+use crate::types::{MftRecordHeader, NtfsAttributeType};
 use crate::utils::decode_usa_fixup;
 use rimio::{RimIO, RimRead};
 
@@ -20,6 +22,32 @@ use rimio::{RimIO, RimRead};
 pub struct MftHandle(pub u64);
 
 impl FsHandle for MftHandle {}
+
+/// Parse MFT record reference into record number and sequence.
+pub fn parse_mft_reference(reference: u64) -> (u64, u16) {
+    let record_number = reference & 0x0000FFFFFFFFFFFF;
+    let sequence = (reference >> 48) as u16;
+    (record_number, sequence)
+}
+
+/// Build MFT reference from record number and sequence.
+pub fn build_mft_reference(record_number: u64, sequence: u16) -> u64 {
+    (record_number & 0x0000FFFFFFFFFFFF) | ((sequence as u64) << 48)
+}
+
+/// Returns the canonical sequence number for an MFT record number.
+pub fn mft_record_sequence_number(mft_num: u64) -> u16 {
+    match mft_num {
+        0 | 1 => 1,
+        2..=15 => mft_num as u16,
+        _ => 1,
+    }
+}
+
+/// Build an MFT reference using the canonical sequence number.
+pub fn system_file_mft_reference(mft_num: u64) -> u64 {
+    build_mft_reference(mft_num, mft_record_sequence_number(mft_num))
+}
 
 /// Read an MFT record directly using contiguous offset calculation
 pub fn read_record_direct<IO: RimRead + ?Sized>(
@@ -32,7 +60,7 @@ pub fn read_record_direct<IO: RimRead + ?Sized>(
     io.read_at(offset, &mut buf)?;
 
     // Simple validation
-    let header = MftRecordHeader::read_from_prefix(&buf)
+    let header = MftRecordHeader::ref_from_prefix(&buf)
         .map_err(|_| RimIOError::Invalid("Failed to read MFT header"))?
         .0;
 
@@ -53,7 +81,7 @@ pub fn extract_mft_runs(rec0: &[u8]) -> RimIOResult<Vec<crate::view::runlist::Nt
     let view = crate::view::mft_view::MftRecordView::new(rec0)
         .map_err(|_| RimIOError::Invalid("Failed to parse Record 0"))?;
     let attr = view
-        .find(crate::constant::ATTR_DATA)
+        .find(NtfsAttributeType::Data)
         .map_err(|_| RimIOError::Invalid("Failed to find $DATA in Record 0"))?
         .ok_or(RimIOError::Invalid("Record 0 has no $DATA"))?;
 
@@ -118,7 +146,7 @@ pub fn read_record_from_runs<IO: RimRead + ?Sized>(
         ));
     }
 
-    let header = MftRecordHeader::read_from_prefix(&buf)
+    let header = MftRecordHeader::ref_from_prefix(&buf)
         .map_err(|_| RimIOError::Invalid("Failed to read MFT header"))?
         .0;
 
@@ -145,20 +173,19 @@ pub fn read_record<IO: RimRead + ?Sized>(
         return read_record_direct(io, meta, 0);
     }
 
-    if let Ok(rec0) = read_record_direct(io, meta, 0)
-        && let Ok(runs) = extract_mft_runs(&rec0)
-        && !runs.is_empty()
-    {
-        return read_record_from_runs(io, meta, record_number, &runs);
+    let rec0 = read_record_direct(io, meta, 0)?;
+    let runs = extract_mft_runs(&rec0)?;
+    if runs.is_empty() {
+        return Err(RimIOError::Invalid("Missing MFT runs"));
     }
-
-    read_record_direct(io, meta, record_number)
+    read_record_from_runs(io, meta, record_number, &runs)
 }
 
 /// Write an MFT record by its record number
 ///
 /// Note: caller is responsible for applying USA fixup to the record buffer
 /// if it wasn't already done (usually done by NtfsMftRecord::to_raw_buffer).
+#[allow(dead_code)]
 pub fn write_record<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &NtfsMeta,
@@ -172,8 +199,7 @@ pub fn write_record<IO: RimIO + ?Sized>(
 
 /// Allocator for MFT record numbers with bitmap awareness
 pub struct MftAllocator<'a> {
-    bitmap: Vec<u8>,
-    bitmap_offset: u64,
+    driver: BitmapDriver<SimpleBitmapMeta>,
     allocated_records: Vec<u64>,
     next_mft_record: u64,
     meta: &'a NtfsMeta,
@@ -181,9 +207,9 @@ pub struct MftAllocator<'a> {
 
 impl<'a> MftAllocator<'a> {
     pub fn new(meta: &'a NtfsMeta, next_mft_record: u64) -> Self {
+        let bitmap_meta = SimpleBitmapMeta::new(0, 0, meta.reserved_mft_records);
         Self {
-            bitmap: Vec::new(),
-            bitmap_offset: 0,
+            driver: BitmapDriver::new(bitmap_meta),
             allocated_records: Vec::new(),
             next_mft_record,
             meta,
@@ -199,7 +225,7 @@ impl<'a> MftAllocator<'a> {
         let view = crate::view::mft_view::MftRecordView::new(&rec0)
             .map_err(|_| FsAllocatorError::Other("Failed to parse Record 0"))?;
         let attr = view
-            .find(crate::constant::ATTR_BITMAP)
+            .find(NtfsAttributeType::Bitmap)
             .map_err(|_| FsAllocatorError::Other("Failed to find $BITMAP in Record 0"))?
             .ok_or(FsAllocatorError::Other("Record 0 has no $BITMAP"))?;
 
@@ -225,27 +251,19 @@ impl<'a> MftAllocator<'a> {
         }
         let lcn = first_lcn.ok_or(FsAllocatorError::Other("$BITMAP has no valid cluster run"))?;
         let offset = meta.lcn_to_offset(lcn);
+        let cluster_bytes = meta.bytes_per_cluster as u64;
 
-        let cluster_bytes = meta.bytes_per_cluster as usize;
-        let mut bitmap = vec![0u8; cluster_bytes];
-        io.read_at(offset, &mut bitmap)
-            .map_err(FsAllocatorError::IO)?;
+        let bitmap_meta = SimpleBitmapMeta::new(offset, cluster_bytes, meta.reserved_mft_records);
+        let mut driver = BitmapDriver::new(bitmap_meta);
 
         // Find initial next_mft_record: first free bit >= MFT_RECORD_USNJRNL + 1 (28)
-        let mut next_mft_record = crate::constant::MFT_RECORD_USNJRNL + 1;
-        let total_bits = (bitmap.len() * 8) as u64;
-        while next_mft_record < total_bits && next_mft_record < meta.reserved_mft_records {
-            let byte_idx = (next_mft_record / 8) as usize;
-            let bit_idx = (next_mft_record % 8) as u8;
-            if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
-                break;
-            }
-            next_mft_record += 1;
-        }
+        let next_mft_record = driver
+            .find_next_free_ro(io, MFT_RECORD_USNJRNL + 1, 1)
+            .map_err(FsAllocatorError::IO)?
+            .unwrap_or(meta.reserved_mft_records);
 
         Ok(Self {
-            bitmap,
-            bitmap_offset: offset,
+            driver,
             allocated_records: Vec::new(),
             next_mft_record,
             meta,
@@ -253,10 +271,9 @@ impl<'a> MftAllocator<'a> {
     }
 
     /// Flush the modified bitmap back to disk.
-    pub fn flush<IO: RimIO + ?Sized>(&self, io: &mut IO) -> FsAllocatorResult<()> {
-        if self.bitmap_offset > 0 && !self.bitmap.is_empty() {
-            io.write_at(self.bitmap_offset, &self.bitmap)
-                .map_err(FsAllocatorError::IO)?;
+    pub fn flush<IO: RimIO + ?Sized>(&mut self, io: &mut IO) -> FsAllocatorResult<()> {
+        if self.driver.meta.size > 0 {
+            self.driver.flush(io).map_err(FsAllocatorError::IO)?;
         }
         Ok(())
     }
@@ -266,62 +283,78 @@ impl<'a> FsAllocator<MftHandle> for MftAllocator<'a> {
     fn allocate<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<MftHandle> {
         self.allocate_contiguous(io, count)
     }
 
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
-        _io: &mut IO,
-        count: usize,
+        io: &mut IO,
+        count: u64,
     ) -> FsAllocatorResult<MftHandle> {
-        if self.bitmap.is_empty() {
+        if self.driver.meta.size == 0 {
             let start = self.next_mft_record;
-            self.next_mft_record += count as u64;
+            self.next_mft_record += count;
             return Ok(MftHandle(start));
         }
 
-        let total_bits = (self.bitmap.len() * 8) as u64;
-        let mut curr = self.next_mft_record;
+        let start = self
+            .driver
+            .find_next_free(io, self.next_mft_record, count)
+            .map_err(FsAllocatorError::IO)?
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
 
-        'outer: while curr + count as u64 <= total_bits
-            && curr + count as u64 <= self.meta.reserved_mft_records
-        {
-            for i in 0..count {
-                let rec = curr + i as u64;
-                let byte_idx = (rec / 8) as usize;
-                let bit_idx = (rec % 8) as u8;
-                if (self.bitmap[byte_idx] & (1 << bit_idx)) != 0 {
-                    curr = rec + 1;
-                    continue 'outer;
-                }
-            }
-
-            let start = curr;
-            for i in 0..count {
-                let rec = start + i as u64;
-                let byte_idx = (rec / 8) as usize;
-                let bit_idx = (rec % 8) as u8;
-                self.bitmap[byte_idx] |= 1 << bit_idx;
-                self.allocated_records.push(rec);
-            }
-            self.next_mft_record = start + count as u64;
-            return Ok(MftHandle(start));
+        if start + count > self.meta.reserved_mft_records {
+            return Err(FsAllocatorError::OutOfBlocks);
         }
 
-        Err(FsAllocatorError::OutOfBlocks)
+        self.driver
+            .set_bits_range(io, start, count, true)
+            .map_err(FsAllocatorError::IO)?;
+
+        for i in 0..count {
+            self.allocated_records.push(start + i);
+        }
+        self.next_mft_record = start + count;
+        Ok(MftHandle(start))
     }
 
-    fn used_units(&self) -> usize {
+    fn used_units(&self) -> u64 {
         if !self.allocated_records.is_empty() {
-            self.allocated_records.len()
+            self.allocated_records.len() as u64
         } else {
-            self.next_mft_record as usize
+            self.next_mft_record
         }
     }
 
-    fn remaining_units(&self) -> usize {
-        (self.meta.reserved_mft_records - self.next_mft_record) as usize
+    fn remaining_units(&self) -> u64 {
+        self.meta
+            .reserved_mft_records
+            .saturating_sub(self.next_mft_record)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mft_reference() {
+        let record_num = 12345u64;
+        let seq = 7u16;
+
+        let reference = build_mft_reference(record_num, seq);
+        let (parsed_num, parsed_seq) = parse_mft_reference(reference);
+
+        assert_eq!(parsed_num, record_num);
+        assert_eq!(parsed_seq, seq);
+    }
+
+    #[test]
+    fn test_system_file_mft_reference() {
+        assert_eq!(system_file_mft_reference(0), build_mft_reference(0, 1));
+        assert_eq!(system_file_mft_reference(5), build_mft_reference(5, 5));
+    }
+}
+

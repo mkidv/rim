@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Byte and sector size parsing and representation.
+
 #[cfg(feature = "std")]
 use crate::errors::GenResult;
 use crate::errors::{LayoutError, LayoutResult};

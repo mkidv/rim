@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Sparse in-memory overlay and copy-on-write storage implementation.
+
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, collections::BTreeMap};
 
@@ -687,7 +691,7 @@ fn test_sparse_rimio_shrink_does_not_resurrect_data() {
 
 #[test]
 fn test_overlay_rimio_reads_base_and_captures_writes() {
-    let mut base_data = vec![0x11u8; 8192];
+    let mut base_data = alloc::vec![0x11u8; 8192];
     let mut base_io = crate::MemRimIO::new(&mut base_data);
 
     let mut overlay = OverlayRimIOImpl::<_, 4096>::new(&mut base_io, 8192);
@@ -705,7 +709,6 @@ fn test_overlay_rimio_reads_base_and_captures_writes() {
     assert_eq!(overlay.allocated_pages(), 1);
     assert_eq!(overlay.allocated_bytes(), 4096);
 
-    // Read back modified range
     let mut modified = [0u8; 8];
     overlay.read_at(98, &mut modified).unwrap();
     assert_eq!(modified, [0x11, 0x11, 0x99, 0x99, 0x99, 0x99, 0x11, 0x11]);
@@ -716,13 +719,12 @@ fn test_overlay_rimio_reads_base_and_captures_writes() {
     assert_eq!(p1_buf, [0x11; 16]);
     assert_eq!(overlay.allocated_pages(), 1);
 
-    // Verify underlying base data was NEVER modified
     assert!(base_data.iter().all(|&b| b == 0x11));
 }
 
 #[test]
 fn test_overlay_rimio_partition_offset() {
-    let mut base_data = vec![0xAAu8; 16384];
+    let mut base_data = alloc::vec![0xAAu8; 16384];
     let mut base_io = crate::MemRimIO::new(&mut base_data);
 
     let mut overlay = OverlayRimIOImpl::<_, 4096>::new(&mut base_io, 16384);

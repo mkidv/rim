@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Convenience macros for I/O operations and assertions.
+
 /// Automatically implements read functions for primitive types on RimRead
 #[macro_export]
 macro_rules! RimRead_impl_primitive_r {

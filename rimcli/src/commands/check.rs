@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to verify filesystem and partition table integrity.
+
 use anyhow::Context;
 use colored::Colorize;
 use rimfs::{FsChecker, core::checker::ReportDisplayOpts, exfat::*, ext::*, fat::*, ntfs::*};
@@ -38,7 +40,6 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
 
     let mut io = StdRimIO::new(&mut file);
 
-    // 1. Scan Disk (GPT / MBR)
     let scan = rimpart::scan_disk_with_sector(&mut io, 512)
         .map_err(|e| anyhow::anyhow!("Failed to scan disk: {}", e))?;
 
@@ -61,7 +62,6 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
         let offset = p.start_lba * 512;
         io.set_offset(offset);
 
-        // Try NTFS
         if let Ok(meta) = NtfsMeta::from_io(&mut io) {
             println!("Detected {} on partition {}", "NTFS".cyan(), i);
             let mut checker = NtfsChecker::new(&mut io, &meta);
@@ -89,7 +89,6 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
             continue;
         }
 
-        // Try ExFAT
         if let Ok(meta) = ExFatMeta::from_io(&mut io) {
             println!("Detected {} on partition {}", "ExFAT".cyan(), i);
             let mut checker = ExFatChecker::new(&mut io, &meta);
@@ -117,7 +116,6 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
             continue;
         }
 
-        // Try Ext4
         if let Ok(meta) = ExtMeta::from_io(&mut io) {
             println!("Detected {} on partition {}", "Ext4".cyan(), i);
             let mut checker = ExtChecker::new(&mut io, &meta);
@@ -145,7 +143,6 @@ pub fn run(image: PathBuf, _verbose: u8) -> anyhow::Result<()> {
             continue;
         }
 
-        // Try RimFAT/FAT
         if let Ok(meta) = FatMeta::from_io(&mut io) {
             let fs_type = if meta.use_integrity {
                 "RimFAT"

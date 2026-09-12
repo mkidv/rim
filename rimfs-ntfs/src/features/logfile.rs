@@ -10,14 +10,14 @@ use alloc::{vec, vec::Vec};
 use rimio::prelude::*;
 
 use crate::allocator::{NtfsAllocator, NtfsHandle};
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
 use crate::types::{NtfsAttributeContent, NtfsMftRecord};
-use crate::utils::{build_mft_reference, encode_runs_to_dataruns};
+use crate::mft::build_mft_reference;
+use crate::utils::encode_runs_to_dataruns;
 
 #[derive(Default)]
 pub struct NtfsLogFileFeature {
@@ -82,21 +82,22 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
         let meta = allocator.meta;
         let handle = NtfsHandle::from_range(meta.logfile_lcn, self.clusters);
 
-        // 0xFF-init content (standard empty NTFS journal)
-        let pattern = vec![0xFFu8; meta.bytes_per_cluster as usize];
-        let offset = meta.lcn_to_offset(handle.start_lcn);
-        for i in 0..self.clusters {
-            io.write_at(offset + (i * meta.bytes_per_cluster as u64), &pattern)
+        // 0xFF-init content (standard empty NTFS journal) in 64KB chunks
+        let chunk = [0xFFu8; 65536];
+        let mut offset = meta.lcn_to_offset(handle.start_lcn);
+        let mut remaining = self.clusters * meta.bytes_per_cluster as u64;
+        while remaining > 0 {
+            let to_write = remaining.min(chunk.len() as u64) as usize;
+            io.write_at(offset, &chunk[..to_write])
                 .map_err(crate::core::errors::FsFeatureError::IO)?;
+            offset += to_write as u64;
+            remaining -= to_write as u64;
         }
 
         let dataruns = encode_runs_to_dataruns(&handle.runs);
         let record = Self::build_record(meta, dataruns, self.log_size, SECURITY_ID_SYSTEM);
-
-        let raw = record
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_LOGFILE, &raw)
+        record
+            .write_to_mft(io, meta, MFT_RECORD_LOGFILE)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         Ok(())

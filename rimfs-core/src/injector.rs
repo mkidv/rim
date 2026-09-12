@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Logical directory tree injection traits and streaming abstractions.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec::Vec;
 
@@ -40,10 +42,125 @@ pub trait FsInjector<Handle: FsHandle> {
     fn write_unit(&mut self, handle: Handle, data: &[u8]) -> FsInjectorResult;
 }
 
+/// Persistent lifecycle state for an injector. A failure is terminal for this
+/// instance; reopening does not imply that partial disk changes were repaired.
+#[derive(Default)]
+pub struct FsInjectorState {
+    failed: bool,
+}
+
+/// Backend operations for injectors using the shared failure lifecycle.
+/// Implementations provide disk operations and storage for the state; callers use
+/// `FsTreeInjector`, whose blanket implementation guards every primitive operation.
+/// Backend hooks must not be called directly by application code.
+pub trait FsTreeInjectorBackend {
+    type Handle: FsHandle;
+    fn injector_state(&mut self) -> &mut FsInjectorState;
+    fn set_root_context_inner(&mut self, attr: &FileAttributes) -> FsInjectorResult;
+    fn write_dir_inner(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult;
+    fn write_file_inner(
+        &mut self,
+        name: &str,
+        source: &mut dyn RimRead,
+        size: u64,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult;
+    fn write_symlink_inner(
+        &mut self,
+        name: &str,
+        target: &str,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        let _ = (name, target, attr);
+        Err(FsInjectorError::Unsupported(
+            "Symlinks are not supported on this filesystem",
+        ))
+    }
+    fn flush_current_inner(&mut self) -> FsInjectorResult {
+        Ok(())
+    }
+    fn flush_inner(&mut self) -> FsInjectorResult {
+        Ok(())
+    }
+
+    /// Guard additional engine-specific mutation APIs with the same state.
+    fn mutation<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> FsInjectorResult<T>,
+    ) -> FsInjectorResult<T>
+    where
+        Self: Sized,
+    {
+        if self.injector_state().failed {
+            return Err(FsInjectorError::Invalid(
+                "Injector failed; discard and inspect volume before reopening",
+            ));
+        }
+        let result = operation(self);
+        if result.is_err() {
+            self.injector_state().failed = true;
+        }
+        result
+    }
+}
+
+impl<T: FsTreeInjectorBackend> FsTreeInjector<T::Handle> for T {
+    fn check_active(&mut self) -> FsInjectorResult {
+        if self.injector_state().failed {
+            Err(FsInjectorError::Invalid(
+                "Injector failed; discard and inspect volume before reopening",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn operation_failed(&mut self) {
+        self.injector_state().failed = true;
+    }
+    fn set_root_context(&mut self, attr: &FileAttributes) -> FsInjectorResult {
+        self.mutation(|this| this.set_root_context_inner(attr))
+    }
+    fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
+        self.mutation(|this| this.write_dir_inner(name, attr))
+    }
+    fn write_file(
+        &mut self,
+        name: &str,
+        source: &mut dyn RimRead,
+        size: u64,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        self.mutation(|this| this.write_file_inner(name, source, size, attr))
+    }
+    fn write_symlink(
+        &mut self,
+        name: &str,
+        target: &str,
+        attr: &FileAttributes,
+    ) -> FsInjectorResult {
+        self.mutation(|this| this.write_symlink_inner(name, target, attr))
+    }
+    fn flush_current(&mut self) -> FsInjectorResult {
+        self.mutation(Self::flush_current_inner)
+    }
+    fn flush(&mut self) -> FsInjectorResult {
+        self.mutation(Self::flush_inner)
+    }
+}
+
 /// High-level injector for filesystem trees (files and directories).
 ///
 /// Previously `FsNodeInjector`.
 pub trait FsTreeInjector<Handle: FsHandle> {
+    /// Lifecycle hooks used by traversal helpers, including source/resolver errors.
+    /// Legacy direct implementations retain their existing failure policy.
+    #[doc(hidden)]
+    fn check_active(&mut self) -> FsInjectorResult {
+        Ok(())
+    }
+    #[doc(hidden)]
+    fn operation_failed(&mut self) {}
+
     /// Create a new directory under the current directory.
     #[must_use = "injection result must be checked for errors"]
     fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult;
@@ -80,55 +197,76 @@ pub trait FsTreeInjector<Handle: FsHandle> {
 
     /// Recursive helper: directories are linked before their children are written.
     fn inject_node(&mut self, node: &mut FsNode<'_>, recurse: bool) -> FsInjectorResult {
-        match node {
-            FsNode::File { name, source, attr } => {
-                let size = source.total_size().map_err(FsInjectorError::IO)?;
-                self.write_file(name, source.as_mut(), size, attr)?;
-            }
-            FsNode::Dir {
-                name,
-                children,
-                attr,
-            } => {
-                if !name.is_empty() {
-                    self.write_dir(name, attr)?;
+        self.check_active()?;
+        let result = (|| {
+            match node {
+                FsNode::File { name, source, attr } => {
+                    let size = source.total_size().map_err(FsInjectorError::IO)?;
+                    self.write_file(name, source.as_mut(), size, attr)?;
                 }
-                if recurse {
+                FsNode::Dir {
+                    name,
+                    children,
+                    attr,
+                } => {
+                    if !name.is_empty() {
+                        self.write_dir(name, attr)?;
+                    }
+                    if recurse {
+                        for child in children {
+                            self.inject_node(child, recurse)?;
+                        }
+                    }
+                    self.flush_current()?;
+                }
+                FsNode::Symlink { name, target, attr } => {
+                    self.write_symlink(name, target, attr)?;
+                }
+                FsNode::Container { children, .. } => {
                     for child in children {
                         self.inject_node(child, recurse)?;
                     }
+                    self.flush_current()?;
                 }
-                self.flush_current()?;
             }
-            FsNode::Symlink { name, target, attr } => {
-                self.write_symlink(name, target, attr)?;
-            }
-            FsNode::Container { children, .. } => {
-                for child in children {
-                    self.inject_node(child, recurse)?;
-                }
-                self.flush_current()?;
-            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.operation_failed();
         }
-        Ok(())
+        result
     }
 
     /// Full-tree injection helper.
     #[must_use = "injection result must be checked for errors"]
     fn inject_tree(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {
-        self.set_root_context(node.attr())?;
-        self.inject_node(node, true)?;
-        self.flush()?;
-        Ok(())
+        self.check_active()?;
+        let result = (|| {
+            self.set_root_context(node.attr())?;
+            self.inject_node(node, true)?;
+            self.flush()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.operation_failed();
+        }
+        result
     }
 
     /// Single-entry injection helper (no recursion).
     #[must_use = "injection result must be checked for errors"]
     fn inject_entry(&mut self, node: &mut FsNode<'_>) -> FsInjectorResult {
-        self.set_root_context(node.attr())?;
-        self.inject_node(node, false)?;
-        self.flush()?;
-        Ok(())
+        self.check_active()?;
+        let result = (|| {
+            self.set_root_context(node.attr())?;
+            self.inject_node(node, false)?;
+            self.flush()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.operation_failed();
+        }
+        result
     }
 
     /// Injects a resolver tree without first materializing file payloads into `FsNode`s.
@@ -138,15 +276,22 @@ pub trait FsTreeInjector<Handle: FsHandle> {
         resolver: &mut dyn FsTreeResolver,
         path: &str,
     ) -> FsInjectorResult<FsNodeCounts> {
-        let root_attr = if is_wildcard(path) {
-            FileAttributes::new_dir()
-        } else {
-            resolver.read_attributes(path)?
-        };
-        self.set_root_context(&root_attr)?;
-        let counts = self.inject_from_resolver(resolver, path, true)?;
-        self.flush()?;
-        Ok(counts)
+        self.check_active()?;
+        let result = (|| {
+            let root_attr = if is_wildcard(path) {
+                FileAttributes::new_dir()
+            } else {
+                resolver.read_attributes(path)?
+            };
+            self.set_root_context(&root_attr)?;
+            let counts = self.inject_from_resolver(resolver, path, true)?;
+            self.flush()?;
+            Ok(counts)
+        })();
+        if result.is_err() {
+            self.operation_failed();
+        }
+        result
     }
 
     /// Injects one resolver entry without recursing into subdirectories.
@@ -156,15 +301,22 @@ pub trait FsTreeInjector<Handle: FsHandle> {
         resolver: &mut dyn FsTreeResolver,
         path: &str,
     ) -> FsInjectorResult<FsNodeCounts> {
-        let root_attr = if is_wildcard(path) {
-            FileAttributes::new_dir()
-        } else {
-            resolver.read_attributes(path)?
-        };
-        self.set_root_context(&root_attr)?;
-        let counts = self.inject_from_resolver(resolver, path, false)?;
-        self.flush()?;
-        Ok(counts)
+        self.check_active()?;
+        let result = (|| {
+            let root_attr = if is_wildcard(path) {
+                FileAttributes::new_dir()
+            } else {
+                resolver.read_attributes(path)?
+            };
+            self.set_root_context(&root_attr)?;
+            let counts = self.inject_from_resolver(resolver, path, false)?;
+            self.flush()?;
+            Ok(counts)
+        })();
+        if result.is_err() {
+            self.operation_failed();
+        }
+        result
     }
 
     /// Recursive resolver injection helper.
@@ -176,64 +328,71 @@ pub trait FsTreeInjector<Handle: FsHandle> {
         path: &str,
         recurse: bool,
     ) -> FsInjectorResult<FsNodeCounts> {
-        if is_wildcard(path) {
-            let base_path = strip_wildcard(path);
-            let mut counts = FsNodeCounts::default();
-            for entry in resolver.read_dir(base_path)? {
-                let entry_path = join_paths(base_path, &entry);
-                let child_counts = self.inject_from_resolver(resolver, &entry_path, recurse)?;
-                counts.dirs += child_counts.dirs;
-                counts.files += child_counts.files;
-                counts.symlinks += child_counts.symlinks;
-                counts.bytes += child_counts.bytes;
-            }
-            self.flush_current()?;
-            return Ok(counts);
-        }
-
-        let attr = resolver.read_attributes(path)?;
-        let name = extract_name_from_path(path);
-        let mut counts = FsNodeCounts::default();
-
-        match attr.kind {
-            NodeKind::Directory => {
-                counts.dirs += 1;
-                if !name.is_empty() {
-                    self.write_dir(name, &attr)?;
-                }
-                if recurse {
-                    for entry in resolver.read_dir(path)? {
-                        let entry_path = join_paths(path, &entry);
-                        let child_counts =
-                            self.inject_from_resolver(resolver, &entry_path, recurse)?;
-                        counts.dirs += child_counts.dirs;
-                        counts.files += child_counts.files;
-                        counts.symlinks += child_counts.symlinks;
-                        counts.bytes += child_counts.bytes;
-                    }
+        self.check_active()?;
+        let result = (|| {
+            if is_wildcard(path) {
+                let base_path = strip_wildcard(path);
+                let mut counts = FsNodeCounts::default();
+                for entry in resolver.read_dir(base_path)? {
+                    let entry_path = join_paths(base_path, &entry);
+                    let child_counts = self.inject_from_resolver(resolver, &entry_path, recurse)?;
+                    counts.dirs += child_counts.dirs;
+                    counts.files += child_counts.files;
+                    counts.symlinks += child_counts.symlinks;
+                    counts.bytes += child_counts.bytes;
                 }
                 self.flush_current()?;
+                return Ok(counts);
             }
-            NodeKind::Regular => {
-                let mut source = resolver.open_file(path)?;
-                let size = source.total_size().map_err(FsInjectorError::IO)?;
-                self.write_file(name, source.as_mut(), size, &attr)?;
-                counts.files += 1;
-                counts.bytes += size;
-            }
-            NodeKind::Symlink => {
-                let target = resolver.read_link(path)?;
-                self.write_symlink(name, &target, &attr)?;
-                counts.symlinks += 1;
-            }
-            _ => {
-                return Err(FsInjectorError::Unsupported(
-                    "Unsupported resolver entry kind",
-                ));
-            }
-        }
 
-        Ok(counts)
+            let attr = resolver.read_attributes(path)?;
+            let name = extract_name_from_path(path);
+            let mut counts = FsNodeCounts::default();
+
+            match attr.kind {
+                NodeKind::Directory => {
+                    counts.dirs += 1;
+                    if !name.is_empty() {
+                        self.write_dir(name, &attr)?;
+                    }
+                    if recurse {
+                        for entry in resolver.read_dir(path)? {
+                            let entry_path = join_paths(path, &entry);
+                            let child_counts =
+                                self.inject_from_resolver(resolver, &entry_path, recurse)?;
+                            counts.dirs += child_counts.dirs;
+                            counts.files += child_counts.files;
+                            counts.symlinks += child_counts.symlinks;
+                            counts.bytes += child_counts.bytes;
+                        }
+                    }
+                    self.flush_current()?;
+                }
+                NodeKind::Regular => {
+                    let mut source = resolver.open_file(path)?;
+                    let size = source.total_size().map_err(FsInjectorError::IO)?;
+                    self.write_file(name, source.as_mut(), size, &attr)?;
+                    counts.files += 1;
+                    counts.bytes += size;
+                }
+                NodeKind::Symlink => {
+                    let target = resolver.read_link(path)?;
+                    self.write_symlink(name, &target, &attr)?;
+                    counts.symlinks += 1;
+                }
+                _ => {
+                    return Err(FsInjectorError::Unsupported(
+                        "Unsupported resolver entry kind",
+                    ));
+                }
+            }
+
+            Ok(counts)
+        })();
+        if result.is_err() {
+            self.operation_failed();
+        }
+        result
     }
 
     /// Write the current directory context to disk and pop it.
@@ -250,212 +409,74 @@ pub trait FsTreeInjector<Handle: FsHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::FsResolverResult;
-    use crate::resolver::FileAttributes;
-    use alloc::{boxed::Box, string::String, vec::Vec};
-    use core::cell::Cell;
-    use rimio::{RimIOError, RimIOResult};
-    use std::rc::Rc;
-
+    use alloc::boxed::Box;
     #[derive(Clone, Copy)]
-    struct TestHandle;
-
-    impl FsHandle for TestHandle {}
-
-    struct GeneratedRead {
-        size: u64,
-        max_read_len: usize,
-        active: Rc<Cell<usize>>,
-    }
-
-    impl GeneratedRead {
-        fn new(
-            size: u64,
-            max_read_len: usize,
-            active: Rc<Cell<usize>>,
-            max_active: Rc<Cell<usize>>,
-        ) -> Self {
-            let current = active.get() + 1;
-            active.set(current);
-            max_active.set(max_active.get().max(current));
-            Self {
-                size,
-                max_read_len,
-                active,
-            }
-        }
-    }
-
-    impl Drop for GeneratedRead {
-        fn drop(&mut self) {
-            self.active.set(self.active.get() - 1);
-        }
-    }
-
-    impl RimRead for GeneratedRead {
-        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> RimIOResult {
-            if buf.len() > self.max_read_len {
-                return Err(RimIOError::Other("read buffer too large"));
-            }
-            let end = offset
-                .checked_add(buf.len() as u64)
-                .ok_or(RimIOError::OutOfBounds)?;
-            if end > self.size {
-                return Err(RimIOError::OutOfBounds);
-            }
-            buf.fill((offset % 251) as u8);
-            Ok(())
-        }
-
-        fn total_size(&mut self) -> RimIOResult<u64> {
-            Ok(self.size)
-        }
-    }
-
-    struct TestResolver {
-        active: Rc<Cell<usize>>,
-        max_active: Rc<Cell<usize>>,
-    }
-
-    impl TestResolver {
-        fn new(active: Rc<Cell<usize>>, max_active: Rc<Cell<usize>>) -> Self {
-            Self { active, max_active }
-        }
-
-        fn file_size(path: &str) -> Option<u64> {
-            match path.trim_matches('/') {
-                "empty.txt" => Some(0),
-                "huge.bin" => Some(3 * 1024 * 1024 * 1024),
-                "unicodé.txt" => Some(12),
-                "nested/child.bin" => Some(4096),
-                _ => None,
-            }
-        }
-    }
-
-    impl FsTreeResolver for TestResolver {
-        fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
-            let clean = path.trim_matches('/');
-            if clean.is_empty() || clean == "nested" {
-                return Ok(FileAttributes::new_dir());
-            }
-            if clean == "link" {
-                return Ok(FileAttributes::new_symlink());
-            }
-            if Self::file_size(clean).is_some() {
-                return Ok(FileAttributes::new_file());
-            }
-            Err(crate::errors::FsResolverError::NotFound)
-        }
-
-        fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
-            match path.trim_matches('/') {
-                "" => Ok(alloc::vec![
-                    "empty.txt".into(),
-                    "huge.bin".into(),
-                    "link".into(),
-                    "nested".into(),
-                    "unicodé.txt".into(),
-                ]),
-                "nested" => Ok(alloc::vec!["child.bin".into()]),
-                _ => Err(crate::errors::FsResolverError::NotFound),
-            }
-        }
-
-        fn open_file<'a>(&'a mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'a>> {
-            let size = Self::file_size(path.trim_matches('/'))
-                .ok_or(crate::errors::FsResolverError::NotFound)?;
-            Ok(Box::new(GeneratedRead::new(
-                size,
-                1024 * 1024,
-                Rc::clone(&self.active),
-                Rc::clone(&self.max_active),
-            )))
-        }
-
-        fn read_link(&mut self, path: &str) -> FsResolverResult<String> {
-            if path.trim_matches('/') == "link" {
-                Ok("nested/child.bin".into())
-            } else {
-                Err(crate::errors::FsResolverError::NotFound)
-            }
-        }
-    }
-
+    struct Handle;
+    impl FsHandle for Handle {}
     #[derive(Default)]
-    struct RecordingInjector {
-        entries: Vec<String>,
+    struct Backend {
+        state: FsInjectorState,
+        calls: usize,
     }
-
-    impl FsTreeInjector<TestHandle> for RecordingInjector {
-        fn write_dir(&mut self, name: &str, _attr: &FileAttributes) -> FsInjectorResult {
-            self.entries.push(alloc::format!("dir:{name}"));
+    impl FsTreeInjectorBackend for Backend {
+        type Handle = Handle;
+        fn injector_state(&mut self) -> &mut FsInjectorState {
+            &mut self.state
+        }
+        fn set_root_context_inner(&mut self, _: &FileAttributes) -> FsInjectorResult {
+            self.calls += 1;
             Ok(())
         }
-
-        fn write_file(
+        fn write_dir_inner(&mut self, _: &str, _: &FileAttributes) -> FsInjectorResult {
+            self.calls += 1;
+            Ok(())
+        }
+        fn write_file_inner(
             &mut self,
-            name: &str,
-            source: &mut dyn RimRead,
-            size: u64,
-            _attr: &FileAttributes,
+            _: &str,
+            _: &mut dyn RimRead,
+            _: u64,
+            _: &FileAttributes,
         ) -> FsInjectorResult {
-            let mut remaining = size;
-            let mut offset = 0;
-            let mut buf = [0u8; 64 * 1024];
-            while remaining > 0 {
-                let n = remaining.min(buf.len() as u64) as usize;
-                source.read_at(offset, &mut buf[..n])?;
-                remaining -= n as u64;
-                offset += n as u64;
-            }
-            self.entries.push(alloc::format!("file:{name}:{size}"));
+            self.calls += 1;
             Ok(())
         }
-
-        fn write_symlink(
-            &mut self,
-            name: &str,
-            target: &str,
-            _attr: &FileAttributes,
-        ) -> FsInjectorResult {
-            self.entries.push(alloc::format!("link:{name}->{target}"));
-            Ok(())
-        }
-
-        fn set_root_context(&mut self, _attr: &FileAttributes) -> FsInjectorResult {
-            self.entries.push("root".into());
+        fn flush_inner(&mut self) -> FsInjectorResult {
+            self.calls += 1;
             Ok(())
         }
     }
-
+    struct FailedSource;
+    impl RimRead for FailedSource {
+        fn read_at(&mut self, _: u64, _: &mut [u8]) -> rimio::RimIOResult {
+            Err(rimio::RimIOError::Other("source failed"))
+        }
+        fn total_size(&mut self) -> rimio::RimIOResult<u64> {
+            Err(rimio::RimIOError::Other("source failed"))
+        }
+    }
     #[test]
-    fn inject_tree_from_resolver_streams_one_file_at_a_time() {
-        let active = Rc::new(Cell::new(0));
-        let max_active = Rc::new(Cell::new(0));
-        let mut resolver = TestResolver::new(Rc::clone(&active), Rc::clone(&max_active));
-        let mut injector = RecordingInjector::default();
-
-        let counts = injector
-            .inject_tree_from_resolver(&mut resolver, "/*")
-            .expect("streaming resolver injection failed");
-
-        assert_eq!(counts.dirs, 1);
-        assert_eq!(counts.files, 4);
-        assert_eq!(counts.symlinks, 1);
-        assert_eq!(counts.bytes, 3 * 1024 * 1024 * 1024 + 4108);
-        assert_eq!(active.get(), 0);
-        assert_eq!(max_active.get(), 1);
-        assert!(
-            injector
-                .entries
-                .contains(&"file:huge.bin:3221225472".into())
+    fn source_failure_invalidates_shared_lifecycle_before_backend_file_call() {
+        let mut backend = Backend::default();
+        let mut node = FsNode::new_file_from_source(
+            "file",
+            Box::new(FailedSource),
+            FileAttributes::new_file(),
         );
-        assert!(injector.entries.contains(&"file:unicodé.txt:12".into()));
+        assert!(backend.inject_tree(&mut node).is_err());
+        assert_eq!(backend.calls, 1); // root setup only
+        assert!(backend.flush().is_err());
         assert!(
-            injector
-                .entries
-                .contains(&"link:link->nested/child.bin".into())
+            backend
+                .set_root_context(&FileAttributes::new_dir())
+                .is_err()
         );
+        assert!(
+            backend
+                .write_dir("later", &FileAttributes::new_dir())
+                .is_err()
+        );
+        assert!(backend.inject_node(&mut node, true).is_err());
+        assert_eq!(backend.calls, 1);
     }
 }

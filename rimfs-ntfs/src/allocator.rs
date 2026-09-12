@@ -15,14 +15,9 @@ use crate::meta::NtfsMeta;
 use crate::core::bitmap::BitmapDriver;
 
 /// Handle for an NTFS allocation
-///
-/// Unlike FAT-based filesystems, NTFS uses data runs (extents) for
-/// non-contiguous allocation. This handle tracks the allocated clusters.
 #[derive(Debug, Clone)]
 pub struct NtfsHandle {
-    /// Starting LCN (Logical Cluster Number)
     pub start_lcn: u64,
-    /// Run list of allocated clusters (data runs)
     pub runs: RunList,
 }
 
@@ -67,6 +62,18 @@ impl NtfsHandle {
 
 impl FsHandle for NtfsHandle {}
 
+impl From<RunList> for NtfsHandle {
+    fn from(run: RunList) -> Self {
+        Self::from_run_list(run)
+    }
+}
+
+impl From<Vec<u32>> for NtfsHandle {
+    fn from(runs: Vec<u32>) -> Self {
+        Self::from_run_list(RunList::from_units(&runs))
+    }
+}
+
 /// NTFS cluster allocator
 ///
 /// Manages the cluster bitmap for allocation tracking.
@@ -75,7 +82,7 @@ pub struct NtfsAllocator<'a> {
     pub meta: &'a NtfsMeta,
     pub next_free_hint: u64,
     pub used_clusters: u64,
-    pub driver: BitmapDriver<'a, NtfsMeta>,
+    pub driver: BitmapDriver<&'a NtfsMeta>,
 }
 
 impl<'a> NtfsAllocator<'a> {
@@ -92,7 +99,7 @@ impl<'a> NtfsAllocator<'a> {
     /// Read the bitmap from disk to initialize state.
     pub fn from_io<IO: RimIO + ?Sized>(io: &mut IO, meta: &'a NtfsMeta) -> FsAllocatorResult<Self> {
         let mut driver = BitmapDriver::new(meta);
-        let used = driver.count_ones(io).map_err(FsAllocatorError::IO)? as u64;
+        let used = driver.count_ones(io).map_err(FsAllocatorError::IO)?;
 
         // Scan for first free hint starting from data area
         let hint = driver
@@ -146,53 +153,71 @@ impl<'a> FsAllocator<NtfsHandle> for NtfsAllocator<'a> {
     fn allocate<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<NtfsHandle> {
-        self.allocate_contiguous(io, count)
+        match self.allocate_contiguous(io, count) {
+            Ok(handle) => return Ok(handle),
+            Err(FsAllocatorError::OutOfBlocks) => {}
+            Err(error) => return Err(error),
+        }
+        let runs = self
+            .driver
+            .find_free_runs(io, count)?
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
+        for run in runs.iter() {
+            self.driver
+                .set_bits_range(io, run.start, run.length, true)?;
+        }
+        self.driver.flush(io)?;
+        self.used_clusters += count;
+        Ok(NtfsHandle::from_run_list(runs))
     }
 
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<NtfsHandle> {
-        let count_u64 = count as u64;
+        if count == 0 {
+            return Err(FsAllocatorError::InvalidSize);
+        }
         let start_search = self.next_free_hint;
 
-        let found = match self.driver.find_next_free(io, start_search, count_u64) {
-            Ok(Some(start)) => Some(start),
-            _ => {
-                if start_search > 0 {
-                    self.driver.find_next_free(io, 0, count_u64).ok().flatten()
-                } else {
-                    None
-                }
-            }
+        let found = match self.driver.find_next_free(io, start_search, count)? {
+            Some(start) => Some(start),
+            None if start_search > 0 => self.driver.find_next_free(io, 0, count)?,
+            None => None,
         };
 
         if let Some(start) = found {
+            if start
+                .checked_add(count)
+                .is_none_or(|end| end > self.meta.total_clusters)
+            {
+                return Err(FsAllocatorError::OutOfBlocks);
+            }
             self.driver
-                .set_bits_range(io, start, count_u64, true)
+                .set_bits_range(io, start, count, true)
                 .map_err(FsAllocatorError::IO)?;
             self.driver.flush(io).map_err(FsAllocatorError::IO)?;
 
-            self.used_clusters += count_u64;
-            self.next_free_hint = start + count_u64;
+            self.used_clusters += count;
+            self.next_free_hint = start + count;
             if self.next_free_hint >= self.meta.total_clusters {
                 self.next_free_hint = self.meta.first_data_unit();
             }
-            return Ok(NtfsHandle::from_range(start, count_u64));
+            return Ok(NtfsHandle::from_range(start, count));
         }
 
         Err(FsAllocatorError::OutOfBlocks)
     }
 
-    fn used_units(&self) -> usize {
-        self.used_clusters as usize
+    fn used_units(&self) -> u64 {
+        self.used_clusters
     }
 
-    fn remaining_units(&self) -> usize {
-        (self.meta.total_clusters - self.used_clusters) as usize
+    fn remaining_units(&self) -> u64 {
+        self.meta.total_clusters - self.used_clusters
     }
 }
 
@@ -215,7 +240,6 @@ mod tests {
 
         let first_free = meta.first_data_unit();
 
-        // Mark system area used
         driver.set_bits_range(&mut io, 0, first_free, true).unwrap();
         driver.flush(&mut io).unwrap();
 
@@ -229,7 +253,6 @@ mod tests {
         }
         assert!(!driver.get_bit(&mut io, first_free).unwrap());
 
-        // Allocate some clusters
         let handle = alloc.allocate_contiguous(&mut io, 10).unwrap();
         assert_eq!(handle.cluster_count(), 10);
         assert_eq!(handle.start_lcn, first_free);
@@ -243,5 +266,32 @@ mod tests {
         for lcn in handle.start_lcn..handle.start_lcn + 10 {
             assert!(driver.get_bit(&mut io, lcn).unwrap());
         }
+    }
+    #[test]
+    fn allocator_uses_fragmented_free_space() {
+        let meta = NtfsMeta::new(32 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0; 32 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        let mut driver = BitmapDriver::new(&meta);
+        driver.format_with(&mut io, 0xff).unwrap();
+        let start = meta.first_data_unit();
+        for bit in [start, start + 2, start + 4] {
+            driver.set_bit(&mut io, bit, false).unwrap();
+        }
+        driver.flush(&mut io).unwrap();
+        let mut allocator = NtfsAllocator::from_io(&mut io, &meta).unwrap();
+        assert!(matches!(
+            allocator.allocate_contiguous(&mut io, 3),
+            Err(FsAllocatorError::OutOfBlocks)
+        ));
+        let handle = allocator.allocate(&mut io, 3).unwrap();
+        assert_eq!(
+            handle.runs.iter().map(|r| r.start).collect::<Vec<_>>(),
+            [start, start + 2, start + 4]
+        );
+        assert!(matches!(
+            allocator.allocate(&mut io, 1),
+            Err(FsAllocatorError::OutOfBlocks)
+        ));
     }
 }

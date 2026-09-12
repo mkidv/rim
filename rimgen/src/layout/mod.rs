@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Declarative multi-partition disk layout definitions.
+
 pub mod constants;
 pub mod error;
 pub mod filesystem;

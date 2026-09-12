@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext4 primary and backup superblock serialization.
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -13,7 +15,7 @@ use crate::{constant::*, utils::is_sparse_super_group};
 
 #[derive(Default)]
 pub struct ExtSuperblockFeature {
-    sb_data: Option<Vec<u8>>,
+    sb_data: Option<ExtSuperblock>,
     sparse_offsets: Vec<u64>,
 }
 
@@ -42,13 +44,9 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for ExtSuperblockFea
             used_inodes += group_used_inodes;
         }
 
-        // Create superblock struct
         let sb = ExtSuperblock::from_meta(meta, used_blocks, used_inodes);
-        let buf = sb.to_bytes();
+        self.sb_data = Some(sb);
 
-        self.sb_data = Some(buf.to_vec());
-
-        // Calculate sparse offsets
         self.sparse_offsets.clear();
         for group_id in 0..meta.group_count {
             let has_super = !meta.features.has_sparse_super || is_sparse_super_group(group_id);
@@ -79,12 +77,10 @@ impl<A, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, A, IO> for ExtSuperblockFea
             .as_ref()
             .ok_or(crate::core::errors::FsFeatureError::NotPrepared)?;
 
-        // Write primary
-        io.write_at(EXT_SUPERBLOCK_OFFSET, buf)?;
+        io.write_struct(EXT_SUPERBLOCK_OFFSET, buf)?;
 
-        // Write copies
         for offset in &self.sparse_offsets {
-            io.write_at(*offset, buf)?;
+            io.write_struct(*offset, buf)?;
         }
 
         Ok(())

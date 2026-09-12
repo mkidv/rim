@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 filesystem driver implementation.
+
 pub use crate::core::traits::*;
 
 use crate::traits::*;

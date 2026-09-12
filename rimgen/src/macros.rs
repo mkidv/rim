@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Image layout definition helper macros.
+
 #[macro_export]
 macro_rules! gen_error_wiring {
     (

@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::boxed::Box;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
+//! ext2/3/4 filesystem volume formatter.
 
 use rimio::prelude::*;
 
 use crate::allocator::ExtAllocator;
-use crate::core::feature::FsSystemFeature;
+use crate::core::feature::{FsSystemFeature, execute_feature_pipeline};
 use crate::core::{FsFormatterResult, formatter::FsFormatter};
 use crate::features::{
     block_group::BlockGroupFeature, inode_table::InodeTableFeature, lost_found::LostFoundFeature,
@@ -27,40 +24,22 @@ impl<'a, IO: RimIO + ?Sized> FsFormatter for ExtFormatter<'a, IO> {
             crate::core::formatter::zero_cluster_heap(self.io, self.meta)?;
         }
 
-        // Define the sequence of features to apply
-        // Note: Using Box to erase types and iterate, but we need strict ordering anyway.
-        // We can just execute them sequentially without a Vec<Box> if we want to avoid allocation,
-        // but Vec<Box> is cleaner for "Orchestrator" pattern.
+        let mut superblock = ExtSuperblockFeature::new();
+        let mut block_group = BlockGroupFeature::new();
+        let mut inode_table = InodeTableFeature::new();
+        let mut root_dir = RootDirFeature::new();
+        let mut lost_found = LostFoundFeature::new();
 
-        // Since FsSystemFeature has generic IO, we need to specify it.
-        // And Allocator A is ExtAllocator.
-        let mut features: Vec<Box<dyn FsSystemFeature<ExtMeta, ExtAllocator<'a>, IO>>> = vec![
-            Box::new(ExtSuperblockFeature::new()),
-            Box::new(BlockGroupFeature::new()),
-            Box::new(InodeTableFeature::new()),
-            // Directories must come after InodeTable if they write to it (they do)
-            Box::new(RootDirFeature::new()),
-            Box::new(LostFoundFeature::new()),
+        let mut features: [&mut dyn FsSystemFeature<ExtMeta, ExtAllocator<'a>, IO>; 5] = [
+            &mut superblock,
+            &mut block_group,
+            &mut inode_table,
+            &mut root_dir,
+            &mut lost_found,
         ];
 
         let mut allocator = ExtAllocator::new(self.meta);
-
-        for feature in &mut features {
-            // 1. Prepare
-            feature.prepare(self.meta)?;
-
-            // 2. Allocate
-            feature.allocate(self.io, &mut allocator)?;
-        }
-
-        for feature in &mut features {
-            // 3. Write
-            feature.write(self.io, &allocator)?;
-        }
-
-        // Flush final superblock and BGDT with exact counts
-        allocator.flush_superblock(self.io, self.meta)?;
-        allocator.flush_bgdt(self.io, self.meta, &[2])?;
+        execute_feature_pipeline(&mut features, self.meta, &mut allocator, self.io)?;
 
         self.io.flush()?;
         Ok(())

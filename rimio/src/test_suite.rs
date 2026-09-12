@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! Generic verification suite for RimIO implementations.
+
 use crate::prelude::*;
 
 pub fn check_basic_rw(io: &mut impl RimIO) {
@@ -30,14 +33,12 @@ pub fn check_zero_fill(io: &mut impl RimIO) {
 
 pub fn check_bounds(io: &mut impl RimIO, len: u64, allow_growth: bool) {
     let mut buf = [0u8; 1];
-    // Read Bounds: Should fail at len (EOF)
     assert!(
         io.read_at(len, &mut buf).is_err(),
         "Read at bounds limit should fail (EOF)"
     );
     assert!(io.read_at(len + 1, &mut buf).is_err());
 
-    // Write Bounds
     if !allow_growth {
         assert!(
             io.write_at(len, &buf).is_err(),
@@ -68,6 +69,5 @@ pub fn check_set_len(io: &mut impl RimIOSetLen) {
 
     // Resize down
     io.set_len(1024).unwrap();
-    // Verify bounds
     assert!(io.read_at(1500, &mut buf).is_err());
 }

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! GPT partition table synthesis for generated disk layouts.
+
 use crate::errors::{GenResult, LayoutError};
 use crate::layout::constants::*;
 use crate::layout::*;

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc", test))]
-use alloc::string::{String, ToString};
+
+//! ext2/3/4 directory tree and extent tree injector.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{vec, vec::Vec};
-
-use core::convert::TryInto;
 
 use crate::core::allocator::FsAllocator;
 use crate::{
@@ -17,20 +16,17 @@ use crate::{
         allocator::{ExtAllocator, ExtHandle},
         constant::*,
         meta::ExtMeta,
-        types::{
-            ExtDirEntry, ExtExtent, ExtExtentHeader, ExtExtentIndex, ExtInode, ExtLostFound,
-            GroupLayout,
-        },
+        types::{ExtDirEntry, ExtExtent, ExtExtentHeader, ExtExtentIndex, ExtInode, ExtLostFound},
         utils,
     },
 };
 use rimio::prelude::*;
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 /// EXT-specific directory context with child subdirectory tracking for link counts
 struct ExtContext {
     handle: ExtHandle,
-    completed_blocks: Vec<Vec<u8>>,
+    written_blocks: usize,
     current_block: Vec<u8>,
     /// Number of immediate subdirectories (for parent link count calculation)
     child_dir_count: u16,
@@ -38,6 +34,8 @@ struct ExtContext {
     attr: FileAttributes,
 }
 
+/// After an operation fails, discard this injector and inspect/reopen the volume.
+/// Errors may leave partial on-disk changes; retrying this instance is prohibited.
 pub struct ExtInjector<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
     allocator: ExtAllocator<'a>,
@@ -45,17 +43,13 @@ pub struct ExtInjector<'a, IO: RimIO + ?Sized> {
     stack: Vec<ExtContext>,
     /// Track used directories per group for BGDT
     used_dirs_per_group: Vec<u16>,
+    state: FsInjectorState,
 }
 
 impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
     pub fn new(io: &'a mut IO, params: &'a ExtMeta) -> FsInjectorResult<Self> {
-        let allocator = ExtAllocator::new(params);
-        let group_count = params.block_count.div_ceil(params.blocks_per_group as u64) as usize;
-        let mut used_dirs_per_group = vec![0u16; group_count];
-        // Account for Root Directory (inode 2) and Lost+Found (inode 11) in Group 0
-        if group_count > 0 {
-            used_dirs_per_group[0] = 2;
-        }
+        let mut allocator = ExtAllocator::new(params);
+        let used_dirs_per_group = allocator.load_existing(io, params)?;
 
         Ok(Self {
             io,
@@ -63,6 +57,7 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
             meta: params,
             stack: vec![],
             used_dirs_per_group,
+            state: FsInjectorState::default(),
         })
     }
 
@@ -74,6 +69,10 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
     }
 
     pub fn flush_metadata(&mut self) -> FsInjectorResult {
+        self.mutation(Self::flush_metadata_inner)
+    }
+
+    fn flush_metadata_inner(&mut self) -> FsInjectorResult {
         self.allocator.flush_superblock(self.io, self.meta)?;
         self.allocator
             .flush_bgdt(self.io, self.meta, &self.used_dirs_per_group)?;
@@ -93,12 +92,16 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
         };
 
         if needs_new_block {
-            {
+            let (block_id, finished) = {
                 let ctx = self.stack.last_mut().unwrap();
                 utils::pad_directory_block(&mut ctx.current_block, block_size);
+                let block_units = ctx.handle.blocks.to_units();
+                let blk = block_units[ctx.written_blocks];
+                ctx.written_blocks += 1;
                 let finished = core::mem::take(&mut ctx.current_block);
-                ctx.completed_blocks.push(finished);
-            }
+                (blk, finished)
+            };
+            self.write_block(block_id, &finished)?;
 
             let new_runs = self
                 .allocator
@@ -116,71 +119,102 @@ impl<'a, IO: RimIO + ?Sized> ExtInjector<'a, IO> {
     }
 }
 
-impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
-    fn set_root_context(&mut self, attr: &FileAttributes) -> FsInjectorResult {
-        // Use the pre-formatted root inode (inode 2), not allocating a new one.
-        // The root directory was already written by the formatter.
+impl<'a, IO: RimIO + ?Sized> FsTreeInjectorBackend for ExtInjector<'a, IO> {
+    type Handle = ExtHandle;
+    fn injector_state(&mut self) -> &mut FsInjectorState {
+        &mut self.state
+    }
 
-        // First, get the root inode info to find its data block
+    fn set_root_context_inner(&mut self, attr: &FileAttributes) -> FsInjectorResult {
         let root_inode = EXT_ROOT_INODE;
-
-        // Read existing root directory block (the one written by formatter)
-        let layout = GroupLayout::compute(self.meta, 0);
-        let root_block = layout.first_data_block;
-
-        // Read existing directory content
-        let mut existing = vec![0u8; self.meta.block_size as usize];
-        let offset = root_block * self.meta.block_size as u64;
-        self.io.read_at(offset, &mut existing)?;
-
-        // Reconstruct a packed entries buffer from the existing directory block
+        let block_size = self.meta.block_size as usize;
+        let (mapping, root_size) = {
+            let mut resolver = crate::resolver::ExtResolver::new(self.io, self.meta);
+            let inode = resolver.read_inode(root_inode)?;
+            let (header, _) = crate::types::ExtInodeHeader::ref_from_prefix(&inode)
+                .map_err(|_| FsInjectorError::Invalid("Truncated root inode"))?;
+            let size = header.i_size_lo.get() as u64 | ((header.i_size_high.get() as u64) << 32);
+            if size == 0 || !size.is_multiple_of(block_size as u64) {
+                return Err(FsInjectorError::Invalid("Invalid root directory size"));
+            }
+            (resolver.inode_extents(&inode, size)?, size)
+        };
+        let mut root_blocks = RunList::new();
+        let mut written_blocks = 0usize;
         let mut packed_entries = Vec::new();
         let mut child_dir_count = 0u16;
         let mut has_lost_found = false;
-        let mut pos = 0usize;
-
-        while pos + 8 <= existing.len() {
-            let entry_inode =
-                u32::from_le_bytes(existing[pos..pos + 4].try_into().unwrap_or([0; 4]));
-            let rec_len =
-                u16::from_le_bytes(existing[pos + 4..pos + 6].try_into().unwrap_or([0; 2]))
-                    as usize;
-            let name_len = existing[pos + 6] as usize;
-            let file_type = existing[pos + 7];
-
-            if entry_inode == 0
-                || rec_len == 0
-                || rec_len > existing.len() - pos
-                || pos + 8 + name_len > existing.len()
+        let mut logical = 0u64;
+        for extent in mapping {
+            let physical = extent
+                .source_offset
+                .ok_or(FsInjectorError::Invalid("Sparse directory"))?;
+            if extent.logical_offset != logical
+                || extent.len % block_size as u64 != 0
+                || physical % block_size as u64 != 0
             {
-                break;
+                return Err(FsInjectorError::Invalid("Invalid directory mapping"));
             }
-
-            let name = &existing[pos + 8..pos + 8 + name_len];
-            if file_type == EXT_FT_DIR && name != b"." && name != b".." {
-                child_dir_count += 1;
+            for index in 0..extent.len / block_size as u64 {
+                let mut existing = vec![0; block_size];
+                self.io
+                    .read_at(physical + index * block_size as u64, &mut existing)?;
+                if root_blocks.total_units() > 0 {
+                    utils::pad_directory_block(&mut packed_entries, block_size);
+                    let block_units = root_blocks.to_units();
+                    let block_id = block_units[written_blocks];
+                    written_blocks += 1;
+                    self.write_block(block_id, &packed_entries)?;
+                    packed_entries.clear();
+                }
+                root_blocks.push_unit(physical / block_size as u64 + index);
+                let mut pos = 0;
+                while pos < block_size {
+                    if block_size - pos < 8 {
+                        return Err(FsInjectorError::Invalid("Truncated directory entry"));
+                    }
+                    let (header, _) =
+                        crate::types::ExtDirEntryHeader::from_record(&existing[pos..])
+                            .ok_or(FsInjectorError::Invalid("Invalid directory record length"))?;
+                    let ino = header.inode.get();
+                    let len = header.rec_len.get() as usize;
+                    let name_len = header.name_len as usize;
+                    if len < 8
+                        || !len.is_multiple_of(4)
+                        || len > block_size - pos
+                        || name_len > len - 8
+                    {
+                        return Err(FsInjectorError::Invalid("Invalid directory record length"));
+                    }
+                    if ino != 0 {
+                        let name = &existing[pos + 8..pos + 8 + name_len];
+                        if header.file_type == EXT_FT_DIR && name != b"." && name != b".." {
+                            child_dir_count = child_dir_count
+                                .checked_add(1)
+                                .ok_or(FsInjectorError::Invalid("Too many directories"))?;
+                        }
+                        has_lost_found |= name == b"lost+found";
+                        let min_len = (8 + name_len).div_ceil(4) * 4;
+                        let start = packed_entries.len();
+                        packed_entries.extend_from_slice(&existing[pos..pos + min_len]);
+                        let (header, _) = crate::types::ExtDirEntryHeader::mut_from_prefix(
+                            &mut packed_entries[start..],
+                        )
+                        .map_err(|_| {
+                            FsInjectorError::Invalid("Truncated packed directory header")
+                        })?;
+                        header.rec_len = (min_len as u16).into();
+                    }
+                    pos += len;
+                }
             }
-            if name == b"lost+found" {
-                has_lost_found = true;
-            }
-
-            let min_rec_len = (8 + name_len).div_ceil(4) * 4;
-            packed_entries.extend_from_slice(&entry_inode.to_le_bytes());
-            packed_entries.extend_from_slice(&(min_rec_len as u16).to_le_bytes());
-            packed_entries.push(name_len as u8);
-            packed_entries.push(file_type);
-            packed_entries.extend_from_slice(name);
-            let written = 8 + name_len;
-            if min_rec_len > written {
-                packed_entries.extend(core::iter::repeat_n(0, min_rec_len - written));
-            }
-
-            pos += rec_len;
+            logical += extent.len;
         }
-
-        // Create handle for root (using existing block, inode 2)
-        let mut root_blocks = RunList::new();
-        root_blocks.push(Run::new(root_block, 1));
+        if logical != root_size {
+            return Err(FsInjectorError::Invalid(
+                "Incomplete root directory mapping",
+            ));
+        }
         let handle = ExtHandle::new(root_inode, root_blocks);
 
         let mut dir_attr = attr.clone();
@@ -193,7 +227,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
         let ctx = ExtContext {
             handle,
-            completed_blocks: Vec::new(),
+            written_blocks,
             current_block: packed_entries,
             child_dir_count,
             attr: dir_attr,
@@ -213,7 +247,12 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             self.io
                 .write_block_best_effort(offset, &dir_buf, self.meta.block_size as usize)?;
 
-            let inode_data = ExtLostFound::create_inode(self.meta.block_size, block);
+            let mut inode_data = ExtLostFound::create_inode(self.meta.block_size, block);
+            if !self.meta.features.has_extents {
+                let mut map = crate::types::BlockMapArray::default();
+                map.direct[0] = block.into();
+                inode_data.set_block_map(&map);
+            }
             utils::write_inode(
                 self.io,
                 self.meta,
@@ -235,8 +274,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
-    fn write_dir(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
-        // Allocate inode and block for new dir
+    fn write_dir_inner(&mut self, name: &str, attr: &FileAttributes) -> FsInjectorResult {
         let handle = self
             .allocator
             .allocate(self.io, 1)
@@ -245,11 +283,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         let inode = handle.inode;
         let block = handle.blocks.0[0].start as u32;
 
-        // Write "." and ".."
         let mut entries = vec![];
         ExtDirEntry::dot(inode).to_raw_buffer(&mut entries);
 
-        // Parent inode
         let parent_inode = self
             .stack
             .last()
@@ -276,7 +312,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         // Push new dir context
         let ctx = ExtContext {
             handle,
-            completed_blocks: Vec::new(),
+            written_blocks: 0,
             current_block: entries,
             child_dir_count: 0,
             attr: attr.clone(),
@@ -293,16 +329,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
-    fn write_file(
+    fn write_file_inner(
         &mut self,
         name: &str,
         source: &mut dyn RimRead,
         size: u64,
         attr: &FileAttributes,
     ) -> FsInjectorResult {
-        // Allocate inode and blocks
         let block_size = self.meta.block_size;
-        let blocks_needed = size.div_ceil(block_size as u64) as usize;
+        let blocks_needed = size.div_ceil(block_size as u64);
 
         let handle = self
             .allocator
@@ -321,10 +356,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
         let inode_data = if self.meta.features.has_extents {
             let mapped_runs = MappedRunList::from_run_list(&blocks, 0);
-            let extents: Vec<ExtExtent> = mapped_runs
-                .iter()
-                .map(|run| ExtExtent::from(*run))
-                .collect();
+            let extents = split_extents(&mapped_runs, self.meta.block_size as usize)?;
 
             if extents.len() > 4 {
                 let max_leaf_extents =
@@ -343,11 +375,11 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
                 let mut leaf_data = vec![0u8; block_size as usize];
                 let leaf_header = ExtExtentHeader {
-                    eh_magic: EXT_EXTENT_HEADER_MAGIC,
-                    eh_entries: extents.len() as u16,
-                    eh_max: max_leaf_extents as u16,
-                    eh_depth: 0,
-                    eh_generation: 0,
+                    eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+                    eh_entries: (extents.len() as u16).into(),
+                    eh_max: (max_leaf_extents as u16).into(),
+                    eh_depth: 0.into(),
+                    eh_generation: 0.into(),
                 };
                 leaf_data[0..12].copy_from_slice(leaf_header.as_bytes());
                 for (i, extent) in extents.iter().enumerate() {
@@ -364,14 +396,14 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                     &[],
                 );
                 let root_header = ExtExtentHeader {
-                    eh_magic: EXT_EXTENT_HEADER_MAGIC,
-                    eh_entries: 1,
-                    eh_max: 4,
-                    eh_depth: 1,
-                    eh_generation: 0,
+                    eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+                    eh_entries: 1.into(),
+                    eh_max: 4.into(),
+                    eh_depth: 1.into(),
+                    eh_generation: 0.into(),
                 };
                 inode_obj.i_block[0..12].copy_from_slice(root_header.as_bytes());
-                let index_entry = ExtExtentIndex::new(extents[0].ee_block, extent_block);
+                let index_entry = ExtExtentIndex::new(extents[0].ee_block.get(), extent_block);
                 inode_obj.i_block[12..24].copy_from_slice(index_entry.as_bytes());
                 inode_obj
             } else {
@@ -384,7 +416,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                 )
             }
         } else {
-            use crate::utils::block_map::build_block_map;
+            use crate::types::build_block_map;
             let blocks_vec = blocks.to_units();
             let map = build_block_map(self.io, &mut self.allocator, self.meta, &blocks_vec)?;
 
@@ -407,7 +439,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
-    fn write_symlink(
+    fn write_symlink_inner(
         &mut self,
         name: &str,
         target: &str,
@@ -435,8 +467,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
             self.append_dir_entry(&entry)?;
         } else {
             // Slow symlink (>= 60 bytes): allocate data block(s) and stream target payload
-            let block_size = self.meta.block_size;
-            let blocks_needed = (target_len as u32).div_ceil(block_size) as usize;
+            let block_size = self.meta.block_size as u64;
+            let blocks_needed = (target_len as u64).div_ceil(block_size);
 
             let handle = self
                 .allocator
@@ -456,18 +488,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                 target_len as u64,
             )?;
 
-            let blocks_512 = (blocks.total_units() as u32) * (block_size.div_ceil(512));
+            let blocks_512 = (blocks.total_units() as u32) * ((block_size as u32).div_ceil(512));
 
             let inode_data = if self.meta.features.has_extents {
                 let mapped_runs = MappedRunList::from_run_list(&blocks, 0);
-                let extents: Vec<ExtExtent> = mapped_runs
-                    .iter()
-                    .map(|run| ExtExtent::from(*run))
-                    .collect();
+                let extents = split_extents(&mapped_runs, self.meta.block_size as usize)?;
 
                 ExtInode::from_attr(&symlink_attr, target_len as u64, 1, blocks_512, &extents)
             } else {
-                use crate::utils::block_map::build_block_map;
+                use crate::types::build_block_map;
                 let blocks_vec = blocks.to_units();
                 let map = build_block_map(self.io, &mut self.allocator, self.meta, &blocks_vec)?;
 
@@ -484,25 +513,23 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
-    fn flush_current(&mut self) -> FsInjectorResult {
+    fn flush_current_inner(&mut self) -> FsInjectorResult {
         if let Some(mut ctx) = self.stack.pop() {
             let block_size = self.meta.block_size as usize;
             // Pad directory block so last entry spans to end
             utils::pad_directory_block(&mut ctx.current_block, block_size);
-            ctx.completed_blocks.push(ctx.current_block);
 
-            // Write all directory blocks to disk
             let block_units = ctx.handle.blocks.to_units();
-            if block_units.len() != ctx.completed_blocks.len() {
+            if ctx.written_blocks >= block_units.len() {
                 return Err(FsInjectorError::Other(
                     "Mismatch between allocated directory blocks and written blocks",
                 ));
             }
-            for (&blk, data) in block_units.iter().zip(ctx.completed_blocks.iter()) {
-                self.write_block(blk, data)?;
-            }
+            let blk = block_units[ctx.written_blocks];
+            self.write_block(blk, &ctx.current_block)?;
+            ctx.written_blocks += 1;
 
-            let total_blocks = ctx.completed_blocks.len() as u64;
+            let total_blocks = ctx.written_blocks as u64;
             let total_size = total_blocks * (block_size as u64);
             let blocks_512 =
                 (ctx.handle.blocks.total_units() as u32) * (self.meta.block_size.div_ceil(512));
@@ -510,10 +537,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
             let inode_data = if self.meta.features.has_extents {
                 let mapped_runs = MappedRunList::from_run_list(&ctx.handle.blocks, 0);
-                let extents: Vec<ExtExtent> = mapped_runs
-                    .iter()
-                    .map(|run| ExtExtent::from(*run))
-                    .collect();
+                let extents = split_extents(&mapped_runs, self.meta.block_size as usize)?;
 
                 if extents.len() > 4 {
                     let max_leaf_extents = (block_size - 12) / core::mem::size_of::<ExtExtent>();
@@ -533,11 +557,11 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
 
                     let mut leaf_data = vec![0u8; block_size];
                     let leaf_header = ExtExtentHeader {
-                        eh_magic: EXT_EXTENT_HEADER_MAGIC,
-                        eh_entries: extents.len() as u16,
-                        eh_max: max_leaf_extents as u16,
-                        eh_depth: 0,
-                        eh_generation: 0,
+                        eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+                        eh_entries: (extents.len() as u16).into(),
+                        eh_max: (max_leaf_extents as u16).into(),
+                        eh_depth: 0.into(),
+                        eh_generation: 0.into(),
                     };
                     leaf_data[0..12].copy_from_slice(leaf_header.as_bytes());
                     for (i, extent) in extents.iter().enumerate() {
@@ -554,21 +578,21 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
                         &[],
                     );
                     let root_header = ExtExtentHeader {
-                        eh_magic: EXT_EXTENT_HEADER_MAGIC,
-                        eh_entries: 1,
-                        eh_max: 4,
-                        eh_depth: 1,
-                        eh_generation: 0,
+                        eh_magic: EXT_EXTENT_HEADER_MAGIC.into(),
+                        eh_entries: 1.into(),
+                        eh_max: 4.into(),
+                        eh_depth: 1.into(),
+                        eh_generation: 0.into(),
                     };
                     inode_obj.i_block[0..12].copy_from_slice(root_header.as_bytes());
-                    let index_entry = ExtExtentIndex::new(extents[0].ee_block, extent_block);
+                    let index_entry = ExtExtentIndex::new(extents[0].ee_block.get(), extent_block);
                     inode_obj.i_block[12..24].copy_from_slice(index_entry.as_bytes());
                     inode_obj
                 } else {
                     ExtInode::from_attr(&ctx.attr, total_size, links, blocks_512, &extents)
                 }
             } else {
-                use crate::utils::block_map::build_block_map;
+                use crate::types::build_block_map;
                 let blocks_vec = ctx.handle.blocks.to_units();
                 let map = build_block_map(self.io, &mut self.allocator, self.meta, &blocks_vec)?;
                 ExtInode::from_attr_block_map(&ctx.attr, total_size, links, blocks_512, &map)
@@ -584,7 +608,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
         Ok(())
     }
 
-    fn flush(&mut self) -> FsInjectorResult {
+    fn flush_inner(&mut self) -> FsInjectorResult {
         // Drain the stack by calling flush_current repeatedly
         // This ensures each directory gets its link count updated correctly
         while !self.stack.is_empty() {
@@ -597,9 +621,44 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ExtHandle> for ExtInjector<'a, IO> {
     }
 }
 
+/// Split initialized extents before narrowing their on-disk fields.
+fn split_extents(runs: &MappedRunList, block_size: usize) -> FsInjectorResult<Vec<ExtExtent>> {
+    let mut extents = Vec::new();
+    let limit = (block_size - 12) / 12;
+    for run in runs.iter() {
+        let mut done = 0;
+        while done < run.physical.length {
+            if extents.len() >= limit {
+                return Err(FsInjectorError::Unsupported(
+                    "Extent tree exceeds supported leaf capacity",
+                ));
+            }
+            let len = (run.physical.length - done).min(32768);
+            let logical = run
+                .logical_offset
+                .checked_add(done)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or(FsInjectorError::Invalid("Extent logical offset overflow"))?;
+            let physical = run
+                .physical
+                .start
+                .checked_add(done)
+                .filter(|v| *v < (1u64 << 48))
+                .ok_or(FsInjectorError::Invalid("Extent physical offset overflow"))?;
+            extents.push(ExtExtent::new_48(logical, physical, len as u16));
+            done += len;
+        }
+    }
+    Ok(extents)
+}
+
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use super::*;
+
     use crate::checker::ExtChecker;
+    use crate::core::traits::{FsFormatter, FsTreeResolver};
     use crate::formatter::ExtFormatter;
     use crate::meta::ExtFeatureSet;
     use crate::prelude::*;
@@ -970,7 +1029,6 @@ mod tests {
 
             let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
 
-            // Create 200 files in a subdirectory to exceed a single 1KB/4KB block
             let num_files = 200;
             let mut children = Vec::with_capacity(num_files);
             for i in 0..num_files {
@@ -992,14 +1050,12 @@ mod tests {
                 .inject_tree(&mut tree)
                 .unwrap_or_else(|e| panic!("Injection failed for {}: {:?}", fs_name, e));
 
-            // Verify with ExtChecker
             let mut checker = ExtChecker::new(&mut io, &meta);
             let report = checker
                 .check_all()
                 .unwrap_or_else(|e| panic!("Checker failed for {}: {:?}", fs_name, e));
             assert_no_errors(&report);
 
-            // Verify with ExtResolver
             let mut resolver = ExtResolver::new(&mut io, &meta);
             let dir_entries = resolver
                 .read_dir("/bigdir")
@@ -1017,7 +1073,6 @@ mod tests {
                 fs_name
             );
 
-            // Read a sampling of files across blocks
             for idx in [0, 10, 50, 99, 150, 199] {
                 let path = format!("/bigdir/entry_long_filename_{:04}.txt", idx);
                 let expected_content = format!("file content payload for item number {:04}\n", idx);
@@ -1027,5 +1082,293 @@ mod tests {
                 assert_eq!(data, expected_content.as_bytes());
             }
         }
+    }
+
+    #[test]
+    fn root_reopen_preserves_every_block() {
+        for meta in [
+            ExtMeta::new(32 * 1024 * 1024, None).unwrap(),
+            ExtMeta::new_ext2(32 * 1024 * 1024, None).unwrap(),
+        ] {
+            let mut disk = vec![0; 32 * 1024 * 1024];
+            let mut io = MemRimIO::new(&mut disk);
+            ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+            for pass in 0..2 {
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
+                for i in pass * 400..(pass + 1) * 400 {
+                    let mut source = rimio::SliceRimIO::new(b"payload");
+                    injector
+                        .write_file(
+                            &format!("file-{i:04}"),
+                            &mut source,
+                            7,
+                            &FileAttributes::new_file(),
+                        )
+                        .unwrap();
+                }
+                injector.flush().unwrap();
+            }
+            let mut resolver = ExtResolver::new(&mut io, &meta);
+            assert_eq!(resolver.read_dir("/").unwrap().len(), 801);
+            for i in 0..800 {
+                assert_eq!(
+                    resolver.read_file(&format!("file-{i:04}")).unwrap(),
+                    b"payload"
+                );
+            }
+        }
+    }
+    #[test]
+    fn root_reopen_fault_sweep_preserves_existing_files() {
+        use crate::core::{checker::FsChecker, testing::FaultRimIO};
+        for meta in [
+            ExtMeta::new(32 * 1024 * 1024, None).unwrap(),
+            ExtMeta::new_ext2(32 * 1024 * 1024, None).unwrap(),
+        ] {
+            let mut baseline = vec![0; 32 * 1024 * 1024];
+            {
+                let mut io = MemRimIO::new(&mut baseline);
+                ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+                let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
+                injector
+                    .set_root_context(&FileAttributes::new_dir())
+                    .unwrap();
+                for i in 0..400 {
+                    injector
+                        .write_file(
+                            &format!("old-{i:04}"),
+                            &mut rimio::SliceRimIO::new(b"old payload"),
+                            11,
+                            &FileAttributes::new_file(),
+                        )
+                        .unwrap();
+                }
+                injector.flush().unwrap();
+            }
+            let append = |io: &mut FaultRimIO<MemRimIO<'_>>| -> FsInjectorResult {
+                let mut injector = ExtInjector::new(io, &meta)?;
+                let result = (|| {
+                    injector.set_root_context(&FileAttributes::new_dir())?;
+                    injector.write_file(
+                        "new-file",
+                        &mut rimio::SliceRimIO::new(b"new payload"),
+                        11,
+                        &FileAttributes::new_file(),
+                    )?;
+                    injector.flush()
+                })();
+                if result.is_err() {
+                    assert!(
+                        injector.flush().is_err(),
+                        "retry must not hide an earlier failure"
+                    );
+                    assert!(
+                        injector
+                            .write_dir("after-error", &FileAttributes::new_dir())
+                            .is_err()
+                    );
+                    assert!(injector.flush_metadata().is_err());
+                }
+                result
+            };
+            let mut success = baseline.clone();
+            let mut trace = FaultRimIO::new(MemRimIO::new(&mut success), None);
+            append(&mut trace).unwrap();
+            let operations = trace.operations.clone();
+            drop(trace);
+            let mut clean_io = MemRimIO::new(&mut success);
+            assert!(
+                !crate::checker::ExtChecker::new(&mut clean_io, &meta)
+                    .check_all()
+                    .unwrap()
+                    .has_error()
+            );
+            assert_eq!(
+                ExtResolver::new(&mut clean_io, &meta)
+                    .read_file("new-file")
+                    .unwrap(),
+                b"new payload"
+            );
+            let accounting_matches = |io: &mut MemRimIO<'_>| {
+                assert_eq!(meta.group_count, 1);
+                let desc = crate::utils::read_group_descriptor(io, &meta, 0).unwrap();
+                let mut bitmap = vec![0; meta.block_size as usize];
+                let mut free = |block: u32, count: u64| {
+                    io.read_at(block as u64 * meta.block_size as u64, &mut bitmap)
+                        .unwrap();
+                    (0..count)
+                        .filter(|&bit| bitmap[bit as usize / 8] & (1 << (bit % 8)) == 0)
+                        .count() as u32
+                };
+                let blocks = free(
+                    desc.bg_block_bitmap_lo.get(),
+                    meta.block_count - meta.first_data_block as u64,
+                );
+                let inodes = free(desc.bg_inode_bitmap_lo.get(), meta.inodes_per_group as u64);
+                let mut counts = [0; 8];
+                io.read_at(1024 + 12, &mut counts).unwrap();
+                blocks == desc.bg_free_blocks_count_lo.get() as u32
+                    && inodes == desc.bg_free_inodes_count_lo.get() as u32
+                    && blocks == u32::from_le_bytes(counts[..4].try_into().unwrap())
+                    && inodes == u32::from_le_bytes(counts[4..].try_into().unwrap())
+            };
+            assert!(accounting_matches(&mut clean_io));
+            let mut baseline_io = MemRimIO::new(&mut baseline);
+            let baseline_report = crate::checker::ExtChecker::new(&mut baseline_io, &meta)
+                .check_all()
+                .unwrap();
+            let mut mismatches = 0usize;
+            let mut findings = 0usize;
+            let mut changed = 0usize;
+            for (index, operation) in operations.iter().enumerate() {
+                let mut disk = baseline.clone();
+                let mut fault = FaultRimIO::new(MemRimIO::new(&mut disk), Some(index));
+                assert!(
+                    append(&mut fault).is_err(),
+                    "failure swallowed at {index}: {operation:?}"
+                );
+                assert!(fault.triggered, "unreached fault {index}: {operation:?}");
+                assert_eq!(
+                    fault.operations.len(),
+                    index + 1,
+                    "I/O continued after failure {index}"
+                );
+                drop(fault);
+                changed += usize::from(disk != baseline);
+                let mut io = MemRimIO::new(&mut disk);
+                let mut resolver = ExtResolver::new(&mut io, &meta);
+                let names = resolver.read_dir("/").unwrap();
+                for i in 0..400 {
+                    let name = format!("old-{i:04}");
+                    assert!(
+                        names.contains(&name),
+                        "lost {name} at {index}: {operation:?}"
+                    );
+                    assert_eq!(
+                        resolver.read_file(&name).unwrap(),
+                        b"old payload",
+                        "changed {name} at {index}: {operation:?}"
+                    );
+                }
+                drop(resolver);
+                let report = crate::checker::ExtChecker::new(&mut io, &meta)
+                    .check_all()
+                    .unwrap();
+                if !accounting_matches(&mut io) {
+                    mismatches += 1;
+                    #[cfg(feature = "std")]
+                    println!("accounting mismatch at {index}: {operation:?}");
+                }
+                let new_findings: Vec<_> = report
+                    .findings
+                    .iter()
+                    .filter(|f| {
+                        !matches!(f.sev, crate::core::checker::Severity::Info)
+                            && !baseline_report
+                                .findings
+                                .iter()
+                                .any(|old| old.code == f.code && old.msg == f.msg)
+                    })
+                    .collect();
+                if !new_findings.is_empty() {
+                    findings += 1;
+                    #[cfg(feature = "std")]
+                    println!(
+                        "fault {index} {operation:?}: {:?}",
+                        new_findings
+                            .iter()
+                            .map(|f| (f.code, &f.msg))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                if !accounting_matches(&mut io) {
+                    assert!(
+                        !new_findings.is_empty(),
+                        "accounting mismatch at index {index} ({operation:?}) was not detected by checker"
+                    );
+                }
+            }
+            #[cfg(feature = "std")]
+            println!(
+                "extents={}: {} fault boundaries; {changed} changed images; {findings} cases with new checker warnings/errors; {mismatches} accounting mismatches; 400 old payloads preserved per case",
+                meta.features.has_extents,
+                operations.len()
+            );
+            assert_eq!(mismatches, 9, "expected 9 accounting mismatches");
+            assert_eq!(
+                findings, 9,
+                "expected all 9 accounting mismatches to produce checker findings"
+            );
+            let _ = changed;
+        }
+    }
+
+    #[test]
+    fn failed_root_flush_cannot_report_success_on_retry() {
+        use crate::core::testing::FaultRimIO;
+        let meta = ExtMeta::new(32 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0; 32 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+        // Discover the first directory write during flush without assuming offsets.
+        let mut probe_disk = disk.clone();
+        let mut probe = FaultRimIO::new(MemRimIO::new(&mut probe_disk), None);
+        let mut injector = ExtInjector::new(&mut probe, &meta).unwrap();
+        injector
+            .set_root_context(&FileAttributes::new_dir())
+            .unwrap();
+        injector.flush().unwrap();
+        drop(injector);
+        let first_write = probe
+            .operations
+            .iter()
+            .position(|op| matches!(op, crate::core::testing::FaultOperation::Write { .. }))
+            .unwrap();
+        let mut fault = FaultRimIO::new(MemRimIO::new(&mut disk), Some(first_write));
+        let mut injector = ExtInjector::new(&mut fault, &meta).unwrap();
+        injector
+            .set_root_context(&FileAttributes::new_dir())
+            .unwrap();
+        assert!(injector.flush().is_err());
+        assert!(
+            injector.flush().is_err(),
+            "failed context was discarded: retry falsely succeeds"
+        );
+    }
+
+    #[test]
+    fn relocated_metadata_is_rejected_before_mutation() {
+        let meta = ExtMeta::new(32 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0; 32 * 1024 * 1024];
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+            let offset = (meta.first_data_block as u64 + 1) * meta.block_size as u64;
+            let mut desc = crate::utils::read_group_descriptor(&mut io, &meta, 0).unwrap();
+            let block = desc.bg_inode_table_lo.get();
+            desc.bg_inode_table_lo = ((block + 1).to_le()).into();
+            io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+                .unwrap();
+        }
+        let before = disk.clone();
+        let mut io = MemRimIO::new(&mut disk);
+        assert!(matches!(
+            ExtInjector::new(&mut io, &meta),
+            Err(FsInjectorError::Unsupported(_))
+        ));
+        assert_eq!(disk, before);
+    }
+
+    #[test]
+    fn initialized_runs_are_split_without_truncation() {
+        let mut runs = RunList::new();
+        runs.push(Run::new(100, 65537));
+        let extents = split_extents(&MappedRunList::from_run_list(&runs, 0), 4096).unwrap();
+        assert_eq!(extents.iter().map(|e| e.len() as u64).sum::<u64>(), 65537);
+        assert!(extents.iter().all(|e| !e.is_uninit()));
+        assert_eq!(extents.len(), 3);
     }
 }

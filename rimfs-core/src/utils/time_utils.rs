@@ -59,6 +59,30 @@ pub fn utc_offset() -> UtcOffset {
     }
 }
 
+/// Converts MS-DOS (time, date) format into an [`OffsetDateTime`].
+pub fn dos_to_datetime(time: u16, date: u16) -> Option<OffsetDateTime> {
+    if date == 0 {
+        return None;
+    }
+    let year = 1980 + ((date >> 9) & 0x7F) as i32;
+    let month_val = ((date >> 5) & 0x0F) as u8;
+    let day = (date & 0x1F) as u8;
+
+    let month = time::Month::try_from(month_val).ok()?;
+    let hour = ((time >> 11) & 0x1F) as u8;
+    let min = ((time >> 5) & 0x3F) as u8;
+    let sec = ((time & 0x1F) * 2).min(59) as u8;
+
+    let date_obj = time::Date::from_calendar_date(year, month, day).ok()?;
+    let time_obj = time::Time::from_hms(hour, min, sec).ok()?;
+    Some(OffsetDateTime::new_utc(date_obj, time_obj))
+}
+
+/// Converts MS-DOS date-only format into an [`OffsetDateTime`] at 00:00:00 UTC.
+pub fn dos_date_to_datetime(date: u16) -> Option<OffsetDateTime> {
+    dos_to_datetime(0, date)
+}
+
 /// Trait for converting [`OffsetDateTime`] to filesystem-specific formats.
 pub trait TimeConversion {
     /// Convert to DOS date and time (Date, Time, Tenths)
@@ -117,7 +141,7 @@ impl TimeConversion for OffsetDateTime {
         let time = (hour << 11) | (minute << 5) | (second / 2);
         let encoded = date | time;
 
-        let millis_10ms = (self.millisecond() / 10) as u8;
+        let millis_10ms = ((second % 2) * 100 + self.millisecond() as u32 / 10) as u8;
 
         let offset = self.offset().whole_minutes();
         let utc_offset_15min = (offset / 15).clamp(-64, 63);
@@ -169,5 +193,32 @@ mod tests {
         assert_eq!(date, 0x21);
         assert_eq!(time, 0);
         assert_eq!(tenth, 0);
+    }
+
+    #[test]
+    fn test_dos_to_datetime_roundtrip() {
+        let date = time::Date::from_calendar_date(2024, time::Month::June, 15).unwrap();
+        let time = time::Time::from_hms(14, 30, 22).unwrap();
+        let original = OffsetDateTime::new_utc(date, time);
+
+        let (dos_date, dos_time, _) = original.to_dos_datetime();
+        let decoded = dos_to_datetime(dos_time, dos_date).unwrap();
+
+        assert_eq!(decoded.year(), 2024);
+        assert_eq!(decoded.month(), time::Month::June);
+        assert_eq!(decoded.day(), 15);
+        assert_eq!(decoded.hour(), 14);
+        assert_eq!(decoded.minute(), 30);
+        assert_eq!(decoded.second(), 22);
+
+        // Date only
+        let date_only = dos_date_to_datetime(dos_date).unwrap();
+        assert_eq!(date_only.year(), 2024);
+        assert_eq!(date_only.month(), time::Month::June);
+        assert_eq!(date_only.day(), 15);
+        assert_eq!(date_only.hour(), 0);
+
+        // Invalid date
+        assert!(dos_to_datetime(0, 0).is_none());
     }
 }

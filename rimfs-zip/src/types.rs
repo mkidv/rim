@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! ZIP fixed signature constants, extra fields, and header structures.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -9,6 +12,9 @@ use alloc::vec::Vec;
 
 use rimfs_core::allocator::FsHandle;
 use time::OffsetDateTime;
+use zerocopy::FromBytes;
+#[cfg(feature = "alloc")]
+use zerocopy::IntoBytes;
 
 /// Magic signatures for ZIP file structures.
 pub const LOCAL_FILE_HEADER_SIG: u32 = 0x0403_4b50;
@@ -45,6 +51,12 @@ pub const ZIP64_LOCATOR_FIXED_SIZE: usize = 20;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZipHandle(pub u64);
 impl FsHandle for ZipHandle {}
+
+impl From<u64> for ZipHandle {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
 
 /// Decoded in-memory representation of a Central Directory entry.
 #[derive(Debug, Clone)]
@@ -98,30 +110,21 @@ pub fn datetime_to_dos(dt: OffsetDateTime) -> (u16, u16) {
     (time, date)
 }
 
-/// Converts MS-DOS (time, date) format into an [`OffsetDateTime`].
-pub fn dos_to_datetime(time: u16, date: u16) -> Option<OffsetDateTime> {
-    let year = 1980 + ((date >> 9) & 0x7F) as i32;
-    let month_val = ((date >> 5) & 0x0F) as u8;
-    let day = (date & 0x1F) as u8;
-
-    let month = time::Month::try_from(month_val).ok()?;
-    let hour = ((time >> 11) & 0x1F) as u8;
-    let min = ((time >> 5) & 0x3F) as u8;
-    let sec = ((time & 0x1F) * 2).min(59) as u8;
-
-    let date_obj = time::Date::from_calendar_date(year, month, day).ok()?;
-    let time_obj = time::Time::from_hms(hour, min, sec).ok()?;
-    Some(OffsetDateTime::new_utc(date_obj, time_obj))
-}
+pub use rimfs_core::utils::time_utils::dos_to_datetime;
 
 /// Encodes an Extended Timestamp (`0x5455`) extra field.
 #[cfg(feature = "alloc")]
 pub fn encode_extended_timestamp_extra(dt: OffsetDateTime, _is_local_header: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
-    out.extend_from_slice(&EXTRA_EXTENDED_TIMESTAMP_ID.to_le_bytes());
     let flag = 0x01u8; // bit 0: modtime is present
     let len: u16 = 5;
-    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(
+        ZipExtraFieldHeader {
+            id: EXTRA_EXTENDED_TIMESTAMP_ID.into(),
+            data_len: len.into(),
+        }
+        .as_bytes(),
+    );
     out.push(flag);
     let mtime = dt.unix_timestamp() as i32;
     out.extend_from_slice(&mtime.to_le_bytes());
@@ -132,9 +135,14 @@ pub fn encode_extended_timestamp_extra(dt: OffsetDateTime, _is_local_header: boo
 #[cfg(feature = "alloc")]
 pub fn encode_unix_uid_gid_extra(uid: u32, gid: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
-    out.extend_from_slice(&EXTRA_UNIX_UID_GID_ID.to_le_bytes());
     let len: u16 = 11; // version (1) + uid_size (1) + uid (4) + gid_size (1) + gid (4)
-    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(
+        ZipExtraFieldHeader {
+            id: EXTRA_UNIX_UID_GID_ID.into(),
+            data_len: len.into(),
+        }
+        .as_bytes(),
+    );
     out.push(1); // version 1
     out.push(4); // UID size 4 bytes
     out.extend_from_slice(&uid.to_le_bytes());
@@ -147,8 +155,11 @@ pub fn encode_unix_uid_gid_extra(uid: u32, gid: u32) -> Vec<u8> {
 pub fn parse_extra_fields(extra: &[u8], zip_entry: &mut ZipEntry, is_local: bool) {
     let mut offset = 0;
     while offset + 4 <= extra.len() {
-        let header_id = u16::from_le_bytes([extra[offset], extra[offset + 1]]);
-        let data_size = u16::from_le_bytes([extra[offset + 2], extra[offset + 3]]) as usize;
+        let Ok((header, _)) = ZipExtraFieldHeader::ref_from_prefix(&extra[offset..]) else {
+            break;
+        };
+        let header_id = header.id.get();
+        let data_size = header.data_len.get() as usize;
         offset += 4;
 
         if offset + data_size > extra.len() {
@@ -258,3 +269,5 @@ pub fn parse_extra_fields(extra: &[u8], zip_entry: &mut ZipEntry, is_local: bool
         }
     }
 }
+
+pub use crate::headers::*;

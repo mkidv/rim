@@ -32,9 +32,10 @@ pub use io::create_image_io;
 pub use io::{ImageIO, ImageReadIO, open_image_io, open_image_read_io};
 pub use options::ImageOptions;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    use alloc::{vec, vec::Vec};
     use rimio::prelude::*;
 
     fn patterned_raw(size_bytes: usize) -> Vec<u8> {
@@ -305,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_qcow2_sparse_unallocated_reads_zeroes() {
-        let virtual_size = 10 * 1024 * 1024 * 1024u64; // 10 GiB
+        let virtual_size = 10 * 1024 * 1024 * 1024u64;
         let mut storage = vec![0u8; 1024 * 1024];
         let mut mem_io = MemRimIO::new(&mut storage);
 
@@ -318,23 +319,20 @@ mod tests {
         .unwrap();
         assert_eq!(img.raw_len(), virtual_size);
 
-        // Read at 0
         let mut buf = [0xAAu8; 4096];
         img.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, [0u8; 4096]);
 
-        // Read at 512 MiB boundary (L1 index 1)
         img.read_at(512 * 1024 * 1024, &mut buf).unwrap();
         assert_eq!(buf, [0u8; 4096]);
 
-        // Read at 9.9 GiB
         img.read_at(virtual_size - 4096, &mut buf).unwrap();
         assert_eq!(buf, [0u8; 4096]);
     }
 
     #[test]
     fn test_qcow2_lazy_l2_allocation() {
-        let virtual_size = 10 * 1024 * 1024 * 1024u64; // 10 GiB
+        let virtual_size = 10 * 1024 * 1024 * 1024u64;
         let mut storage = vec![0u8; 1024 * 1024];
         let mut mem_io = MemRimIO::new(&mut storage);
 
@@ -347,17 +345,14 @@ mod tests {
             )
             .unwrap();
 
-            // Write at offset 0 (L1 index 0)
             img.write_at(0, b"Payload at cluster 0").unwrap();
 
-            // Write at offset 1 GiB (L1 index 2)
             img.write_at(1024 * 1024 * 1024, b"Payload at cluster 1GB")
                 .unwrap();
 
             img.finish().unwrap();
         }
 
-        // Re-open and verify
         let mut img = open_image_io(&mut mem_io).unwrap();
         let mut buf0 = [0u8; 20];
         img.read_at(0, &mut buf0).unwrap();
@@ -367,7 +362,6 @@ mod tests {
         img.read_at(1024 * 1024 * 1024, &mut buf1g).unwrap();
         assert_eq!(&buf1g, b"Payload at cluster 1GB");
 
-        // Verify hole at 512 MiB (L1 index 1)
         let mut buf512m = [0xAAu8; 4096];
         img.read_at(512 * 1024 * 1024, &mut buf512m).unwrap();
         assert_eq!(buf512m, [0u8; 4096]);
@@ -400,7 +394,6 @@ mod tests {
             .unwrap();
             assert_eq!(img.raw_len(), virtual_size);
 
-            // Write in the second half of L1 table (at 5 TiB)
             let write_offset = 5 * 1024 * 1024 * 1024 * 1024u64;
             img.write_at(write_offset, b"Data at 5 TiB").unwrap();
             img.finish().unwrap();
@@ -526,12 +519,10 @@ mod tests {
             img.finish().unwrap();
         }
 
-        // Verify bit 0 is cleared in L2 entry
         mem_io.read_at(l2_off, &mut l2_bytes).unwrap();
         let updated_l2 = u64::from_be_bytes(l2_bytes);
         assert_eq!(updated_l2 & qcow2::QCOW_OFLAG_ZERO, 0);
 
-        // Verify data was persisted
         let mut img = open_image_io(&mut mem_io).unwrap();
         let mut buf = [0u8; 12];
         img.read_at(0, &mut buf).unwrap();
@@ -559,7 +550,6 @@ mod tests {
             Ok(_) => panic!("Expected error for incompatible_features != 0"),
         }
 
-        // Reset and test refcount_order != 4 rejection
         v3_ext.incompatible_features = zerocopy::byteorder::U64::new(0);
         v3_ext.refcount_order = zerocopy::byteorder::U32::new(3); // 8-bit refcounts
         mem_io.write_struct(v3_offset, &v3_ext).unwrap();
@@ -568,7 +558,6 @@ mod tests {
             Ok(_) => panic!("Expected error for refcount_order != 4"),
         }
 
-        // Reset and test header_length < 104 rejection
         v3_ext.refcount_order = zerocopy::byteorder::U32::new(4);
         v3_ext.header_length = zerocopy::byteorder::U32::new(72);
         mem_io.write_struct(v3_offset, &v3_ext).unwrap();
@@ -614,7 +603,7 @@ mod tests {
     #[test]
     fn test_vmdk_extent_offset_and_descriptor_validation() {
         // H19: VMDK extent offset must be 1 (DESCRIPTOR_SECTORS), not 0
-        let disk_size = 2 * 1024 * 1024; // 2MB
+        let disk_size = 2 * 1024 * 1024;
         let mut storage = vec![0u8; disk_size + 512];
         let mut io = MemRimIO::new(&mut storage);
         let mut raw_data = patterned_raw(disk_size);
@@ -629,7 +618,6 @@ mod tests {
         )
         .unwrap();
 
-        // Read descriptor text from sector 0
         let mut desc_bytes = [0u8; 512];
         io.read_at(0, &mut desc_bytes).unwrap();
         let desc_str = core::str::from_utf8(&desc_bytes).unwrap();
@@ -680,7 +668,7 @@ mod tests {
     #[test]
     fn test_vdi_dynamic_data_offset_and_overlap_rejection() {
         // H20: Small disk should use 1MB data offset
-        let small_disk = 10 * 1024 * 1024u64; // 10MB
+        let small_disk = 10 * 1024 * 1024u64;
         assert_eq!(vdi::calculate_data_offset(small_disk), 1024 * 1024);
 
         // Huge disk (e.g. 500GB -> 500,000 blocks * 4 = 2,000,000 bytes > 1MB)

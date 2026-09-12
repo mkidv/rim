@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Supported partition filesystem format specifications.
+
 use crate::errors::{LayoutError, LayoutResult};
 use serde::Deserialize;
 

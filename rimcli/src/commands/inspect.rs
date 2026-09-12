@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to inspect partition tables and filesystem metadata.
+
 use crate::ui::badge::fs_name_badge;
 use crate::ui::format::pretty_bytes;
 use anyhow::Context;

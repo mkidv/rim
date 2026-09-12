@@ -7,23 +7,24 @@
 use alloc::{vec, vec::Vec};
 
 use rimio::{RimIO, RimRead};
+use zerocopy::FromBytes;
 
 use crate::allocator::{NtfsAllocator, NtfsHandle};
-use crate::attr::NtfsFileAttributesExt;
-use crate::attr::{AttributeType, NtfsFileNameNamespace};
-use crate::constant::SECURITY_ID_EVERYONE;
+use crate::attr::{NtfsFileAttributes, NtfsFileAttributesExt};
+use crate::constant::{NTFS_INDX_SIGNATURE, SECURITY_ID_EVERYONE};
 use crate::core::allocator::FsAllocator;
 use crate::core::injector::FsTreeInjector;
 use crate::core::resolver::attr::FileAttributes;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::NtfsMeta;
-use crate::mft;
 use crate::types::security::SECURITY_DESCRIPTOR_ROOT;
 use crate::types::{
-    IndexEntryFlags, IndexTreeBuilder, NtfsAttribute, NtfsFileAttributes, NtfsIndexEntry,
-    NtfsMftRecord,
+    IndexEntryFlags, IndexEntryHeader, IndexNodeHeader, IndexTreeBuilder, NtfsAttribute,
+    NtfsAttributeType, NtfsFileNameNamespace, NtfsIndexEntry, NtfsMftRecord,
 };
+use crate::mft::system_file_mft_reference;
 use crate::utils::*;
+use crate::{AttrView, MftRecordView, mft};
 
 /// NTFS directory context tracking open directory state and child entries
 struct NtfsContext {
@@ -158,6 +159,13 @@ pub struct NtfsInjector<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
     /// Create a new NTFS injector
     pub fn new(io: &'a mut IO, meta: &'a NtfsMeta) -> FsInjectorResult<Self> {
+        let record = mft::read_record_direct(io, meta, 0)?;
+        let runs = mft::extract_mft_runs(&record)?;
+        if runs.len() != 1 || runs[0].lcn != Some(meta.mft_lcn) {
+            return Err(FsInjectorError::Unsupported(
+                "Mutation of fragmented MFT is unsupported",
+            ));
+        }
         let mft_allocator =
             mft::MftAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
         let allocator = NtfsAllocator::from_io(io, meta).map_err(FsInjectorError::Allocator)?;
@@ -184,10 +192,6 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         &mut self,
         record_number: u64,
     ) -> FsInjectorResult<Vec<NtfsIndexEntry>> {
-        use crate::constant::{ATTR_INDEX_ALLOCATION, ATTR_INDEX_ROOT};
-        use crate::view::attr_view::AttrView;
-        use crate::view::mft_view::MftRecordView;
-
         let record =
             mft::read_record(self.io, self.meta, record_number).map_err(FsInjectorError::IO)?;
         let view = MftRecordView::new(&record)
@@ -196,34 +200,30 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         let mut result = Vec::new();
 
         // 1. Read resident entries from $INDEX_ROOT
-        if let Ok(Some(attr_ref)) = view.find_named(ATTR_INDEX_ROOT, Some("$I30"))
+        if let Ok(Some(attr_ref)) = view.find_named(NtfsAttributeType::IndexRoot, Some("$I30"))
             && let Ok(AttrView::Resident { value, .. }) = attr_ref.as_view()
             && value.len() >= 32
         {
-            let node_header = &value[16..];
-            let entries_offset = u32::from_le_bytes([
-                node_header[0],
-                node_header[1],
-                node_header[2],
-                node_header[3],
-            ]) as usize;
-            let index_length = u32::from_le_bytes([
-                node_header[4],
-                node_header[5],
-                node_header[6],
-                node_header[7],
-            ]) as usize;
+            let (node_header, _) = IndexNodeHeader::ref_from_prefix(&value[16..])
+                .map_err(|_| FsInjectorError::Invalid("Truncated index node header"))?;
+            let entries_offset = node_header.entries_offset.get() as usize;
+            let index_length = node_header.index_length.get() as usize;
 
             let entries_start = 16 + entries_offset;
             let entries_end = 16 + index_length;
-            if entries_start < value.len() && entries_end <= value.len() {
+            if entries_start <= entries_end
+                && entries_start < value.len()
+                && entries_end <= value.len()
+            {
                 let entries_data = &value[entries_start..entries_end];
                 let mut offset = 0;
                 while offset + 16 <= entries_data.len() {
-                    let entry_header = &entries_data[offset..];
-                    let entry_length =
-                        u16::from_le_bytes([entry_header[8], entry_header[9]]) as usize;
-                    let flags = u16::from_le_bytes([entry_header[12], entry_header[13]]);
+                    let (entry_header, _) = IndexEntryHeader::ref_from_prefix(
+                        &entries_data[offset..],
+                    )
+                    .map_err(|_| FsInjectorError::Invalid("Truncated index entry header"))?;
+                    let entry_length = entry_header.entry_length.get() as usize;
+                    let flags = entry_header.flags;
                     if (flags & 0x02) != 0 {
                         break;
                     }
@@ -242,7 +242,8 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         }
 
         // 2. Read non-resident entries from $INDEX_ALLOCATION
-        if let Ok(Some(attr_ref)) = view.find_named(ATTR_INDEX_ALLOCATION, Some("$I30"))
+        if let Ok(Some(attr_ref)) =
+            view.find_named(NtfsAttributeType::IndexAllocation, Some("$I30"))
             && let Ok(AttrView::NonResident { runlist, .. }) = attr_ref.as_view()
         {
             let block_size = self.meta.index_record_size as usize;
@@ -258,7 +259,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
                         .map_err(FsInjectorError::IO)?;
 
                     for chunk in buf.chunks_exact_mut(block_size) {
-                        if chunk.len() < 4 || &chunk[0..4] != b"INDX" {
+                        if chunk.len() < 4 || chunk[0..4] != NTFS_INDX_SIGNATURE {
                             continue;
                         }
                         if !crate::utils::decode_usa_fixup(
@@ -272,31 +273,27 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
                             continue;
                         }
 
-                        let node_header = &chunk[24..];
-                        let entries_offset = u32::from_le_bytes([
-                            node_header[0],
-                            node_header[1],
-                            node_header[2],
-                            node_header[3],
-                        ]) as usize;
-                        let index_length = u32::from_le_bytes([
-                            node_header[4],
-                            node_header[5],
-                            node_header[6],
-                            node_header[7],
-                        ]) as usize;
+                        let (node_header, _) = IndexNodeHeader::ref_from_prefix(&chunk[24..])
+                            .map_err(|_| FsInjectorError::Invalid("Truncated index node header"))?;
+                        let entries_offset = node_header.entries_offset.get() as usize;
+                        let index_length = node_header.index_length.get() as usize;
 
                         let entries_start = 24 + entries_offset;
                         let entries_end = 24 + index_length;
-                        if entries_start < chunk.len() && entries_end <= chunk.len() {
+                        if entries_start <= entries_end
+                            && entries_start < chunk.len()
+                            && entries_end <= chunk.len()
+                        {
                             let entries_data = &chunk[entries_start..entries_end];
                             let mut offset = 0;
                             while offset + 16 <= entries_data.len() {
-                                let entry_header = &entries_data[offset..];
-                                let entry_length =
-                                    u16::from_le_bytes([entry_header[8], entry_header[9]]) as usize;
-                                let flags =
-                                    u16::from_le_bytes([entry_header[12], entry_header[13]]);
+                                let (entry_header, _) =
+                                    IndexEntryHeader::ref_from_prefix(&entries_data[offset..])
+                                        .map_err(|_| {
+                                            FsInjectorError::Invalid("Truncated index entry header")
+                                        })?;
+                                let entry_length = entry_header.entry_length.get() as usize;
+                                let flags = entry_header.flags;
                                 if (flags & 0x02) != 0 {
                                     break;
                                 }
@@ -322,14 +319,13 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
 
     /// Read existing allocation runs from an MFT record's $INDEX_ALLOCATION attribute if present.
     fn read_existing_allocation_runs(&mut self, record_number: u64) -> Option<rimio::run::RunList> {
-        use crate::constant::ATTR_INDEX_ALLOCATION;
         use crate::view::attr_view::AttrView;
         use crate::view::mft_view::MftRecordView;
 
         let record = mft::read_record(self.io, self.meta, record_number).ok()?;
         let view = MftRecordView::new(&record).ok()?;
         let attr_ref = view
-            .find_named(ATTR_INDEX_ALLOCATION, Some("$I30"))
+            .find_named(NtfsAttributeType::IndexAllocation, Some("$I30"))
             .ok()??;
         let attr_view = attr_ref.as_view().ok()?;
 
@@ -365,9 +361,7 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
         } else {
             let clusters = size.div_ceil(self.meta.bytes_per_cluster as u64);
             let allocated_size = clusters * self.meta.bytes_per_cluster as u64;
-            let handle = self
-                .allocator
-                .allocate_contiguous(self.io, clusters as usize)?;
+            let handle = self.allocator.allocate_contiguous(self.io, clusters)?;
 
             crate::core::utils::stream_copy::write_stream_to_run_list(
                 self.io,
@@ -377,8 +371,13 @@ impl<'a, IO: RimIO + ?Sized> NtfsInjector<'a, IO> {
                 size,
             )
             .map_err(FsInjectorError::IO)?;
-            let attr =
-                NtfsAttribute::non_resident(AttributeType::Data, "", self.meta, &handle.runs, size);
+            let attr = NtfsAttribute::non_resident(
+                NtfsAttributeType::Data,
+                "",
+                self.meta,
+                &handle.runs,
+                size,
+            );
             Ok((attr, allocated_size))
         }
     }
@@ -389,7 +388,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
         // Root MFT record is 5
         let handle = NtfsHandle::new(5);
 
-        // Read existing allocation runs from Record 5 if any
         self.root_existing_runs = self.read_existing_allocation_runs(5);
 
         // Read existing entries from disk if possible (both resident and non-resident INDX)
@@ -486,10 +484,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
 
         record.add_attribute(data_attr);
 
-        let raw = record
-            .to_raw_buffer(self.meta)
+        record
+            .write_to_mft(self.io, self.meta, mft_num)
             .map_err(FsInjectorError::IO)?;
-        mft::write_record(self.io, self.meta, mft_num, &raw).map_err(FsInjectorError::IO)?;
 
         // Add to parent index
         let ctx = self
@@ -561,7 +558,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 ));
             } else {
                 let dos_name = generate_dos_8_3_name(&ctx.name);
-                record.header.link_count = 2;
+                record.header.link_count = (2).into();
                 record.add_attribute(NtfsAttribute::file_name_custom(
                     parent_ref,
                     &dos_name,
@@ -582,11 +579,10 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
 
             if is_root {
                 record.add_attribute(NtfsAttribute::security_descriptor(
-                    SECURITY_DESCRIPTOR_ROOT.to_vec(),
+                    SECURITY_DESCRIPTOR_ROOT.to_bytes(),
                 ));
             }
 
-            // Build Index ($I30) using unified DirectoryIndexResult
             let index_res = IndexTreeBuilder::build_directory_index(self.meta, ctx.entries)
                 .map_err(FsInjectorError::IO)?;
 
@@ -635,7 +631,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                         }
                         let handle = self
                             .allocator
-                            .allocate_contiguous(self.io, layout.total_clusters as usize)
+                            .allocate_contiguous(self.io, layout.total_clusters)
                             .map_err(FsInjectorError::Allocator)?;
                         handle.runs
                     };
@@ -652,7 +648,7 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                     ));
 
                     record.add_attribute(NtfsAttribute::non_resident(
-                        AttributeType::IndexAllocation,
+                        NtfsAttributeType::IndexAllocation,
                         "$I30",
                         self.meta,
                         &runs,
@@ -662,10 +658,9 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
                 }
             }
 
-            let raw = record
-                .to_raw_buffer(self.meta)
+            record
+                .write_to_mft(self.io, self.meta, mft_num)
                 .map_err(FsInjectorError::IO)?;
-            mft::write_record(self.io, self.meta, mft_num, &raw).map_err(FsInjectorError::IO)?;
         }
         Ok(())
     }

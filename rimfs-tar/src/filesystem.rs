@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! TAR archive driver implementation.
+
 use crate::checker::TarChecker;
 use crate::formatter::TarFormatter;
 use crate::injector::TarInjector;

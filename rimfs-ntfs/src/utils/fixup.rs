@@ -1,12 +1,9 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 //! Update Sequence Array (USA) fixup utilities.
 //!
 //! NTFS uses USA fixups on multi-sector blocks (MFT records, INDX records) to detect
 //! torn writes. The last 2 bytes of each 512-byte sector are moved into the USA array
 //! in the record header, and replaced by a sequence check value.
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
 /// Apply Update Sequence Array (USA) fixups to a record (Write-side)
 ///
@@ -62,7 +59,6 @@ pub fn decode_usa_fixup(record: &mut [u8], sector_size: usize) -> bool {
     for i in 1..usa_count {
         let sector_end = i * sector_size - 2;
         if sector_end + 1 < record.len() {
-            // Verify check value
             let found = u16::from_le_bytes([record[sector_end], record[sector_end + 1]]);
             if found != check_value {
                 return false; // Corruption detected
@@ -77,22 +73,7 @@ pub fn decode_usa_fixup(record: &mut [u8], sector_size: usize) -> bool {
 }
 
 /// Calculate the number of USA elements needed for a record
-pub fn calculate_usa_size(record_size: u32, sector_size: u32) -> u16 {
+pub const fn calculate_usa_size(record_size: u32, sector_size: u32) -> u16 {
     // Number of sectors in the record + 1 (for the check value)
     ((record_size / sector_size) + 1) as u16
-}
-
-/// Build initial USA for a record
-pub fn build_initial_usa(usa_count: u16) -> Vec<u8> {
-    let mut usa = Vec::with_capacity(usa_count as usize * 2);
-
-    // Check value (arbitrary, we use 0x0000 for new records)
-    usa.extend_from_slice(&0x0000u16.to_le_bytes());
-
-    // Original sector end bytes (initially 0x0000)
-    for _ in 1..usa_count {
-        usa.extend_from_slice(&0x0000u16.to_le_bytes());
-    }
-
-    usa
 }

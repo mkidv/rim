@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Low-level NTFS sector decoding and record dumping.
+
 use rimfs::ntfs::apply_usa_fixup;
 use rimfs::ntfs::types::NtfsBootSector;
 use rimfs::ntfs::view::attr_view::{AttrRef, AttrView};
@@ -17,7 +21,7 @@ pub struct NtfsMetaInfo {
 }
 
 pub fn get_ntfs_meta(vbr: &NtfsBootSector) -> NtfsMetaInfo {
-    let bytes_per_sector = vbr.bytes_per_sector;
+    let bytes_per_sector = vbr.bytes_per_sector.get();
     let sectors_per_cluster = vbr.sectors_per_cluster;
     let bytes_per_cluster = bytes_per_sector as u64 * sectors_per_cluster as u64;
     let mft_record_size = if vbr.clusters_per_mft_record > 0 {
@@ -34,9 +38,9 @@ pub fn get_ntfs_meta(vbr: &NtfsBootSector) -> NtfsMetaInfo {
     NtfsMetaInfo {
         bytes_per_sector,
         sectors_per_cluster,
-        mft_lcn: vbr.mft_lcn,
-        mft_mirr_lcn: vbr.mft_mirr_lcn,
-        total_sectors: vbr.total_sectors,
+        mft_lcn: vbr.mft_lcn.get(),
+        mft_mirr_lcn: vbr.mft_mirr_lcn.get(),
+        total_sectors: vbr.total_sectors.get(),
         mft_record_size,
         index_record_size,
     }
@@ -48,7 +52,7 @@ pub fn analyze_ntfs(io: &mut dyn RimIO, partition_offset: u64) {
         return;
     }
 
-    let vbr = match NtfsBootSector::read_from_bytes(&buffer) {
+    let vbr = match NtfsBootSector::ref_from_bytes(&buffer) {
         Ok(vbr) => vbr,
         Err(e) => {
             println!("Failed to parse NtfsBootSector: {:?}", e);
@@ -56,7 +60,7 @@ pub fn analyze_ntfs(io: &mut dyn RimIO, partition_offset: u64) {
         }
     };
 
-    let meta = get_ntfs_meta(&vbr);
+    let meta = get_ntfs_meta(vbr);
     let bytes_per_cluster = meta.bytes_per_sector as u64 * meta.sectors_per_cluster as u64;
     let mft_offset = partition_offset + (meta.mft_lcn * bytes_per_cluster);
     let mft_mirr_offset = partition_offset + (meta.mft_mirr_lcn * bytes_per_cluster);
@@ -91,7 +95,7 @@ pub fn dump_mft_record(io: &mut dyn RimIO, partition_offset: u64, record_num: u6
         return;
     }
 
-    let vbr = match NtfsBootSector::read_from_prefix(&buffer) {
+    let vbr = match NtfsBootSector::ref_from_prefix(&buffer) {
         Ok((vbr, _)) => vbr,
         Err(e) => {
             println!(
@@ -102,7 +106,7 @@ pub fn dump_mft_record(io: &mut dyn RimIO, partition_offset: u64, record_num: u6
         }
     };
 
-    let meta = get_ntfs_meta(&vbr);
+    let meta = get_ntfs_meta(vbr);
     let bytes_per_cluster = meta.bytes_per_sector as u64 * meta.sectors_per_cluster as u64;
     let mft_offset = partition_offset + (meta.mft_lcn * bytes_per_cluster);
 
@@ -212,7 +216,7 @@ pub fn run_check_ntfs(io: &mut dyn RimIO, off: u64) {
         return;
     }
 
-    let vbr = match NtfsBootSector::read_from_bytes(&b) {
+    let vbr = match NtfsBootSector::ref_from_bytes(&b) {
         Ok(vbr) => vbr,
         Err(_) => {
             println!("[!] VBR is corrupt or invalid");
@@ -221,10 +225,9 @@ pub fn run_check_ntfs(io: &mut dyn RimIO, off: u64) {
     };
     println!("[✓] VBR Signature valid");
 
-    let meta = get_ntfs_meta(&vbr);
+    let meta = get_ntfs_meta(vbr);
     let bpc = meta.bytes_per_sector as u64 * meta.sectors_per_cluster as u64;
 
-    // Check Backup VBR
     let backup_off = off + (meta.total_sectors * meta.bytes_per_sector as u64);
     let mut b_back = [0u8; 512];
     if io.read_at(backup_off, &mut b_back).is_ok() {
@@ -240,7 +243,6 @@ pub fn run_check_ntfs(io: &mut dyn RimIO, off: u64) {
         println!("[!] Failed to read Backup VBR at offset 0x{:X}", backup_off);
     }
 
-    // Check MFT Mirr
     let mft_off = off + (meta.mft_lcn * bpc);
     let mirr_off = off + (meta.mft_mirr_lcn * bpc);
     let mut mft0 = vec![0u8; meta.mft_record_size as usize];
@@ -261,7 +263,6 @@ pub fn run_check_ntfs(io: &mut dyn RimIO, off: u64) {
         }
     }
 
-    // Check $Secure (Record 9)
     let sec_off = mft_off + (9 * meta.mft_record_size);
     let mut sec = vec![0u8; meta.mft_record_size as usize];
     if io.read_at(sec_off, &mut sec).is_ok() {
@@ -341,10 +342,10 @@ pub fn run_diff_ntfs_meta(io1: &mut dyn RimIO, io2: &mut dyn RimIO, off1: u64, o
     io1.read_at(off1, &mut b1).unwrap();
     io2.read_at(off2, &mut b2).unwrap();
 
-    let vbr1 = NtfsBootSector::read_from_bytes(&b1).unwrap();
-    let vbr2 = NtfsBootSector::read_from_bytes(&b2).unwrap();
-    let meta1 = get_ntfs_meta(&vbr1);
-    let meta2 = get_ntfs_meta(&vbr2);
+    let vbr1 = NtfsBootSector::ref_from_bytes(&b1).unwrap();
+    let vbr2 = NtfsBootSector::ref_from_bytes(&b2).unwrap();
+    let meta1 = get_ntfs_meta(vbr1);
+    let meta2 = get_ntfs_meta(vbr2);
 
     println!("\n=== NTFS METADATA COMPARISON ===");
     println!("{:<25} | {:<20} | {:<20}", "Field", "VHD 1", "VHD 2");
@@ -433,8 +434,8 @@ pub fn dump_secure_table(io: &mut dyn RimIO, partition_offset: u64) {
     if io.read_at(partition_offset, &mut buffer).is_err() {
         return;
     }
-    let (vbr, _) = NtfsBootSector::read_from_prefix(&buffer).unwrap();
-    let meta = get_ntfs_meta(&vbr);
+    let (vbr, _) = NtfsBootSector::ref_from_prefix(&buffer).unwrap();
+    let meta = get_ntfs_meta(vbr);
     let bytes_per_cluster = meta.bytes_per_sector as u64 * meta.sectors_per_cluster as u64;
     let mft_offset = partition_offset + (meta.mft_lcn * bytes_per_cluster);
 
@@ -450,7 +451,7 @@ pub fn dump_secure_table(io: &mut dyn RimIO, partition_offset: u64) {
         let ty = attr.ty();
         let mut name = String::new();
         if attr.header.name_length > 0 {
-            let n_off = attr.header.name_offset as usize;
+            let n_off = attr.header.name_offset.get() as usize;
             let n_len = attr.header.name_length as usize * 2;
             let name_u16: Vec<u16> = attr.raw[n_off..n_off + n_len]
                 .chunks_exact(2)
@@ -647,8 +648,8 @@ pub fn dump_ntfs_layout(io: &mut dyn RimIO, partition_offset: u64) {
     if io.read_at(partition_offset, &mut buffer).is_err() {
         return;
     }
-    let vbr = NtfsBootSector::read_from_bytes(&buffer).unwrap();
-    let meta = get_ntfs_meta(&vbr);
+    let vbr = NtfsBootSector::ref_from_bytes(&buffer).unwrap();
+    let meta = get_ntfs_meta(vbr);
     let bytes_per_cluster = meta.bytes_per_sector as u64 * meta.sectors_per_cluster as u64;
     let mft_offset = partition_offset + (meta.mft_lcn * bytes_per_cluster);
 

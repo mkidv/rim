@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 directory tree and El Torito boot catalog injector.
+
+use crate::records::{IsoBootSectionHeader, IsoBootValidationEntry, IsoCatalogBootEntry};
+use crate::records::{IsoPathTableHeaderBe, IsoPathTableHeaderLe};
+use rimio::RimWriteStructExt;
+use zerocopy::IntoBytes;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -40,117 +47,126 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
         let now_bin = format_iso_binary_datetime(now);
 
         // 1. Primary Volume Descriptor (Sector 16)
-        let mut pvd = [0u8; ISO_SECTOR_SIZE];
-        pvd[0] = VD_PRIMARY;
-        pvd[1..6].copy_from_slice(ISO_STANDARD_ID);
-        pvd[6] = 1;
+        let mut pvd = IsoVolumeDescriptor {
+            kind: VD_PRIMARY,
+            ..Default::default()
+        };
+        pvd.standard_id.copy_from_slice(ISO_STANDARD_ID);
+        pvd.version = 1;
 
         let sys_id = b"LINUX                           ";
-        pvd[8..40].copy_from_slice(sys_id);
+        pvd.system_id.copy_from_slice(sys_id);
 
         let mut vol_id = [b' '; 32];
         let label_bytes = self.meta.volume_id.as_bytes();
         let len = label_bytes.len().min(32);
         vol_id[..len].copy_from_slice(&label_bytes[..len]);
-        pvd[40..72].copy_from_slice(&vol_id);
+        pvd.volume_id.copy_from_slice(&vol_id);
 
-        put_both_u32(&mut pvd[80..88], plan.total_sectors);
-        put_both_u16(&mut pvd[120..124], 1);
-        put_both_u16(&mut pvd[124..128], 1);
-        put_both_u16(&mut pvd[128..132], ISO_SECTOR_SIZE as u16);
-        put_both_u32(&mut pvd[132..140], plan.path_table_size);
+        pvd.volume_space_size = (plan.total_sectors).into();
+        pvd.volume_set_size = (1).into();
+        pvd.volume_sequence = (1).into();
+        pvd.logical_block_size = (ISO_SECTOR_SIZE as u16).into();
+        pvd.path_table_size = (plan.path_table_size).into();
 
-        pvd[140..144].copy_from_slice(&plan.pvd_path_table_l_lba.to_le_bytes());
-        pvd[148..152].copy_from_slice(&plan.pvd_path_table_m_lba.to_be_bytes());
+        pvd.path_table_l = (plan.pvd_path_table_l_lba).into();
+        pvd.path_table_m = (plan.pvd_path_table_m_lba).into();
 
         // Root directory in PVD
         let root = &plan.directories[0];
-        pvd[156] = 34;
-        put_both_u32(&mut pvd[158..166], root.iso_lba);
-        put_both_u32(&mut pvd[166..174], root.iso_size);
-        pvd[174..181].copy_from_slice(&now_bin);
-        pvd[181] = DIR_FLAG_DIRECTORY;
-        put_both_u16(&mut pvd[184..188], 1);
-        pvd[188] = 1;
-        pvd[189] = 0; // \0 for root
+        pvd.root.header.record_len = 34;
+        pvd.root.header.extent_lba = (root.iso_lba).into();
+        pvd.root.header.data_length = (root.iso_size).into();
+        pvd.root.header.recorded.copy_from_slice(&now_bin);
+        pvd.root.header.flags = DIR_FLAG_DIRECTORY;
+        pvd.root.header.volume_sequence = (1).into();
+        pvd.root.header.name_len = 1;
+        pvd.root.identifier = 0; // \0 for root
 
-        pvd[813..830].copy_from_slice(&now_text);
-        pvd[830..847].copy_from_slice(&now_text);
-        pvd[881] = 1;
+        pvd.created.copy_from_slice(&now_text);
+        pvd.modified.copy_from_slice(&now_text);
+        pvd.file_structure_version = 1;
 
-        self.io.write_at(16 * ISO_SECTOR_SIZE as u64, &pvd)?;
+        self.io.write_struct(16 * ISO_SECTOR_SIZE as u64, &pvd)?;
 
         // 2. Supplementary Volume Descriptor (Joliet)
         if let Some(svd_lba) = plan.svd_joliet_lba {
-            let mut svd = [0u8; ISO_SECTOR_SIZE];
-            svd[0] = VD_SUPPLEMENTARY;
-            svd[1..6].copy_from_slice(ISO_STANDARD_ID);
-            svd[6] = 1;
+            let mut svd = IsoVolumeDescriptor {
+                kind: VD_SUPPLEMENTARY,
+                ..Default::default()
+            };
+            svd.standard_id.copy_from_slice(ISO_STANDARD_ID);
+            svd.version = 1;
 
             let ucs2_sys = encode_ucs2_be("LINUX");
-            svd[8..8 + ucs2_sys.len().min(32)].copy_from_slice(&ucs2_sys[..ucs2_sys.len().min(32)]);
+            svd.system_id[..ucs2_sys.len().min(32)]
+                .copy_from_slice(&ucs2_sys[..ucs2_sys.len().min(32)]);
 
             let ucs2_vol = encode_ucs2_be(&self.meta.volume_id);
-            svd[40..40 + ucs2_vol.len().min(32)]
+            svd.volume_id[..ucs2_vol.len().min(32)]
                 .copy_from_slice(&ucs2_vol[..ucs2_vol.len().min(32)]);
 
-            put_both_u32(&mut svd[80..88], plan.total_sectors);
-            svd[88..91].copy_from_slice(JOLIET_ESCAPE_UCS2_LVL3); // Escape sequence (%/@)
-            put_both_u16(&mut svd[120..124], 1);
-            put_both_u16(&mut svd[124..128], 1);
-            put_both_u16(&mut svd[128..132], ISO_SECTOR_SIZE as u16);
+            svd.volume_space_size = (plan.total_sectors).into();
+            svd.escape_sequences[..3].copy_from_slice(JOLIET_ESCAPE_UCS2_LVL3); // Escape sequence (%/@)
+            svd.volume_set_size = (1).into();
+            svd.volume_sequence = (1).into();
+            svd.logical_block_size = (ISO_SECTOR_SIZE as u16).into();
 
             let jpt_size = plan.joliet_path_table_size.unwrap_or(10);
-            put_both_u32(&mut svd[132..140], jpt_size);
+            svd.path_table_size = (jpt_size).into();
 
             if let Some(jpt_l) = plan.joliet_path_table_l_lba {
-                svd[140..144].copy_from_slice(&jpt_l.to_le_bytes());
+                svd.path_table_l = (jpt_l).into();
             }
             if let Some(jpt_m) = plan.joliet_path_table_m_lba {
-                svd[148..152].copy_from_slice(&jpt_m.to_be_bytes());
+                svd.path_table_m = (jpt_m).into();
             }
 
             // Root directory in Joliet SVD
-            svd[156] = 34;
-            put_both_u32(&mut svd[158..166], root.joliet_lba);
-            put_both_u32(&mut svd[166..174], root.joliet_size);
-            svd[174..181].copy_from_slice(&now_bin);
-            svd[181] = DIR_FLAG_DIRECTORY;
-            put_both_u16(&mut svd[184..188], 1);
-            svd[188] = 1;
-            svd[189] = 0;
+            svd.root.header.record_len = 34;
+            svd.root.header.extent_lba = (root.joliet_lba).into();
+            svd.root.header.data_length = (root.joliet_size).into();
+            svd.root.header.recorded.copy_from_slice(&now_bin);
+            svd.root.header.flags = DIR_FLAG_DIRECTORY;
+            svd.root.header.volume_sequence = (1).into();
+            svd.root.header.name_len = 1;
+            svd.root.identifier = 0;
 
-            svd[813..830].copy_from_slice(&now_text);
-            svd[830..847].copy_from_slice(&now_text);
-            svd[881] = 1;
+            svd.created.copy_from_slice(&now_text);
+            svd.modified.copy_from_slice(&now_text);
+            svd.file_structure_version = 1;
 
             self.io
-                .write_at(svd_lba as u64 * ISO_SECTOR_SIZE as u64, &svd)?;
+                .write_struct(svd_lba as u64 * ISO_SECTOR_SIZE as u64, &svd)?;
         }
 
         // 3. El Torito Boot Record Volume Descriptor
         if let Some(boot_vd_lba) = plan.boot_record_lba {
-            let mut bvd = [0u8; ISO_SECTOR_SIZE];
-            bvd[0] = VD_BOOT_RECORD;
-            bvd[1..6].copy_from_slice(ISO_STANDARD_ID);
-            bvd[6] = 1;
-            bvd[7..39].copy_from_slice(EL_TORITO_SYS_ID);
+            let mut bvd = IsoBootDescriptor {
+                kind: VD_BOOT_RECORD,
+                ..Default::default()
+            };
+            bvd.standard_id.copy_from_slice(ISO_STANDARD_ID);
+            bvd.version = 1;
+            bvd.system_id.copy_from_slice(EL_TORITO_SYS_ID);
 
             if let Some(catalog_lba) = plan.boot_catalog_lba {
-                bvd[71..75].copy_from_slice(&catalog_lba.to_le_bytes());
+                bvd.catalog_lba = (catalog_lba).into();
             }
 
             self.io
-                .write_at(boot_vd_lba as u64 * ISO_SECTOR_SIZE as u64, &bvd)?;
+                .write_struct(boot_vd_lba as u64 * ISO_SECTOR_SIZE as u64, &bvd)?;
         }
 
         // 4. Volume Descriptor Set Terminator
-        let mut term = [0u8; ISO_SECTOR_SIZE];
-        term[0] = VD_TERMINATOR;
-        term[1..6].copy_from_slice(ISO_STANDARD_ID);
-        term[6] = 1;
+        let mut term = IsoTerminator {
+            kind: VD_TERMINATOR,
+            ..Default::default()
+        };
+        term.standard_id.copy_from_slice(ISO_STANDARD_ID);
+        term.version = 1;
         self.io
-            .write_at(plan.terminator_lba as u64 * ISO_SECTOR_SIZE as u64, &term)?;
+            .write_struct(plan.terminator_lba as u64 * ISO_SECTOR_SIZE as u64, &term)?;
 
         Ok(())
     }
@@ -172,10 +188,13 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                 dir.name.to_uppercase().into_bytes()
             };
             let len = name_bytes.len() as u8;
-            pt_l[off_l] = len;
-            pt_l[off_l + 1] = 0;
-            pt_l[off_l + 2..off_l + 6].copy_from_slice(&dir.iso_lba.to_le_bytes());
-            pt_l[off_l + 6..off_l + 8].copy_from_slice(&(dir.parent_idx as u16).to_le_bytes());
+            let header = IsoPathTableHeaderLe {
+                identifier_len: len,
+                extended_attribute_len: 0,
+                extent_lba: dir.iso_lba.into(),
+                parent_number: (dir.parent_idx as u16).into(),
+            };
+            pt_l[off_l..off_l + 8].copy_from_slice(header.as_bytes());
             pt_l[off_l + 8..off_l + 8 + name_bytes.len()].copy_from_slice(&name_bytes);
             off_l += 8 + name_bytes.len();
             if name_bytes.len() % 2 != 0 {
@@ -197,10 +216,13 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                 dir.name.to_uppercase().into_bytes()
             };
             let len = name_bytes.len() as u8;
-            pt_m[off_m] = len;
-            pt_m[off_m + 1] = 0;
-            pt_m[off_m + 2..off_m + 6].copy_from_slice(&dir.iso_lba.to_be_bytes());
-            pt_m[off_m + 6..off_m + 8].copy_from_slice(&(dir.parent_idx as u16).to_be_bytes());
+            let header = IsoPathTableHeaderBe {
+                identifier_len: len,
+                extended_attribute_len: 0,
+                extent_lba: dir.iso_lba.into(),
+                parent_number: (dir.parent_idx as u16).into(),
+            };
+            pt_m[off_m..off_m + 8].copy_from_slice(header.as_bytes());
             pt_m[off_m + 8..off_m + 8 + name_bytes.len()].copy_from_slice(&name_bytes);
             off_m += 8 + name_bytes.len();
             if name_bytes.len() % 2 != 0 {
@@ -228,11 +250,13 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                     encode_ucs2_be(&dir.name)
                 };
                 let len = name_bytes.len() as u8;
-                jpt_l[j_off_l] = len;
-                jpt_l[j_off_l + 1] = 0;
-                jpt_l[j_off_l + 2..j_off_l + 6].copy_from_slice(&dir.joliet_lba.to_le_bytes());
-                jpt_l[j_off_l + 6..j_off_l + 8]
-                    .copy_from_slice(&(dir.parent_idx as u16).to_le_bytes());
+                let header = IsoPathTableHeaderLe {
+                    identifier_len: len,
+                    extended_attribute_len: 0,
+                    extent_lba: dir.joliet_lba.into(),
+                    parent_number: (dir.parent_idx as u16).into(),
+                };
+                jpt_l[j_off_l..j_off_l + 8].copy_from_slice(header.as_bytes());
                 jpt_l[j_off_l + 8..j_off_l + 8 + name_bytes.len()].copy_from_slice(&name_bytes);
                 j_off_l += 8 + name_bytes.len();
                 if name_bytes.len() % 2 != 0 {
@@ -251,11 +275,13 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                     encode_ucs2_be(&dir.name)
                 };
                 let len = name_bytes.len() as u8;
-                jpt_m[j_off_m] = len;
-                jpt_m[j_off_m + 1] = 0;
-                jpt_m[j_off_m + 2..j_off_m + 6].copy_from_slice(&dir.joliet_lba.to_be_bytes());
-                jpt_m[j_off_m + 6..j_off_m + 8]
-                    .copy_from_slice(&(dir.parent_idx as u16).to_be_bytes());
+                let header = IsoPathTableHeaderBe {
+                    identifier_len: len,
+                    extended_attribute_len: 0,
+                    extent_lba: dir.joliet_lba.into(),
+                    parent_number: (dir.parent_idx as u16).into(),
+                };
+                jpt_m[j_off_m..j_off_m + 8].copy_from_slice(header.as_bytes());
                 jpt_m[j_off_m + 8..j_off_m + 8 + name_bytes.len()].copy_from_slice(&name_bytes);
                 j_off_m += 8 + name_bytes.len();
                 if name_bytes.len() % 2 != 0 {
@@ -272,13 +298,11 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
     /// Writes directory records for standard ISO (with Rock Ridge) and Joliet.
     fn write_directory_records(&mut self, plan: &IsoLayoutPlan) -> FsInjectorResult<()> {
         for (dir_idx, dir) in plan.directories.iter().enumerate() {
-            // Write standard ISO 9660 Directory Block
             let iso_block =
                 self.serialize_dir_block(dir_idx, plan, false, self.meta.enable_rock_ridge);
             self.io
                 .write_at(dir.iso_lba as u64 * ISO_SECTOR_SIZE as u64, &iso_block)?;
 
-            // Write Joliet Directory Block
             if self.meta.enable_joliet {
                 let joliet_block =
                     self.serialize_dir_block(dir_idx, plan, true, self.meta.enable_rock_ridge);
@@ -474,30 +498,20 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
         symlink_target: Option<&str>,
     ) -> Vec<u8> {
         let mut rec = Vec::with_capacity(64 + name_bytes.len());
-        rec.push(0); // placeholder for total record length
-        rec.push(0); // ext attribute record length
-        let mut lba_buf = [0u8; 8];
-        put_both_u32(&mut lba_buf, lba);
-        rec.extend_from_slice(&lba_buf);
-
-        let mut len_buf = [0u8; 8];
-        put_both_u32(&mut len_buf, data_len);
-        rec.extend_from_slice(&len_buf);
-
-        rec.extend_from_slice(&datetime_bin);
-        rec.push(if is_dir {
-            DIR_FLAG_DIRECTORY
-        } else {
-            DIR_FLAG_FILE
-        });
-        rec.push(0); // file unit size
-        rec.push(0); // interleave gap
-
-        let mut vol_seq = [0u8; 4];
-        put_both_u16(&mut vol_seq, 1);
-        rec.extend_from_slice(&vol_seq);
-
-        rec.push(name_bytes.len() as u8);
+        let header = IsoDirectoryHeader {
+            extent_lba: lba.into(),
+            data_length: data_len.into(),
+            recorded: datetime_bin,
+            flags: if is_dir {
+                DIR_FLAG_DIRECTORY
+            } else {
+                DIR_FLAG_FILE
+            },
+            volume_sequence: 1.into(),
+            name_len: name_bytes.len() as u8,
+            ..Default::default()
+        };
+        rec.extend_from_slice(header.as_bytes());
         rec.extend_from_slice(name_bytes);
 
         if name_bytes.len().is_multiple_of(2) {
@@ -564,66 +578,62 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
         if let Some(catalog_lba) = plan.boot_catalog_lba {
             let mut catalog = [0u8; ISO_SECTOR_SIZE];
 
-            // 1. Validation Entry (offset 0..32)
-            catalog[0] = 0x01; // Header ID
-            catalog[1] = 0x00; // Platform x86
-            catalog[4..12].copy_from_slice(b"RIM_BOOT");
-            catalog[30] = 0x55;
-            catalog[31] = 0xAA;
+            let mut validation = IsoBootValidationEntry {
+                header_id: 1,
+                platform_id: if plan.bios_boot_image_lba.is_some() {
+                    0
+                } else {
+                    0xEF
+                },
+                key: [0x55, 0xAA],
+                ..Default::default()
+            };
+            validation.identifier[..8].copy_from_slice(b"RIM_BOOT");
+            validation.checksum = 0u16.wrapping_sub(validation.checksum_sum()).into();
+            catalog[..32].copy_from_slice(validation.as_bytes());
 
-            // Checksum validation entry (sum of words == 0)
-            let mut sum: u16 = 0;
-            for i in 0..15 {
-                let word = u16::from_le_bytes([catalog[i * 2], catalog[i * 2 + 1]]);
-                sum = sum.wrapping_add(word);
+            let initial = plan
+                .bios_boot_image_lba
+                .map(|lba| (lba, plan.bios_boot_image_sectors))
+                .or_else(|| {
+                    plan.efi_boot_image_lba
+                        .map(|lba| (lba, plan.efi_boot_image_sectors))
+                });
+            if let Some((lba, sectors)) = initial {
+                let entry = IsoCatalogBootEntry {
+                    boot_indicator: 0x88,
+                    sector_count: ((sectors * 4).min(u16::MAX as u32).max(1) as u16).into(),
+                    image_lba: lba.into(),
+                    ..Default::default()
+                };
+                catalog[32..64].copy_from_slice(entry.as_bytes());
             }
-            let word_31 = u16::from_le_bytes([catalog[30], catalog[31]]);
-            sum = sum.wrapping_add(word_31);
-            let chk = (0u16).wrapping_sub(sum);
-            catalog[28..30].copy_from_slice(&chk.to_le_bytes());
-
-            // 2. Initial / Default Boot Entry (offset 32..64)
-            if let Some(bios_lba) = plan.bios_boot_image_lba {
-                catalog[32] = 0x88; // Bootable
-                catalog[33] = 0x00; // No emulation
-                let sector_count = (plan.bios_boot_image_sectors * 4)
-                    .min(u16::MAX as u32)
-                    .max(1) as u16; // In 512B sectors
-                catalog[38..40].copy_from_slice(&sector_count.to_le_bytes());
-                catalog[40..44].copy_from_slice(&bios_lba.to_le_bytes());
-            } else if let Some(efi_lba) = plan.efi_boot_image_lba {
-                catalog[32] = 0x88;
-                catalog[33] = 0x00;
-                let sector_count = (plan.efi_boot_image_sectors * 4)
-                    .min(u16::MAX as u32)
-                    .max(1) as u16;
-                catalog[38..40].copy_from_slice(&sector_count.to_le_bytes());
-                catalog[40..44].copy_from_slice(&efi_lba.to_le_bytes());
-            }
-
-            // 3. Section Header for EFI Boot Entry (offset 64..96)
             if let Some(efi_lba) = plan.efi_boot_image_lba
                 && plan.bios_boot_image_lba.is_some()
             {
-                catalog[64] = 0x91; // Final section header
-                catalog[65] = 0xEF; // EFI Platform ID
-                catalog[66..68].copy_from_slice(&1u16.to_le_bytes()); // 1 entry
-
-                // Section Entry (offset 96..128)
-                catalog[96] = 0x88; // Bootable
-                catalog[97] = 0x00; // No emulation
-                let sector_count = (plan.efi_boot_image_sectors * 4)
-                    .min(u16::MAX as u32)
-                    .max(1) as u16;
-                catalog[102..104].copy_from_slice(&sector_count.to_le_bytes());
-                catalog[104..108].copy_from_slice(&efi_lba.to_le_bytes());
+                let section = IsoBootSectionHeader {
+                    indicator: 0x91,
+                    platform_id: 0xEF,
+                    entry_count: 1.into(),
+                    ..Default::default()
+                };
+                catalog[64..96].copy_from_slice(section.as_bytes());
+                let entry = IsoCatalogBootEntry {
+                    boot_indicator: 0x88,
+                    sector_count: ((plan.efi_boot_image_sectors * 4)
+                        .min(u16::MAX as u32)
+                        .max(1) as u16)
+                        .into(),
+                    image_lba: efi_lba.into(),
+                    ..Default::default()
+                };
+                catalog[96..128].copy_from_slice(entry.as_bytes());
             }
 
             self.io
                 .write_at(catalog_lba as u64 * ISO_SECTOR_SIZE as u64, &catalog)?;
         }
 
-        // Write EFI FAT Boot Image
         if let (Some(efi_lba), Some(efi_data)) =
             (plan.efi_boot_image_lba, plan.efi_boot_image_data.as_ref())
         {
@@ -631,7 +641,6 @@ impl<'a, IO: RimIO + ?Sized> IsoInjector<'a, IO> {
                 .write_at(efi_lba as u64 * ISO_SECTOR_SIZE as u64, efi_data)?;
         }
 
-        // Write BIOS Boot Image
         if let (Some(bios_lba), Some(bios_data)) =
             (plan.bios_boot_image_lba, self.meta.boot_bios.as_ref())
         {

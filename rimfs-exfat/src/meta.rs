@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! exFAT metadata descriptors and cluster boundary calculation.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::string::{String, ToString};
 
@@ -110,7 +112,7 @@ impl ExFatMeta {
             fat_offset_sectors,
             EXFAT_ENTRY_SIZE as u32,
             EXFAT_FIRST_CLUSTER, // = 2
-            EXFAT_NUM_FATS,      // = 1
+            num_fats,
             sectors_per_cluster,
             EXFAT_BOUNDARY_ALIGNMENT, // 1 MiB
         );
@@ -168,7 +170,7 @@ impl ExFatMeta {
         }
 
         // Robustness Check: Validate basic ExFAT VBR fields
-        if vbr.root_dir_cluster < EXFAT_FIRST_CLUSTER {
+        if vbr.root_dir_cluster.get() < EXFAT_FIRST_CLUSTER {
             return Err(FsError::Invalid("Invalid ExFAT VBR: root_cluster < 2"));
         }
 
@@ -192,14 +194,14 @@ impl ExFatMeta {
         }
 
         let bytes_per_cluster = bytes_per_sector * sectors_per_cluster;
-        let fat_offset_bytes = vbr.fat_offset as u64 * bytes_per_sector as u64;
-        let cluster_heap_offset = vbr.cluster_heap_offset as u64 * bytes_per_sector as u64;
+        let fat_offset_bytes = vbr.fat_offset.get() as u64 * bytes_per_sector as u64;
+        let cluster_heap_offset = vbr.cluster_heap_offset.get() as u64 * bytes_per_sector as u64;
 
-        let root_cluster = vbr.root_dir_cluster;
-        let mut found_bitmap: Option<ExFatBitmapEntry> = None;
-        let mut found_upcase: Option<ExFatUpcaseEntry> = None;
-        let mut found_label: Option<ExFatVolumeLabelEntry> = None;
-        let mut found_guid: Option<ExFatGuidEntry> = None;
+        let root_cluster = vbr.root_dir_cluster.get();
+        let mut found_bitmap: Option<&ExFatBitmapEntry> = None;
+        let mut found_upcase: Option<&ExFatUpcaseEntry> = None;
+        let mut found_label: Option<&ExFatVolumeLabelEntry> = None;
+        let mut found_guid: Option<&ExFatGuidEntry> = None;
 
         let offset = cluster_heap_offset
             + ((root_cluster - EXFAT_FIRST_CLUSTER) as u64 * bytes_per_cluster as u64);
@@ -213,25 +215,25 @@ impl ExFatMeta {
             match tag {
                 EXFAT_ENTRY_LABEL => {
                     found_label = Some(
-                        ExFatVolumeLabelEntry::read_from_bytes(entry)
+                        ExFatVolumeLabelEntry::ref_from_bytes(entry)
                             .map_err(|_| RimIOError::Other("volume_label_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_BITMAP => {
                     found_bitmap = Some(
-                        ExFatBitmapEntry::read_from_bytes(entry)
+                        ExFatBitmapEntry::ref_from_bytes(entry)
                             .map_err(|_| RimIOError::Other("bitmap_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_UPCASE => {
                     found_upcase = Some(
-                        ExFatUpcaseEntry::read_from_bytes(entry)
+                        ExFatUpcaseEntry::ref_from_bytes(entry)
                             .map_err(|_| RimIOError::Other("upcase_parse"))?,
                     );
                 }
                 EXFAT_ENTRY_GUID => {
                     found_guid = Some(
-                        ExFatGuidEntry::read_from_bytes(entry)
+                        ExFatGuidEntry::ref_from_bytes(entry)
                             .map_err(|_| RimIOError::Other("guid_parse"))?,
                     );
                 }
@@ -240,7 +242,9 @@ impl ExFatMeta {
             }
         }
 
-        let volume_label = found_label.map(|f| f.volume_label).unwrap_or([0u16; 11]);
+        let volume_label = found_label
+            .map(|f| f.volume_label.map(|unit| unit.get()))
+            .unwrap_or([0u16; 11]);
 
         let bitmap = found_bitmap.ok_or(RimIOError::Other("bitmap_cluster"))?;
 
@@ -249,34 +253,38 @@ impl ExFatMeta {
         let guid = found_guid.map(|f| Some(f.guid)).unwrap_or(None);
 
         Ok(Self {
-            volume_id: vbr.volume_serial,
+            volume_id: vbr.volume_serial.get(),
             volume_guid: guid,
             volume_label,
             bytes_per_sector: bytes_per_sector as u16,
             sectors_per_cluster,
             bytes_per_cluster,
-            volume_size_bytes: vbr.volume_length * (bytes_per_sector as u64),
-            volume_size_sectors: vbr.volume_length,
+            volume_size_bytes: vbr.volume_length.get() * (bytes_per_sector as u64),
+            volume_size_sectors: vbr.volume_length.get(),
             num_fats: vbr.number_of_fats,
             fat_offset_bytes,
-            fat_size_sectors: vbr.fat_length,
+            fat_size_sectors: vbr.fat_length.get(),
             cluster_heap_offset_bytes: cluster_heap_offset,
-            cluster_count: vbr.cluster_count,
-            bitmap_cluster: bitmap.first_cluster,
-            upcase_cluster: upcase.first_cluster,
+            cluster_count: vbr.cluster_count.get(),
+            bitmap_cluster: bitmap.first_cluster.get(),
+            upcase_cluster: upcase.first_cluster.get(),
             root_cluster,
-            bitmap_size_bytes: bitmap.data_length,
-            upcase_size_bytes: upcase.data_length,
-            upcase_checksum: upcase.table_checksum,
+            bitmap_size_bytes: bitmap.data_length.get(),
+            upcase_size_bytes: upcase.data_length.get(),
+            upcase_checksum: upcase.table_checksum.get(),
             upcase_flavor: UpcaseFlavor::Full,
         })
     }
 
-    pub fn bitmap_entry_offset(&self, cluster: u32) -> (usize, u8) {
-        let bit = (cluster - Self::FIRST_CLUSTER) as usize;
-        let byte_index = bit / 8;
-        let bit_mask = 1u8 << (bit % 8);
-        (byte_index, bit_mask)
+    #[inline]
+    pub fn bitmap_bit(&self, cluster: u32) -> Option<u64> {
+        cluster.checked_sub(Self::FIRST_CLUSTER).map(u64::from)
+    }
+
+    #[inline]
+    pub fn cluster_from_bitmap_bit(&self, bit: u64) -> Option<u32> {
+        let bit = u32::try_from(bit).ok()?;
+        Self::FIRST_CLUSTER.checked_add(bit)
     }
 
     #[inline]
@@ -311,16 +319,16 @@ impl ExFatMeta {
 }
 
 impl FsMeta<u32> for ExFatMeta {
-    fn unit_size(&self) -> usize {
-        self.bytes_per_cluster as usize
+    fn unit_size(&self) -> u64 {
+        self.bytes_per_cluster as u64
     }
 
     fn root_unit(&self) -> u32 {
         self.root_cluster
     }
 
-    fn total_units(&self) -> usize {
-        self.cluster_count as usize
+    fn total_units(&self) -> u64 {
+        self.cluster_count as u64
     }
 
     fn size_bytes(&self) -> u64 {
@@ -334,8 +342,7 @@ impl FsMeta<u32> for ExFatMeta {
     }
 
     fn unit_offset(&self, cluster: u32) -> u64 {
-        self.cluster_heap_offset_bytes
-            + ((cluster - Self::FIRST_CLUSTER) as u64 * self.unit_size() as u64)
+        self.cluster_heap_offset_bytes + ((cluster - Self::FIRST_CLUSTER) as u64 * self.unit_size())
     }
 
     fn first_data_unit(&self) -> u32 {
@@ -384,13 +391,20 @@ impl FatFsMeta for ExFatMeta {
 }
 
 impl BitmapFsMeta for ExFatMeta {
+    #[inline]
     fn bitmap_offset(&self) -> u64 {
         self.cluster_heap_offset_bytes
             + (self.bitmap_cluster - Self::FIRST_CLUSTER) as u64 * self.bytes_per_cluster as u64
     }
 
+    #[inline]
     fn bitmap_size(&self) -> u64 {
         self.bitmap_size_bytes
+    }
+
+    #[inline]
+    fn bitmap_valid_bits(&self) -> u64 {
+        self.total_units()
     }
 }
 
@@ -546,14 +560,17 @@ mod tests {
             large_meta.sectors_per_cluster, 256,
             "128KB clusters = 256 sectors @ 512 bytes"
         );
+        #[cfg(feature = "std")]
         println!(
             "✓ Small volume (8MB): cluster_size={}, sectors_per_cluster={}",
             small_meta.bytes_per_cluster, small_meta.sectors_per_cluster,
         );
+        #[cfg(feature = "std")]
         println!(
             "✓ Medium volume (512MB): cluster_size={}, sectors_per_cluster={}",
             medium_meta.bytes_per_cluster, medium_meta.sectors_per_cluster,
         );
+        #[cfg(feature = "std")]
         println!(
             "✓ Large volume (64GB): cluster_size={}, sectors_per_cluster={}",
             large_meta.bytes_per_cluster, large_meta.sectors_per_cluster,
@@ -579,11 +596,13 @@ mod tests {
             "Cluster heap should be 1MB aligned"
         );
 
+        #[cfg(feature = "std")]
         println!(
             "✓ FAT offset: {} (aligned to {}MB)",
             meta.fat_offset_bytes,
             meta.fat_offset_bytes / (1024 * 1024)
         );
+        #[cfg(feature = "std")]
         println!(
             "✓ Cluster heap offset: {} (aligned to {}MB)",
             meta.cluster_heap_offset_bytes,
@@ -604,6 +623,7 @@ mod tests {
         assert_eq!(((16 + 7) / 8), 2); // 16 clusters
         assert_eq!(((17 + 7) / 8), 3); // 17 clusters
 
+        #[cfg(feature = "std")]
         println!(
             "Cluster count: {}, Bitmap size: {} bytes",
             meta.cluster_count, meta.bitmap_size_bytes

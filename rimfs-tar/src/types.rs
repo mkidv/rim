@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! POSIX USTAR header on-disk structures and typeflag definitions.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -107,3 +109,5 @@ pub fn calculate_checksum(header: &[u8; TAR_BLOCK_SIZE]) -> u32 {
     }
     sum
 }
+
+pub use crate::header::UstarHeader;

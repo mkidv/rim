@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext4 inode table block allocation and initialization.
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 

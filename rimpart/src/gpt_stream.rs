@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! Streaming zero-allocation GPT partition table reader and writer.
+
 #![allow(dead_code)]
 
 use crate::errors::*;
@@ -23,14 +26,14 @@ pub struct GptStreamReader<'io, IO: RimIO + ?Sized, const N: usize> {
 impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
     /// Construction: reads the primary header, verifies sizes.
     pub fn new(io: &'io mut IO, sector_size: u64) -> PartResult<Self> {
-        if sector_size as usize > N {
+        if sector_size < core::mem::size_of::<GptHeader>() as u64 || sector_size > N as u64 {
             return Err(PartError::Other("GPT: sector_size exceeds stack buffer"));
         }
 
         let hdr: GptHeader = io.read_struct_lba(GPT_PRIMARY_HEADER_LBA, sector_size)?;
         hdr.validate_header()?;
 
-        let entry_size = hdr.entry_size as usize;
+        let entry_size = hdr.entry_size.get() as usize;
         if entry_size > N {
             return Err(PartError::Other("GPT: entry_size exceeds stack buffer"));
         }
@@ -53,17 +56,17 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
 
     #[inline]
     pub fn slots(&self) -> usize {
-        self.header.num_entries as usize
+        self.header.num_entries.get() as usize
     }
 
     pub fn iter<'c>(&'c mut self) -> GptIter<'c, 'io, IO, N> {
         GptIter::new(self, 0, self.slots())
     }
 
-    /// Reads an arbitrary entry (copies to internal buffer).
+    /// Reads an entry from the cached sector; only crossing entries need a scratch buffer.
     fn read_at(&mut self, index: usize) -> PartResult<GptEntry> {
         let off = index as u64 * self.entry_size as u64;
-        let base_lba = self.header.entries_lba + (off / self.sector_size);
+        let base_lba = self.header.entries_lba.get() + (off / self.sector_size);
         let in_sector = (off % self.sector_size) as usize;
         let entry_size = self.entry_size;
         let ss = self.sector_size as usize;
@@ -80,11 +83,12 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
                     .read_at_lba(base_lba, self.sector_size, &mut self.sector_buf[..ss])?;
                 self.cached_lba = Some(base_lba);
             }
-            self.entry_buf[..entry_size]
-                .copy_from_slice(&self.sector_buf[in_sector..in_sector + entry_size]);
+            let (entry, _) =
+                GptEntry::ref_from_prefix(&self.sector_buf[in_sector..in_sector + entry_size])
+                    .map_err(|_| PartError::Other("GPT: invalid entry"))?;
+            return Ok(*entry);
         } else {
             // Case 2: overlap on 2 sectors
-            // Read first sector (with cache)
             if self.cached_lba != Some(base_lba) {
                 self.io
                     .read_at_lba(base_lba, self.sector_size, &mut self.sector_buf[..ss])?;
@@ -93,7 +97,6 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
             let first = ss - in_sector;
             self.entry_buf[..first].copy_from_slice(&self.sector_buf[in_sector..ss]);
 
-            // Read second sector (not the same LBA, cache is replaced)
             let next_lba = base_lba + 1;
             self.io
                 .read_at_lba(next_lba, self.sector_size, &mut self.sector_buf[..ss])?;
@@ -160,12 +163,17 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
                 if ej.is_empty() {
                     continue;
                 }
-                if overlaps_inclusive(ei.start_lba, ei.end_lba, ej.start_lba, ej.end_lba) {
+                if overlaps_inclusive(
+                    ei.start_lba.get(),
+                    ei.end_lba.get(),
+                    ej.start_lba.get(),
+                    ej.end_lba.get(),
+                ) {
                     return Err(GptError::Overlap {
-                        a_start: ei.start_lba,
-                        a_end: ei.end_lba,
-                        b_start: ej.start_lba,
-                        b_end: ej.end_lba,
+                        a_start: ei.start_lba.get(),
+                        a_end: ei.end_lba.get(),
+                        b_start: ej.start_lba.get(),
+                        b_end: ej.end_lba.get(),
                     }
                     .into());
                 }
@@ -180,16 +188,15 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
             return Err(PartError::Other("GPT: sector_size exceeds stack buffer"));
         }
 
-        let total_bytes = (self.header.num_entries as usize)
+        let total_bytes = (self.header.num_entries.get() as usize)
             .checked_mul(self.entry_size)
             .ok_or(PartError::Other("GPT: entries byte length overflow"))?;
 
         let mut remaining = total_bytes;
-        let mut lba = self.header.entries_lba;
+        let mut lba = self.header.entries_lba.get();
         let mut hasher = Hasher::new();
 
         while remaining > 0 {
-            // lire 1 secteur
             self.io
                 .read_at_lba(lba, self.sector_size, &mut self.sector_buf[..ss])?;
             let take = core::cmp::min(remaining, ss);
@@ -199,9 +206,9 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamReader<'io, IO, N> {
         }
 
         let calc = hasher.finalize();
-        if calc != self.header.entries_crc32 {
+        if calc != self.header.entries_crc32.get() {
             return Err(GptError::CrcEntriesMismatch {
-                expected: self.header.entries_crc32,
+                expected: self.header.entries_crc32.get(),
                 found: calc,
             }
             .into());
@@ -285,11 +292,11 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
     }
 
     pub fn from_header(io: &'io mut IO, sector_size: u64, header: GptHeader) -> PartResult<Self> {
-        let es = header.entry_size as usize;
+        let es = header.entry_size.get() as usize;
         if !es.is_multiple_of(8) {
             return Err(GptError::EntrySizeInvalid {
                 base: core::mem::size_of::<GptEntry>() as u32,
-                got: header.entry_size,
+                got: header.entry_size.get(),
             }
             .into());
         }
@@ -302,7 +309,7 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
         let per_sector = (sector_size as usize) / es;
         if per_sector == 0 {
             return Err(GptError::EntrySizeExceedsSector {
-                entry_size: header.entry_size,
+                entry_size: header.entry_size.get(),
                 sector_size,
             }
             .into());
@@ -324,8 +331,8 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
     where
         I: Iterator<Item = GptEntry>,
     {
-        let total = self.header.num_entries as usize;
-        let mut lba = self.header.entries_lba;
+        let total = self.header.num_entries.get() as usize;
+        let mut lba = self.header.entries_lba.get();
         let ss = self.sector_size as usize;
 
         // fills the entire entry table (non-empty + zeroed slots)
@@ -338,7 +345,6 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
             }
 
             for s in 0..take {
-                // build the slot (head = GptEntry, tail = 0)
                 for b in &mut self.slot[..self.es] {
                     *b = 0;
                 }
@@ -370,45 +376,44 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
 
     pub fn finalize(mut self) -> PartResult<()> {
         // Entries CRC
-        self.header.entries_crc32 = self.crc.finalize();
+        self.header.entries_crc32 = (self.crc.finalize()).into();
 
         // Primary header (header_crc32 calculated on header_size, field null)
-        self.header.header_crc32 = 0;
+        self.header.header_crc32 = (0).into();
         let hcrc = {
             let bytes = self.header.as_bytes();
-            crc32fast::hash(&bytes[..self.header.header_size as usize])
+            crc32fast::hash(&bytes[..self.header.header_size.get() as usize])
         };
-        self.header.header_crc32 = hcrc;
+        self.header.header_crc32 = (hcrc).into();
 
-        // Write primary header
-        self.io
-            .write_struct_lba(self.header.current_lba, self.sector_size, &self.header)?;
+        self.io.write_struct_lba(
+            self.header.current_lba.get(),
+            self.sector_size,
+            &self.header,
+        )?;
 
         // Backup
         let mut backup = self.header.to_backup(self.sector_size);
         // to_backup has already recalculated header_crc32; entries_crc32 stays identical
-        backup.entries_crc32 = self.header.entries_crc32;
-        backup.header_crc32 = 0;
+        backup.entries_crc32 = (self.header.entries_crc32.get()).into();
+        backup.header_crc32 = (0).into();
         let bcrc = {
             let bytes = backup.as_bytes();
-            crc32fast::hash(&bytes[..backup.header_size as usize])
+            crc32fast::hash(&bytes[..backup.header_size.get() as usize])
         };
-        backup.header_crc32 = bcrc;
+        backup.header_crc32 = (bcrc).into();
 
-        // copy the entries zone to the backup zone (streaming, sector by sector, no heap)
         let ss = self.sector_size as usize;
-        let mut remaining = (self.header.num_entries as usize) * self.es;
-        let mut src_lba = self.header.entries_lba;
-        let mut dst_lba = backup.entries_lba;
+        let mut remaining = (self.header.num_entries.get() as usize) * self.es;
+        let mut src_lba = self.header.entries_lba.get();
+        let mut dst_lba = backup.entries_lba.get();
 
         while remaining > 0 {
-            // read a source sector
             for b in &mut self.sector[..ss] {
                 *b = 0;
             }
             self.io
                 .read_at_lba(src_lba, self.sector_size, &mut self.sector[..ss])?;
-            // write destination sector
             self.io
                 .write_at_lba(dst_lba, self.sector_size, &self.sector[..ss])?;
             src_lba += 1;
@@ -416,18 +421,18 @@ impl<'io, IO: RimIO + ?Sized, const N: usize> GptStreamWriter<'io, IO, N> {
             remaining = remaining.saturating_sub(ss);
         }
 
-        // Write backup header
         self.io
-            .write_struct_lba(backup.current_lba, self.sector_size, &backup)?;
+            .write_struct_lba(backup.current_lba.get(), self.sector_size, &backup)?;
 
         self.io.flush()?;
         Ok(())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use crate::{gpt, guids, mbr};
+    use alloc::{vec, vec::Vec};
 
     use super::*;
     use rimio::prelude::MemRimIO;
@@ -459,8 +464,8 @@ mod tests {
             // iter() ignores empty slots → we should see 2 entries
             let parts: Vec<_> = reader.iter().collect::<Result<Vec<_>, _>>().unwrap();
             assert_eq!(parts.len(), 2);
-            assert_eq!(parts[0].start_lba, 2048);
-            assert_eq!(parts[1].start_lba, 4096);
+            assert_eq!(parts[0].start_lba.get(), 2048);
+            assert_eq!(parts[1].start_lba.get(), 4096);
         }
 
         // find_first ESP
@@ -469,7 +474,7 @@ mod tests {
             .unwrap()
             .expect("ESP not found");
         assert_eq!(idx, 0);
-        assert_eq!(esp.end_lba, 4095);
+        assert_eq!(esp.end_lba.get(), 4095);
 
         // validations
         reader.validate_bounds().unwrap();
@@ -537,7 +542,6 @@ mod tests {
         let mut buf = vec![0u8; (sector * total) as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // MBR protectif
         mbr::write_mbr_protective(&mut io, total).unwrap();
 
         // 2 partitions simples
@@ -563,10 +567,9 @@ mod tests {
         let mut reader = super::GptStreamReader::<_, 4096>::new(&mut io, sector).unwrap();
         let parts: Vec<_> = reader.iter().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].start_lba, 2048);
-        assert_eq!(parts[1].end_lba, 9999);
+        assert_eq!(parts[0].start_lba.get(), 2048);
+        assert_eq!(parts[1].end_lba.get(), 9999);
 
-        // bornes, overlaps, CRC
         reader.validate_bounds().unwrap();
         reader.validate_overlaps().unwrap();
         reader.validate_crc().unwrap();
@@ -593,14 +596,17 @@ mod tests {
             w.finalize().unwrap();
         }
 
-        // Read primary & backup headers to identify zones
         let hdr_primary: gpt::GptHeader = io
             .read_struct_lba(gpt::GPT_PRIMARY_HEADER_LBA, sector)
             .unwrap();
-        let hdr_backup: gpt::GptHeader =
-            io.read_struct_lba(hdr_primary.backup_lba, sector).unwrap();
+        let hdr_backup: gpt::GptHeader = io
+            .read_struct_lba(hdr_primary.backup_lba.get(), sector)
+            .unwrap();
 
-        assert_eq!(hdr_primary.entries_crc32, hdr_backup.entries_crc32);
+        assert_eq!(
+            hdr_primary.entries_crc32.get(),
+            hdr_backup.entries_crc32.get()
+        );
 
         // Compare primary vs backup entries region, sector by sector (no large allocations)
         let ss = sector as usize;
@@ -609,14 +615,23 @@ mod tests {
         assert!(ss <= a.len());
 
         // entry table size in bytes
-        let table_bytes = (hdr_primary.num_entries as usize) * (hdr_primary.entry_size as usize);
+        let table_bytes =
+            (hdr_primary.num_entries.get() as usize) * (hdr_primary.entry_size.get() as usize);
         let sectors_for_table = table_bytes.div_ceil(ss);
 
         for i in 0..sectors_for_table {
-            io.read_at_lba(hdr_primary.entries_lba + i as u64, sector, &mut a[..ss])
-                .unwrap();
-            io.read_at_lba(hdr_backup.entries_lba + i as u64, sector, &mut b[..ss])
-                .unwrap();
+            io.read_at_lba(
+                hdr_primary.entries_lba.get() + i as u64,
+                sector,
+                &mut a[..ss],
+            )
+            .unwrap();
+            io.read_at_lba(
+                hdr_backup.entries_lba.get() + i as u64,
+                sector,
+                &mut b[..ss],
+            )
+            .unwrap();
             assert_eq!(&a[..ss], &b[..ss], "entries sector {i} differs");
         }
     }
@@ -628,9 +643,8 @@ mod tests {
         let mut buf = vec![0u8; (sector * total) as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // Build a valid header then force an aberrant entry_size
         let mut hdr = gpt::GptHeader::new(sector, total, [0xEE; 16]).unwrap();
-        hdr.entry_size = 1024; // > sector
+        hdr.entry_size = (1024).into(); // > sector
 
         // from_header must refuse (per_sector == 0)
         let err = GptStreamWriter::<_, 2048>::from_header(&mut io, sector, hdr).unwrap_err();
@@ -665,7 +679,6 @@ mod tests {
         );
 
         {
-            // N = 4096 couvre secteur + entry (128)
             let mut w =
                 GptStreamWriter::<_, 4096>::new(&mut io, sector, total, [0xEF; 16]).unwrap();
             w.write_entries(1, core::iter::once(p)).unwrap();
@@ -675,8 +688,8 @@ mod tests {
         let mut reader = super::GptStreamReader::<_, 4096>::new(&mut io, sector).unwrap();
         let v: Vec<_> = reader.iter().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(v.len(), 1);
-        assert_eq!(v[0].start_lba, 1024);
-        assert_eq!(v[0].end_lba, 4095);
+        assert_eq!(v[0].start_lba.get(), 1024);
+        assert_eq!(v[0].end_lba.get(), 4095);
         reader.validate_bounds().unwrap();
         reader.validate_overlaps().unwrap();
         reader.validate_crc().unwrap();

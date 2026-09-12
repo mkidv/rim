@@ -6,10 +6,11 @@ use alloc::format;
 use rimio::RimIO;
 use zerocopy::FromBytes;
 
-use crate::constant::*;
+use crate::constant::NTFS_INDX_SIGNATURE;
 use crate::core::bitmap::BitmapOps;
 use crate::core::checker::{Finding, FsCheckerResult, VerifyReport};
 use crate::meta::NtfsMeta;
+use crate::types::NtfsAttributeType;
 
 /// Validates structural index integrity ($INDEX_ROOT, $INDEX_ALLOCATION, $BITMAP, child VCNs) of a directory.
 pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
@@ -42,9 +43,9 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
     };
 
     // 1. Locate and validate $INDEX_ROOT:$I30
-    let root_attr = match view.find_named(ATTR_INDEX_ROOT, Some("$I30")) {
+    let root_attr = match view.find_named(NtfsAttributeType::IndexRoot, Some("$I30")) {
         Ok(Some(a)) => a,
-        Ok(None) => match view.find_named(ATTR_INDEX_ROOT, None) {
+        Ok(None) => match view.find_named(NtfsAttributeType::IndexRoot, None) {
             Ok(Some(a)) => a,
             _ => {
                 rep.push(Finding::err(
@@ -95,7 +96,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         return Ok(());
     }
 
-    let root_header = match crate::types::IndexRootHeader::read_from_prefix(root_content) {
+    let root_header = match crate::types::IndexRootHeader::ref_from_prefix(root_content) {
         Ok((h, _)) => h,
         Err(_) => {
             rep.push(Finding::err(
@@ -106,8 +107,8 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         }
     };
 
-    let indexed_attr_type = root_header.indexed_attr_type;
-    if indexed_attr_type != ATTR_FILE_NAME {
+    let indexed_attr_type = root_header.indexed_attr_type.get();
+    if indexed_attr_type != NtfsAttributeType::FileName.code() {
         rep.push(Finding::err(
             "IDX.ROOT",
             format!(
@@ -117,7 +118,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         ));
     }
 
-    let node_header = match crate::types::IndexNodeHeader::read_from_prefix(&root_content[16..]) {
+    let node_header = match crate::types::IndexNodeHeader::ref_from_prefix(&root_content[16..]) {
         Ok((h, _)) => h,
         Err(_) => {
             rep.push(Finding::err(
@@ -128,8 +129,8 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         }
     };
 
-    let entries_offset = node_header.entries_offset as usize;
-    let index_length = node_header.index_length as usize;
+    let entries_offset = node_header.entries_offset.get() as usize;
+    let index_length = node_header.index_length.get() as usize;
     let start_offset = 16 + entries_offset;
     let end_offset = 16 + index_length;
 
@@ -168,7 +169,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         }
 
         let entry_header =
-            match crate::types::IndexEntryHeader::read_from_prefix(&root_content[curr_offset..]) {
+            match crate::types::IndexEntryHeader::ref_from_prefix(&root_content[curr_offset..]) {
                 Ok((h, _)) => h,
                 Err(_) => {
                     rep.push(Finding::err(
@@ -181,7 +182,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                 }
             };
 
-        let elen = entry_header.entry_length as usize;
+        let elen = entry_header.entry_length.get() as usize;
         if elen < 16 || !elen.is_multiple_of(8) {
             rep.push(Finding::err(
                 "IDX.ROOT",
@@ -247,7 +248,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
 
     // 2. Validate $INDEX_ALLOCATION & $BITMAP if subnodes are present
     let alloc_attr_opt = view
-        .find_named(ATTR_INDEX_ALLOCATION, Some("$I30"))
+        .find_named(NtfsAttributeType::IndexAllocation, Some("$I30"))
         .unwrap_or_default();
 
     if !referenced_child_vcns.is_empty() || (node_header.flags & 1) != 0 {
@@ -283,8 +284,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
         let block_size = meta.index_record_size as usize;
         let num_blocks = alloc_content.len() / block_size;
 
-        // Read $BITMAP:$I30
-        let bitmap_bytes = match view.find_named(ATTR_BITMAP, Some("$I30")) {
+        let bitmap_bytes = match view.find_named(NtfsAttributeType::Bitmap, Some("$I30")) {
             Ok(Some(bm_attr)) => {
                 if bm_attr.is_resident() {
                     resolver
@@ -319,7 +319,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                 continue;
             }
 
-            if &chunk[0..4] != b"INDX" {
+            if chunk[0..4] != NTFS_INDX_SIGNATURE {
                 rep.push(Finding::err(
                     "IDX.ALLOC",
                     format!(
@@ -338,7 +338,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                 ));
             }
 
-            let indx_header = match crate::types::IndexRecordHeader::read_from_prefix(&block_buf) {
+            let indx_header = match crate::types::IndexRecordHeader::ref_from_prefix(&block_buf) {
                 Ok((h, _)) => h,
                 Err(_) => {
                     rep.push(Finding::err(
@@ -349,7 +349,7 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                 }
             };
 
-            let indx_vcn = indx_header.index_block_vcn;
+            let indx_vcn = indx_header.index_block_vcn.get();
             let expected_vcn = meta.index_block_to_vcn(idx as u64);
             if indx_vcn != expected_vcn {
                 rep.push(Finding::err(
@@ -362,7 +362,6 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
 
             allocated_blocks.push((indx_vcn, idx));
 
-            // Check $BITMAP bit
             let is_set = bitmap_bytes.get_bit(idx);
             if !is_set {
                 rep.push(Finding::err(
@@ -371,15 +370,13 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                 ));
             }
 
-            // Parse entries inside this INDX block to find any child VCNs
-            let indx_node = match crate::types::IndexNodeHeader::read_from_prefix(&block_buf[24..])
-            {
+            let indx_node = match crate::types::IndexNodeHeader::ref_from_prefix(&block_buf[24..]) {
                 Ok((h, _)) => h,
                 Err(_) => continue,
             };
 
-            let b_entries_offset = indx_node.entries_offset as usize;
-            let b_index_length = indx_node.index_length as usize;
+            let b_entries_offset = indx_node.entries_offset.get() as usize;
+            let b_index_length = indx_node.index_length.get() as usize;
             let b_start = 24 + b_entries_offset;
             let b_end = 24 + b_index_length;
             if b_start <= b_end && b_end <= block_size {
@@ -389,9 +386,9 @@ pub fn check_dir_index_with_resolver<IO: RimIO + ?Sized>(
                         break;
                     }
                     if let Ok((eh, _)) =
-                        crate::types::IndexEntryHeader::read_from_prefix(&block_buf[b_offset..])
+                        crate::types::IndexEntryHeader::ref_from_prefix(&block_buf[b_offset..])
                     {
-                        let elen = eh.entry_length as usize;
+                        let elen = eh.entry_length.get() as usize;
                         if elen < 16 {
                             break;
                         }

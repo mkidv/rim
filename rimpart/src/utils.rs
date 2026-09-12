@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Partition geometry and sector alignment arithmetic.
+
 #[cfg(feature = "alloc")]
 use crate::mbr;
 use crate::{DEFAULT_SECTOR_SIZE, errors::*, gpt};
@@ -21,8 +25,7 @@ pub fn truncate_image_custom_sector(
     total_sectors: u64,
     sector_size: u64,
 ) -> PartResult<Option<TruncateReport>> {
-    // Compute last used sector
-    if let Some(max_end_lba) = partitions.iter().map(|p| p.end_lba).max() {
+    if let Some(max_end_lba) = partitions.iter().map(|p| p.end_lba.get()).max() {
         let used_sectors = max_end_lba + 1;
         let used_bytes = used_sectors.saturating_mul(sector_size);
         let total_bytes = total_sectors.saturating_mul(sector_size);
@@ -74,7 +77,7 @@ pub fn detect_partition_offset_by_type_guid_with_sector(
         .iter()
         .find(|p| p.type_guid == *type_guid)
         .ok_or(PartError::Other("Matching partition not found"))?;
-    Ok(part.start_lba.saturating_mul(sector_size))
+    Ok(part.start_lba.get().saturating_mul(sector_size))
 }
 
 /// Full-disk validation:
@@ -86,14 +89,14 @@ pub fn validate_full_disk(io: &mut dyn RimIO) -> PartResult<()> {
     let (header, _parts) = gpt::read_gpt(io)?;
 
     // Consistency of protective MBR with disk size
-    let total_sectors = header.backup_lba + 1;
+    let total_sectors = header.backup_lba.get() + 1;
     let m = mbr::read_mbr(io)?;
     m.validate_protective(total_sectors)?;
 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
 

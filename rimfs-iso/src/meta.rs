@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 volume metadata and descriptor options.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -37,10 +39,52 @@ impl Default for IsoMeta {
     }
 }
 
+impl FsMeta<u32> for IsoMeta {
+    #[inline]
+    fn unit_size(&self) -> u64 {
+        ISO_SECTOR_SIZE as u64
+    }
+
+    #[inline]
+    fn unit_offset(&self, unit: u32) -> u64 {
+        (unit as u64) * (ISO_SECTOR_SIZE as u64)
+    }
+
+    #[inline]
+    fn root_unit(&self) -> u32 {
+        16 // PVD sector
+    }
+
+    #[inline]
+    fn first_data_unit(&self) -> u32 {
+        20
+    }
+
+    #[inline]
+    fn last_data_unit(&self) -> u32 {
+        (self.total_size.saturating_sub(1) / (ISO_SECTOR_SIZE as u64)) as u32
+    }
+
+    #[inline]
+    fn total_units(&self) -> u64 {
+        self.total_size / ISO_SECTOR_SIZE as u64
+    }
+
+    #[inline]
+    fn size_bytes(&self) -> u64 {
+        self.total_size
+    }
+
+    #[inline]
+    fn label(&self) -> String {
+        self.volume_id.clone()
+    }
+}
+
 impl FsMeta<IsoHandle> for IsoMeta {
     #[inline]
-    fn unit_size(&self) -> usize {
-        ISO_SECTOR_SIZE
+    fn unit_size(&self) -> u64 {
+        ISO_SECTOR_SIZE as u64
     }
 
     #[inline]
@@ -64,8 +108,8 @@ impl FsMeta<IsoHandle> for IsoMeta {
     }
 
     #[inline]
-    fn total_units(&self) -> usize {
-        (self.total_size as usize) / ISO_SECTOR_SIZE
+    fn total_units(&self) -> u64 {
+        self.total_size / ISO_SECTOR_SIZE as u64
     }
 
     #[inline]

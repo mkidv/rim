@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT timestamp conversions and 8.3 short name generation.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{format, string::String, vec::Vec};
 
@@ -36,16 +40,15 @@ fn is_valid_sfn_char(b: u8) -> bool {
 
 /// Suggest a short 8.3 name from input, return (short_name, is_lfn)
 pub fn to_short_name(name: &str) -> ([u8; 11], bool) {
-    to_short_name_unique(name, |_| false)
+    to_short_name_unique(name, |_| false).expect("An empty directory always has a free alias")
 }
 
 /// Generate a short 8.3 name from input with numeric tail (~1, ~2, etc.) collision avoidance.
 /// Returns (short_name, is_lfn).
-pub fn to_short_name_unique<F>(name: &str, is_taken: F) -> ([u8; 11], bool)
+pub fn to_short_name_unique<F>(name: &str, is_taken: F) -> FsParsingResult<([u8; 11], bool)>
 where
     F: Fn(&[u8; 11]) -> bool,
 {
-    // Split extension (on the right)
     let parts: Vec<&str> = name.rsplitn(2, '.').collect();
     let (base, ext) = if parts.len() == 2 {
         (parts[1], parts[0])
@@ -96,7 +99,6 @@ where
     let all_spaces = clean_base.is_empty();
     let needs_lfn = too_long || has_space || has_non_ascii || !base_ok || !ext_ok || all_spaces;
 
-    // If it's already a valid SFN, check if the clean name is taken
     if !needs_lfn {
         let mut raw = [b' '; 11];
         for (i, &b) in clean_base.iter().take(8).enumerate() {
@@ -109,7 +111,7 @@ where
             raw[0] = 0x05;
         }
         if !is_taken(&raw) {
-            return (raw, false);
+            return Ok((raw, name.bytes().any(|b| b.is_ascii_uppercase())));
         }
     }
 
@@ -140,20 +142,13 @@ where
         }
 
         if !is_taken(&raw) {
-            return (raw, true);
+            return Ok((raw, true));
         }
     }
 
-    // Fallback: simple ~1
-    let mut raw = [b' '; 11];
-    let base_len = clean_base.len().min(6);
-    raw[..base_len].copy_from_slice(&clean_base[..base_len]);
-    raw[base_len..base_len + 2].copy_from_slice(b"~1");
-    raw[8..11].copy_from_slice(&ext_part);
-    if raw[0] == 0xE5 {
-        raw[0] = 0x05;
-    }
-    (raw, true)
+    Err(FsParsingError::Invalid(
+        "Short-name alias namespace exhausted",
+    ))
 }
 
 /// Decode SFN (8.3) entry to a filename
@@ -217,7 +212,6 @@ pub fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<FatLFNEntry> {
         let end = ((i + 1) * 13).min(name_utf16.len());
         let chunk = &name_utf16[start..end];
 
-        // Prepare a buffer of 13 UTF-16 = [0xFFFF...], and place the terminator 0x0000 if there's room
         let mut name_chars = [0xFFFFu16; 13];
         for (k, &cp) in chunk.iter().enumerate() {
             name_chars[k] = cp;
@@ -236,4 +230,13 @@ pub fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<FatLFNEntry> {
     // On disk, we first write the entry with 0x40|N, then ..., then 0x01
     out.reverse();
     out
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn exhausted_aliases_are_errors() {
+        assert!(to_short_name_unique("long_filename.txt", |_| true).is_err());
+    }
 }

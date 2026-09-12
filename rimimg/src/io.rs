@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Container-aware disk image I/O factory and dispatch.
+
 use rimio::errors::RimIOError;
 use rimio::prelude::*;
 

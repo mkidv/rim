@@ -18,7 +18,6 @@ fn test_declarative_builder_and_format_conversions() {
     let vdi_path = dir.path().join("test_disk.vdi");
     let vmdk_path = dir.path().join("test_disk.vmdk");
 
-    // 1. Build a multi-partition layout
     let layout = LayoutConfig {
         base_dir: PathBuf::from("."),
         partitions: vec![
@@ -65,11 +64,9 @@ fn test_declarative_builder_and_format_conversions() {
         disk: None,
     };
 
-    // 2. Build RAW image
     build_config_to_file(&layout, &img_path, ImageFormat::Raw);
     assert!(img_path.exists());
 
-    // 3. Scan RAW image partitions via rimpart
     {
         let mut file = File::open(&img_path).unwrap();
         let mut io = StdRimIO::new(&mut file);
@@ -80,7 +77,6 @@ fn test_declarative_builder_and_format_conversions() {
         assert_eq!(scan.partitions[2].name, "DATA_EXFAT");
     }
 
-    // 4. Build directly to all container formats
     for (path, format) in [
         (&vhd_path, ImageFormat::Vhd),
         (&qcow2_path, ImageFormat::Qcow2),

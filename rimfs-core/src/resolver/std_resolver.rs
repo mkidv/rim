@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Host filesystem resolver implementation.
+
 #[cfg(feature = "std")]
 use std::{fs, io::Error, path::Path};
 

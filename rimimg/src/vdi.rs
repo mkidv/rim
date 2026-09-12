@@ -138,11 +138,8 @@ pub fn init_vdi_io(dst: &mut dyn RimIO, img_len: u64, options: ImageOptions) -> 
     dst.zero_fill(header_total, 512 - header_total as usize)?;
 
     let block_map_size = usize::try_from(num_blocks).map_err(|_| RimImgError::SizeOverflow)? * 4;
-    let mut block_map = Vec::with_capacity(block_map_size);
-    for i in 0..num_blocks {
-        block_map.extend_from_slice(&i.to_le_bytes());
-    }
-    dst.write_at(512, &block_map)?;
+    let block_map: Vec<U32<LittleEndian>> = (0..num_blocks).map(U32::new).collect();
+    dst.write_at(512, block_map.as_slice().as_bytes())?;
 
     let current_pos = 512 + block_map_size as u64;
     if current_pos < data_offset {
@@ -207,3 +204,21 @@ pub fn validate_vdi_header(header: &VdiHeader) -> RimImgResult {
     }
     Ok(())
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<VdiPreHeader>() == 64);
+    assert!(core::mem::align_of::<VdiPreHeader>() == 1);
+    assert!(core::mem::size_of::<VdiHeader>() == 448);
+    assert!(core::mem::align_of::<VdiHeader>() == 1);
+    assert!(core::mem::offset_of!(VdiHeader, version) == 4);
+    assert!(core::mem::offset_of!(VdiHeader, header_size) == 8);
+    assert!(core::mem::offset_of!(VdiHeader, image_type) == 12);
+    assert!(core::mem::offset_of!(VdiHeader, description) == 20);
+    assert!(core::mem::offset_of!(VdiHeader, offset_blocks) == 276);
+    assert!(core::mem::offset_of!(VdiHeader, offset_data) == 280);
+    assert!(core::mem::offset_of!(VdiHeader, disk_size) == 304);
+    assert!(core::mem::offset_of!(VdiHeader, block_size) == 312);
+    assert!(core::mem::offset_of!(VdiHeader, blocks_in_image) == 320);
+    assert!(core::mem::offset_of!(VdiHeader, uuid_image) == 328);
+    assert!(core::mem::offset_of!(VdiHeader, unused2) == 392);
+};

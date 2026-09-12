@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Declarative disk image generation errors.
+
 use crate::layout::{Filesystem, PartitionKind};
 use alloc::string::String;
 use core::fmt;

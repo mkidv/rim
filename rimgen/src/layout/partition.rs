@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Partition configuration and size calculation.
+
 use crate::errors::{LayoutError, LayoutResult};
 use crate::layout::filesystem::Filesystem;
 use crate::layout::size::Size;

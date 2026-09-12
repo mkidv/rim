@@ -36,6 +36,11 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
     fn prepare(&mut self, meta: &NtfsMeta) -> FsFeatureResult<()> {
         self.backup_offset = meta.backup_boot_sector_offset();
         self.sector_size = meta.bytes_per_sector as usize;
+        if self.sector_size < core::mem::size_of::<NtfsBootSector>() {
+            return Err(crate::core::errors::FsFeatureError::InvalidConfiguration(
+                "NTFS sector is smaller than its boot record",
+            ));
+        }
         Ok(())
     }
 
@@ -50,15 +55,20 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO> fo
     fn write(&self, io: &mut IO, allocator: &NtfsAllocator<'a>) -> FsFeatureResult<()> {
         // 1. Write primary boot sector at sector 0
         let boot = NtfsBootSector::new_from_meta(allocator.meta);
-        io.write_at(0, boot.as_bytes())
+        io.write_struct(0, &boot)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         // 2. Write backup boot sector at last sector of the volume
-        let mut boot_copy = vec![0u8; self.sector_size];
-        io.read_at(0, &mut boot_copy)
-            .map_err(crate::core::errors::FsFeatureError::IO)?;
-        io.write_at(self.backup_offset, &boot_copy)
-            .map_err(crate::core::errors::FsFeatureError::IO)?;
+        if self.sector_size == core::mem::size_of::<NtfsBootSector>() {
+            io.write_struct(self.backup_offset, &boot)?;
+        } else {
+            // Preserve the containing sector's tail without rereading the fixed boot record.
+            let mut boot_copy = vec![0u8; self.sector_size];
+            let size = core::mem::size_of::<NtfsBootSector>();
+            boot_copy[..size].copy_from_slice(boot.as_bytes());
+            io.read_at(size as u64, &mut boot_copy[size..])?;
+            io.write_at(self.backup_offset, &boot_copy)?;
+        }
 
         Ok(())
     }

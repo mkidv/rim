@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
 
+//! NTFS B-tree index structures ($INDEX_ROOT, $INDEX_ALLOCATION, INDX records).
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::vec::Vec;
 
 use zerocopy::FromBytes;
 
-use crate::attr::{NtfsFileNameNamespace, current_ntfs_time};
-use crate::flags::{IndexEntryFlags, NtfsFileAttributes};
+use crate::attr::NtfsFileAttributes;
+use crate::flags::IndexEntryFlags;
 use crate::meta::NtfsMeta;
-use crate::types::{FileNameAttribute, IndexEntryHeader, IndexNodeHeader, IndexRecordHeader};
-use crate::utils::{apply_usa_fixup, calculate_usa_size};
+use crate::types::{
+    FileNameAttribute, IndexEntryHeader, IndexNodeHeader, IndexRecordHeader, NtfsFileNameNamespace,
+};
+use crate::utils::*;
 use rimio::prelude::*;
 
 /// Logical representation of an Index Entry
@@ -130,21 +134,21 @@ impl NtfsIndexEntry {
         if raw.len() < 16 {
             return None;
         }
-        let (header, _) = IndexEntryHeader::read_from_prefix(raw).ok()?;
+        let (header, _) = IndexEntryHeader::ref_from_prefix(raw).ok()?;
         let mut flags = IndexEntryFlags::from_bits_truncate(header.flags);
         if flags.contains(IndexEntryFlags::LAST_ENTRY) {
             return None;
         }
         flags.remove(IndexEntryFlags::HAS_SUBNODES);
 
-        let content_len = header.content_length as usize;
+        let content_len = header.content_length.get() as usize;
         let fn_attr_size = core::mem::size_of::<FileNameAttribute>();
         if content_len < fn_attr_size || raw.len() < 16 + content_len {
             return None;
         }
 
         let fn_bytes = &raw[16..16 + content_len];
-        let (fn_attr, _) = FileNameAttribute::read_from_prefix(fn_bytes).ok()?;
+        let (fn_attr, _) = FileNameAttribute::ref_from_prefix(fn_bytes).ok()?;
         let name_len = fn_attr.filename_length as usize;
         let name_offset = fn_attr_size;
         if fn_bytes.len() < name_offset + name_len * 2 {
@@ -159,18 +163,18 @@ impl NtfsIndexEntry {
         let namespace = NtfsFileNameNamespace::from_raw(fn_attr.namespace);
 
         Some(Self {
-            file_ref: header.mft_reference,
-            parent_ref: fn_attr.parent_directory,
+            file_ref: header.mft_reference.get(),
+            parent_ref: fn_attr.parent_directory.get(),
             name,
-            file_attr: NtfsFileAttributes::from_bits_truncate(fn_attr.file_attributes),
+            file_attr: NtfsFileAttributes::from_bits_truncate(fn_attr.file_attributes.get()),
             flags,
             vcn: None,
-            data_size: fn_attr.data_size,
-            allocated_size: fn_attr.allocated_size,
-            creation_time: fn_attr.creation_time,
-            modification_time: fn_attr.modification_time,
-            mft_modification_time: fn_attr.mft_modification_time,
-            access_time: fn_attr.access_time,
+            data_size: fn_attr.data_size.get(),
+            allocated_size: fn_attr.allocated_size.get(),
+            creation_time: fn_attr.creation_time.get(),
+            modification_time: fn_attr.modification_time.get(),
+            mft_modification_time: fn_attr.mft_modification_time.get(),
+            access_time: fn_attr.access_time.get(),
             namespace,
             raw: None,
         })
@@ -205,9 +209,9 @@ impl NtfsIndexEntry {
         entry_len = (entry_len + 7) & !7;
 
         let header = IndexEntryHeader {
-            mft_reference: self.file_ref,
-            entry_length: entry_len as u16,
-            content_length: content_len as u16,
+            mft_reference: (self.file_ref).into(),
+            entry_length: (entry_len as u16).into(),
+            content_length: (content_len as u16).into(),
             flags: flags.bits(),
             padding: [0; 3],
         };
@@ -215,16 +219,16 @@ impl NtfsIndexEntry {
 
         if !is_last {
             let fn_attr = FileNameAttribute {
-                parent_directory: self.parent_ref,
-                creation_time: self.creation_time,
-                modification_time: self.modification_time,
-                mft_modification_time: self.mft_modification_time,
-                access_time: self.access_time,
-                allocated_size: self.allocated_size,
-                data_size: self.data_size,
-                file_attributes: self.file_attr.bits(),
-                packed_ea_size: 0,
-                reserved: 0,
+                parent_directory: (self.parent_ref).into(),
+                creation_time: (self.creation_time).into(),
+                modification_time: (self.modification_time).into(),
+                mft_modification_time: (self.mft_modification_time).into(),
+                access_time: (self.access_time).into(),
+                allocated_size: (self.allocated_size).into(),
+                data_size: (self.data_size).into(),
+                file_attributes: (self.file_attr.bits()).into(),
+                packed_ea_size: (0).into(),
+                reserved: (0).into(),
                 filename_length: self.name.len() as u8,
                 namespace: self.namespace.bits(),
             };
@@ -239,7 +243,6 @@ impl NtfsIndexEntry {
             io.write_at(offset + 16 + fn_attr_size as u64, &name_buf)?;
         }
 
-        // Write VCN (at end)
         if flags.contains(IndexEntryFlags::HAS_SUBNODES) {
             let vcn_offset = entry_len - 8;
             let vcn_val = self.vcn.unwrap_or(0);
@@ -319,9 +322,9 @@ impl NtfsIndexRecord {
 
         // 4. Node Header
         let node_header = IndexNodeHeader {
-            entries_offset: (entries_start - node_header_offset) as u32,
-            index_length: (pos - node_header_offset) as u32,
-            allocated_size: (record_size as u64 - node_header_offset) as u32,
+            entries_offset: ((entries_start - node_header_offset) as u32).into(),
+            index_length: ((pos - node_header_offset) as u32).into(),
+            allocated_size: ((record_size as u64 - node_header_offset) as u32).into(),
             flags: if self.has_children { 1 } else { 0 },
             padding: [0; 3],
         };
@@ -331,5 +334,170 @@ impl NtfsIndexRecord {
         apply_usa_fixup(&mut buf, meta.bytes_per_sector as usize);
 
         Ok(buf)
+    }
+}
+
+use crate::upcase::UpcaseHandle;
+use zerocopy::IntoBytes;
+
+pub struct IndexTreeLayout {
+    pub root_entries: Vec<u8>,
+    pub allocation_blocks: Vec<Vec<u8>>,
+    pub bitmap: Vec<u8>,
+    pub total_clusters: u64,
+}
+
+impl IndexTreeLayout {
+    /// Writes all allocation blocks sequentially into the allocated disk runlist.
+    pub fn write_allocation_blocks<IO: RimIO + ?Sized>(
+        &self,
+        io: &mut IO,
+        meta: &NtfsMeta,
+        runs: &rimio::run::RunList,
+    ) -> RimIOResult {
+        let mut mapped = MappedRimIO::new(io, runs, meta.bytes_per_cluster as usize);
+        let mut off = 0u64;
+        for block in &self.allocation_blocks {
+            mapped.write_at(off, block)?;
+            off += meta.index_record_size as u64;
+        }
+        Ok(())
+    }
+}
+
+pub enum DirectoryIndexResult {
+    /// Resident index root entries (small directory fitting in MFT record)
+    Resident { entries_buf: Vec<u8> },
+    /// Non-resident B-tree layout with allocation blocks and bitmap
+    NonResident { layout: IndexTreeLayout },
+}
+
+pub struct IndexTreeBuilder;
+
+impl IndexTreeBuilder {
+    /// Build directory index: either resident buffer or non-resident tree layout.
+    ///
+    /// Automatically sorts entries according to NTFS UpCase collation rules
+    /// and formats the terminator / subnodes as appropriate.
+    pub fn build_directory_index(
+        meta: &NtfsMeta,
+        mut entries: Vec<NtfsIndexEntry>,
+    ) -> RimIOResult<DirectoryIndexResult> {
+        let upcase = UpcaseHandle::from_flavor(&meta.upcase_flavor);
+        entries.sort_by(|a, b| compare_names_upcase(&a.name, &b.name, &upcase));
+
+        let entries_len: usize = entries.iter().map(|e| e.len()).sum();
+        let resident_max = meta.mft_record_size as usize / 3;
+
+        if entries_len < resident_max {
+            let mut buf = Vec::new();
+            for e in &entries {
+                let len = e.len();
+                let old = buf.len();
+                buf.resize(old + len, 0);
+                let mut mem_io = MemRimIO::new(&mut buf[old..]);
+                e.write_to_io(&mut mem_io, 0)?;
+            }
+            let last = IndexEntryHeader::new(0, 0, true);
+            buf.extend_from_slice(last.as_bytes());
+            Ok(DirectoryIndexResult::Resident { entries_buf: buf })
+        } else {
+            let layout = Self::build(meta, entries)?;
+            Ok(DirectoryIndexResult::NonResident { layout })
+        }
+    }
+
+    pub fn build(meta: &NtfsMeta, entries: Vec<NtfsIndexEntry>) -> RimIOResult<IndexTreeLayout> {
+        let index_record_size = meta.index_record_size as usize;
+        // Max payload in an Index Record (4KB usually)
+        // Header (Indx + USA + padding) = 88 bytes
+        // Node Header = 16 bytes
+        // End Entry = 16 bytes
+        // Safety margin = 32 bytes
+        let max_payload = index_record_size.saturating_sub(88 + 32);
+
+        let mut blocks: Vec<Vec<NtfsIndexEntry>> = Vec::new();
+        let mut root_entries_indices: Vec<(usize, u64)> = Vec::new(); // (index in entries, vcn)
+
+        let mut current_block_entries = Vec::new();
+        let mut current_len = 0;
+
+        // Partition entries into blocks
+        for (i, entry) in entries.iter().enumerate() {
+            let entry_len = entry.len();
+
+            // Check if adding this entry + End Entry (16) overflows the block
+            if current_len + entry_len + 16 > max_payload {
+                let block_index = blocks.len() as u64;
+                let vcn = meta.index_block_to_vcn(block_index);
+                blocks.push(current_block_entries);
+
+                // Promote current entry as pivot to the Root with child VCN
+                root_entries_indices.push((i, vcn));
+
+                current_block_entries = Vec::new();
+                current_len = 0;
+            } else {
+                current_block_entries.push(entry.clone());
+                current_len += entry_len;
+            }
+        }
+
+        // Remaining entries go to last block
+        let last_block_index = blocks.len() as u64;
+        let last_block_vcn = meta.index_block_to_vcn(last_block_index);
+        blocks.push(current_block_entries);
+
+        let total_clusters = meta.total_clusters_for_index_blocks(blocks.len());
+
+        let mut allocation_blocks = Vec::with_capacity(blocks.len());
+
+        for (i, block_entries) in blocks.iter().enumerate() {
+            let vcn = meta.index_block_to_vcn(i as u64);
+            let mut record = NtfsIndexRecord::new(vcn, false);
+            for entry in block_entries {
+                record.add_entry(entry.clone());
+            }
+            allocation_blocks.push(record.to_raw_buffer(meta)?);
+        }
+
+        let mut root_entries_bytes = Vec::new();
+
+        // Add pivot entries
+        for (entry_idx, vcn) in root_entries_indices {
+            let entry = &entries[entry_idx];
+            let mut new_entry = entry.clone();
+            new_entry.vcn = Some(vcn);
+            new_entry.flags |= IndexEntryFlags::HAS_SUBNODES;
+
+            let mut buf = vec![0u8; new_entry.len()];
+            let mut io = MemRimIO::new(&mut buf);
+            new_entry.write_to_io(&mut io, 0)?;
+            root_entries_bytes.extend_from_slice(&buf);
+        }
+
+        // Add End Entry to Root (points to the last block)
+        let mut last_entry = IndexEntryHeader::new(0, 0, true); // LAST_ENTRY
+        last_entry.flags |= IndexEntryFlags::HAS_SUBNODES.bits();
+        last_entry.entry_length = (last_entry.entry_length.get() + 8).into(); // +8 bytes for VCN
+
+        let mut last_bytes = Vec::from(last_entry.as_bytes());
+        last_bytes.extend_from_slice(&last_block_vcn.to_le_bytes());
+        root_entries_bytes.extend_from_slice(&last_bytes);
+
+        // Windows/mkntfs stores the $I30 bitmap with a minimum size of 8 bytes.
+        let bitmap_len = blocks.len().div_ceil(8).max(8);
+        let mut bitmap = vec![0u8; bitmap_len];
+
+        for i in 0..blocks.len() {
+            bitmap[i / 8] |= 1 << (i % 8);
+        }
+
+        Ok(IndexTreeLayout {
+            root_entries: root_entries_bytes,
+            allocation_blocks,
+            bitmap,
+            total_clusters,
+        })
     }
 }

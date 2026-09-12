@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Error types for the rimio I/O abstraction layer.
+
 use core::fmt;
 
 /// Result type for RimIO operations.

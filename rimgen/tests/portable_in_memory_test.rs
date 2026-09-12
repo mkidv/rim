@@ -10,14 +10,13 @@ use rimpart::gpt::decode_gpt_name;
 
 #[test]
 fn test_portable_in_memory_multi_fs() {
-    let total_size = 128 * 1024 * 1024; // 128 MiB
+    let total_size = 128 * 1024 * 1024;
     let mut buf = vec![0u8; total_size];
     let mut io = MemRimIO::new(&mut buf);
     let mut guid_gen = SeededGuidGenerator::new(0xDEAD_BEEF);
 
     let mut layout = Layout::new(guid_gen.generate_guid());
 
-    // 1. ESP FAT32 partition
     let boot_file = FsNode::new_file("BOOTX64.EFI", b"UEFI BINARY PAYLOAD".to_vec());
     let boot_dir = FsNode::Dir {
         name: "BOOT".into(),
@@ -38,14 +37,13 @@ fn test_portable_in_memory_multi_fs() {
         "ESP",
         PartitionKind::Esp,
         Filesystem::Fat32,
-        65536, // 32 MiB
+        65536,
         guid_gen.generate_guid(),
     )
     .with_bootable(true)
     .with_label("EFI")
     .with_root(esp_node);
 
-    // 2. Linux EXT4 partition
     let host_file = FsNode::new_file("hostname", b"rim-box\n".to_vec());
     let etc_dir = FsNode::Dir {
         name: "etc".into(),
@@ -61,13 +59,12 @@ fn test_portable_in_memory_multi_fs() {
         "rootfs",
         PartitionKind::Linux,
         Filesystem::Ext4,
-        40960, // 20 MiB
+        40960,
         guid_gen.generate_guid(),
     )
     .with_label("ROOT")
     .with_root(root_node);
 
-    // 3. NTFS Data partition
     let readme_file = FsNode::new_file("readme.txt", b"NTFS partition content".to_vec());
     let data_node = FsNode::Container {
         attr: FileAttributes::new_dir(),
@@ -78,7 +75,7 @@ fn test_portable_in_memory_multi_fs() {
         "data",
         PartitionKind::Data,
         Filesystem::Ntfs,
-        20480, // 10 MiB
+        20480,
         guid_gen.generate_guid(),
     )
     .with_label("DATA")
@@ -96,7 +93,6 @@ fn test_portable_in_memory_multi_fs() {
     assert_eq!(report.partitions[1].name, "rootfs");
     assert_eq!(report.partitions[2].name, "data");
 
-    // Validate GPT table on io
     let (_hdr, entries) =
         rimpart::gpt::read_gpt_with_sector(&mut io, 512).expect("failed to read GPT");
     assert_eq!(entries.len(), 3);

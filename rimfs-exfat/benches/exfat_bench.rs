@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use rimfs_exfat::prelude::*;
 
@@ -30,7 +32,7 @@ fn bench_exfat_format(c: &mut Criterion) {
         b.iter(|| {
             let file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
-            let mut io = MmapRimIO::new(file).unwrap();
+            let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
             let meta = ExFatMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
             ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
         });
@@ -43,7 +45,6 @@ fn bench_exfat_large_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("exfat_write_large");
     const SIZE_MB: u64 = 64;
     const SIZE_BYTES: u64 = SIZE_MB * 1024 * 1024;
-    // Write 10MB
     const WRITE_SIZE: usize = 10 * 1024 * 1024;
 
     // Setup FS once
@@ -121,13 +122,13 @@ fn bench_exfat_large_write(c: &mut Criterion) {
             || {
                 let file = tempfile::tempfile().unwrap();
                 file.set_len(SIZE_BYTES).unwrap();
-                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file.try_clone().unwrap()) }.unwrap();
                 let meta = ExFatMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
                 ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
                 (file, content.clone())
             },
             |(file, mut content_copy)| {
-                let mut io = MmapRimIO::new(file).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
                 let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;
@@ -168,7 +169,6 @@ fn bench_exfat_large_read(c: &mut Criterion) {
         injector
             .set_root_context(&FileAttributes::new_dir())
             .unwrap();
-        // Write a 10MB file
         let mut content = vec![0xAAu8; WRITE_SIZE];
         let mut content_io = MemRimIO::new(&mut content);
         injector
@@ -193,7 +193,6 @@ fn bench_exfat_large_read(c: &mut Criterion) {
     });
 
     // DISK SETUP involves re-populating the file every iteration OR creating a reusable file
-    // Create a populated file once for reading (for disk)
     let mut file = tempfile::tempfile().unwrap();
     file.set_len(SIZE_BYTES).unwrap();
     {
@@ -234,7 +233,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
     let file_mmap = tempfile::tempfile().unwrap();
     file_mmap.set_len(SIZE_BYTES).unwrap();
     {
-        let mut io = MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap();
+        let mut io = unsafe { MmapRimIO::new(file_mmap.try_clone().unwrap()) }.unwrap();
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
         let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
         injector
@@ -255,7 +254,7 @@ fn bench_exfat_large_read(c: &mut Criterion) {
 
     group.bench_function("read_10mb_contiguous_mmap", |b| {
         b.iter_with_setup(
-            || MmapRimIO::new(file_mmap.try_clone().unwrap()).unwrap(),
+            || unsafe { MmapRimIO::new(file_mmap.try_clone().unwrap()) }.unwrap(),
             |mut io| {
                 let mut resolver = ExFatResolver::new(&mut io, &meta);
                 let data = resolver.read_file("/bigfile.bin").unwrap();
@@ -348,12 +347,12 @@ fn bench_exfat_small_files(c: &mut Criterion) {
             || {
                 let file = tempfile::tempfile().unwrap();
                 file.set_len(SIZE_BYTES).unwrap();
-                let mut io = MmapRimIO::new(file.try_clone().unwrap()).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file.try_clone().unwrap()) }.unwrap();
                 ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
                 (file, content.clone())
             },
             |(file, mut content_copy)| {
-                let mut io = MmapRimIO::new(file).unwrap();
+                let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
                 let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
 
                 let len = content_copy.len() as u64;

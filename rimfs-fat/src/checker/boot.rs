@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! FAT VBR and BPB integrity verification.
+
 use crate::core::{checker::*, fat::*};
 use crate::types::FatFsInfo;
 use crate::{FsMeta, Validate};
@@ -109,7 +112,7 @@ pub fn check_fsinfo_consistency<IO: RimIO + ?Sized>(
         Err(e) => rep.push(Finding::err("FSI.INVALID", e.msg())),
     }
 
-    let advertised = fsi.free_cluster_count;
+    let advertised = fsi.free_cluster_count.get();
     if advertised == 0xFFFF_FFFF {
         rep.push(Finding::warn(
             "FSI.FREE",
@@ -118,14 +121,15 @@ pub fn check_fsinfo_consistency<IO: RimIO + ?Sized>(
     }
 
     if meta.use_integrity {
-        // Read full FAT and check CRC32
-        let fat_size_bytes = (meta.fat_size_sectors as u64 * meta.bytes_per_sector as u64) as usize;
-        let mut fat_buf = vec![0u8; fat_size_bytes];
-        io.read_at(meta.fat_offset_bytes, &mut fat_buf)
-            .map_err(FsCheckerError::IO)?;
-
-        let calc = crate::core::utils::checksum_utils::crc32(&fat_buf);
-        let expected = fsi.fat_checksum;
+        // Stream full FAT and check CRC32
+        let fat_size_bytes = meta.fat_size_sectors as u64 * meta.bytes_per_sector as u64;
+        let calc = crate::core::utils::checksum_utils::crc32_reader(
+            io,
+            meta.fat_offset_bytes,
+            fat_size_bytes,
+        )
+        .map_err(FsCheckerError::IO)?;
+        let expected = fsi.fat_checksum.get();
         if calc != expected {
             rep.push(Finding::warn(
                 "INT.FAT",

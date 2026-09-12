@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Core filesystem error definitions and result aliases.
+
 use core::fmt;
 
 pub use rimio::errors::*;

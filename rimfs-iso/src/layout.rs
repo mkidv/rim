@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 volume space layout and sector offset calculation.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -637,7 +639,6 @@ fn synthesize_efi_fat_image(efi_binary: &[u8]) -> FsInjectorResult<Vec<u8>> {
     use rimfs_fat::prelude::*;
     use rimio::MemRimIO;
 
-    // Allocate 1.44 MiB or larger if binary is large
     let fat_size = ((efi_binary.len() as u64 + 512 * 1024).max(1440 * 1024) + 511) & !511;
     let mut buf = vec![0u8; fat_size as usize];
     let mut io = MemRimIO::new(&mut buf);

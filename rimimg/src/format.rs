@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Supported disk container format enumeration.
+
 use rimio::prelude::*;
 
 use crate::errors::{RimImgError, RimImgResult};

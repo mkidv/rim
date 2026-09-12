@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! High-level directory tree copying engine between arbitrary endpoints.
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -131,7 +133,6 @@ pub fn copy_tree<H: FsHandle, R: FsTreeResolver + ?Sized, I: FsTreeInjector<H> +
         })?;
 
     if is_wild || base_path.is_empty() || base_path == "/" {
-        // Copy directory contents directly into root context
         let lookup_path = if base_path.is_empty() { "/" } else { base_path };
         let entries = resolver
             .read_dir(lookup_path)

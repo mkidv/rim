@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 
+//! TAR archive format and block boundary checker.
+
 use crate::meta::TarMeta;
-use crate::types::{TAR_BLOCK_SIZE, calculate_checksum, parse_octal};
+use crate::resolver::TarResolver;
 use rimfs_core::checker::{FsChecker, FsCheckerResult, VerifierOptionsLike, VerifyReport};
+use rimfs_core::errors::{FsCheckerError, FsResolverError};
 use rimio::RimIO;
 
 #[derive(Debug, Clone, Default)]
@@ -29,27 +32,16 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for TarChecker<'a, IO> {
         _opt: &Self::Options,
         rep: &mut VerifyReport,
     ) -> FsCheckerResult<()> {
-        let mut offset = 0;
-        let mut header = [0u8; TAR_BLOCK_SIZE];
-
-        while self.io.read_at(offset, &mut header).is_ok() {
-            if header.iter().all(|&b| b == 0) {
-                break;
+        if let Err(error) = TarResolver::new(self.io, self._meta).scan_entries(|_, _| {}) {
+            if let FsResolverError::IO(error) = error {
+                return Err(FsCheckerError::IO(error));
             }
-
-            let expected_chksum = parse_octal(&header[148..156]) as u32;
-            let actual_chksum = calculate_checksum(&header);
-            if expected_chksum != actual_chksum {
-                rep.push(rimfs_core::checker::Finding::err(
-                    "TAR.CHECKSUM",
-                    "Invalid TAR header checksum",
-                ));
-                return Ok(());
-            }
-
-            let size = parse_octal(&header[124..136]);
-            let padded = (size as usize + TAR_BLOCK_SIZE - 1) & !(TAR_BLOCK_SIZE - 1);
-            offset += (TAR_BLOCK_SIZE + padded) as u64;
+            let code = if matches!(error, FsResolverError::Invalid("TAR checksum mismatch")) {
+                "TAR.CHECKSUM"
+            } else {
+                "TAR.ARCHIVE"
+            };
+            rep.push(rimfs_core::checker::Finding::err(code, error.msg()));
         }
 
         Ok(())

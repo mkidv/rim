@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimfs-exfat: exFAT (Extended File Allocation Table) driver.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
@@ -12,6 +16,7 @@ mod attr;
 mod checker;
 #[allow(dead_code)]
 pub(crate) mod constant;
+pub mod features;
 mod filesystem;
 mod formatter;
 mod injector;
@@ -47,3 +52,7 @@ pub use prelude::*;
 #[cfg(feature = "std")]
 pub use rimfs_core::StdResolver;
 pub use rimfs_core::utils::{path_utils::*, volume::*};
+
+#[cfg(test)]
+mod tests;
+

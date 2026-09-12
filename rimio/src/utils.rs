@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Helper utilities for block streaming and byte buffers.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 extern crate alloc;
 
@@ -39,7 +41,7 @@ impl Default for DiffRange {
         // Safe defaults for most uses; 4 KiB chunk is a good baseline.
         // For std, we can afford larger buffers for better performance.
         #[cfg(feature = "std")]
-        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+        const CHUNK_SIZE: usize = 1024 * 1024;
         #[cfg(not(feature = "std"))]
         const CHUNK_SIZE: usize = crate::BLOCK_BUF_SIZE;
 

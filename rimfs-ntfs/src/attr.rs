@@ -1,11 +1,29 @@
 // SPDX-License-Identifier: MIT
 //! NTFS file attributes helpers
-
-pub use crate::types::record::{AttributeType, NtfsFileNameNamespace};
-pub use crate::utils::current_ntfs_time;
-
 use crate::core::resolver::attr::FileAttributes;
-use crate::flags::*;
+
+bitflags::bitflags! {
+    /// File Attributes (DOS/Windows style)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[repr(transparent)]
+    pub struct NtfsFileAttributes: u32 {
+        const READ_ONLY = 0x0001;
+        const HIDDEN    = 0x0002;
+        const SYSTEM    = 0x0004;
+        const DIRECTORY = 0x0010;
+        const ARCHIVE   = 0x0020;
+        const DEVICE    = 0x0040;
+        const NORMAL    = 0x0080;
+        const TEMPORARY = 0x0100;
+        const SPARSE    = 0x0200;
+        const REPARSE   = 0x0400;
+        const COMPRESSED = 0x0800;
+        const OFFLINE   = 0x1000;
+        const ENCRYPTED = 0x4000;
+        const I30_INDEX = 0x1000_0000;
+        const VIEW_INDEX = 0x2000_0000;
+    }
+}
 
 pub trait NtfsFileAttributesExt {
     fn as_ntfs_attr(&self) -> NtfsFileAttributes;

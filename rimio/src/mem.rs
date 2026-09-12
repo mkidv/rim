@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! In-memory buffer implementations of RimIO (MemRimIO and BoundedRimIO).
+
 use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite, checked_add_offset};
 
 /// Read-only in-memory slice implementation of `RimRead`.
@@ -412,13 +414,11 @@ mod test {
         let mut disk = [0u8; 1000];
         let mut mem_io = MemRimIO::new(&mut disk);
 
-        // Create a bounded window representing a 200-byte partition at offset 100
         let mut bounded = BoundedRimIO::new(&mut mem_io, 100, 200);
         assert_eq!(bounded.total_size().unwrap(), 200);
         assert_eq!(bounded.offset(), 100);
         assert_eq!(bounded.size(), 200);
 
-        // Write within bounded window
         assert!(bounded.write_at(0, b"PARTITION_START").is_ok());
         assert!(bounded.write_at(180, b"END").is_ok());
 
@@ -426,15 +426,12 @@ mod test {
         assert!(bounded.write_at(199, b"AB").is_err());
         assert!(bounded.write_at(200, b"X").is_err());
 
-        // Read back within bounded window
         let mut read_buf = [0u8; 15];
         assert!(bounded.read_at(0, &mut read_buf).is_ok());
         assert_eq!(&read_buf, b"PARTITION_START");
 
-        // Verify underlying storage had the data written at offset + 100
         assert_eq!(&disk[100..115], b"PARTITION_START");
         assert_eq!(&disk[280..283], b"END");
-        // Verify before and after partition was untouched
         assert_eq!(disk[99], 0);
         assert_eq!(disk[300], 0);
     }

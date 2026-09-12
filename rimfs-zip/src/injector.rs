@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+//! ZIP archive stream injector supporting Deflate and Store compression.
+
+use rimio::RimWriteStructExt;
+use zerocopy::{FromBytes, IntoBytes};
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -9,6 +14,7 @@ use alloc::{
     vec::Vec,
 };
 
+use crate::formatter::clean_trailing_storage;
 use crate::meta::ZipMeta;
 use crate::types::*;
 use crc32fast::Hasher;
@@ -26,6 +32,7 @@ pub struct ZipInjector<'a, IO: RimIO + ?Sized> {
     current_offset: u64,
     entries: Vec<ZipEntry>,
     path_stack: Vec<String>,
+    cleaned_tail_start: Option<u64>,
 }
 
 impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
@@ -36,6 +43,7 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
             current_offset: 0,
             entries: Vec::new(),
             path_stack: Vec::new(),
+            cleaned_tail_start: None,
         })
     }
 
@@ -63,20 +71,22 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
         extra: &[u8],
     ) -> FsInjectorResult<u64> {
         let lfh_offset = self.current_offset;
-        let mut header = [0u8; LOCAL_FILE_HEADER_FIXED_SIZE];
-        header[0..4].copy_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
+        let mut header = ZipLocalFileHeader {
+            signature: (LOCAL_FILE_HEADER_SIG).into(),
+            ..Default::default()
+        };
 
         let version_needed = if comp_size >= 0xFFFF_FFFF || uncomp_size >= 0xFFFF_FFFF {
             VERSION_NEEDED_ZIP64
         } else {
             VERSION_NEEDED_DEFAULT
         };
-        header[4..6].copy_from_slice(&version_needed.to_le_bytes());
-        header[6..8].copy_from_slice(&FLAG_UTF8_FILENAME.to_le_bytes());
-        header[8..10].copy_from_slice(&compression_method.to_le_bytes());
-        header[10..12].copy_from_slice(&time_dos.to_le_bytes());
-        header[12..14].copy_from_slice(&date_dos.to_le_bytes());
-        header[14..18].copy_from_slice(&crc32.to_le_bytes());
+        header.version_needed = (version_needed).into();
+        header.flags = (FLAG_UTF8_FILENAME).into();
+        header.compression_method = (compression_method).into();
+        header.mtime = (time_dos).into();
+        header.mdate = (date_dos).into();
+        header.crc32 = (crc32).into();
 
         let comp_32 = if comp_size >= 0xFFFF_FFFF {
             0xFFFF_FFFF
@@ -88,23 +98,28 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
         } else {
             uncomp_size as u32
         };
-        header[18..22].copy_from_slice(&comp_32.to_le_bytes());
-        header[22..26].copy_from_slice(&uncomp_32.to_le_bytes());
+        header.compressed_size = (comp_32).into();
+        header.uncompressed_size = (uncomp_32).into();
 
         let name_bytes = name.as_bytes();
-        header[26..28].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        header.name_len = (name_bytes.len() as u16).into();
 
         let mut local_extra = extra.to_vec();
         if comp_size >= 0xFFFF_FFFF || uncomp_size >= 0xFFFF_FFFF {
-            local_extra.extend_from_slice(&EXTRA_ZIP64_ID.to_le_bytes());
             let zip64_len: u16 = 16;
-            local_extra.extend_from_slice(&zip64_len.to_le_bytes());
+            local_extra.extend_from_slice(
+                crate::headers::ZipExtraFieldHeader {
+                    id: EXTRA_ZIP64_ID.into(),
+                    data_len: zip64_len.into(),
+                }
+                .as_bytes(),
+            );
             local_extra.extend_from_slice(&uncomp_size.to_le_bytes());
             local_extra.extend_from_slice(&comp_size.to_le_bytes());
         }
-        header[28..30].copy_from_slice(&(local_extra.len() as u16).to_le_bytes());
+        header.extra_len = (local_extra.len() as u16).into();
 
-        self.io.write_at(lfh_offset, &header)?;
+        self.io.write_struct(lfh_offset, &header)?;
         self.io
             .write_at(lfh_offset + LOCAL_FILE_HEADER_FIXED_SIZE as u64, name_bytes)?;
         if !local_extra.is_empty() {
@@ -155,9 +170,11 @@ impl<'a, IO: RimIO + ?Sized> ZipInjector<'a, IO> {
 
             let mut offset = 0;
             while offset + 4 <= extra_buf.len() {
-                let id = u16::from_le_bytes([extra_buf[offset], extra_buf[offset + 1]]);
-                let sz =
-                    u16::from_le_bytes([extra_buf[offset + 2], extra_buf[offset + 3]]) as usize;
+                let (header, _) =
+                    crate::headers::ZipExtraFieldHeader::ref_from_prefix(&extra_buf[offset..])
+                        .map_err(|_| rimio::RimIOError::Invalid("Truncated ZIP extra header"))?;
+                let id = header.id.get();
+                let sz = header.data_len.get() as usize;
                 if id == EXTRA_ZIP64_ID && sz >= 16 && offset + 4 + sz <= extra_buf.len() {
                     let field_data_offset = extra_offset + (offset + 4) as u64;
                     self.io
@@ -246,7 +263,6 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         if use_deflate {
             #[cfg(feature = "deflate")]
             {
-                // Read source into buffer for deflate encoding
                 let mut uncompressed = Vec::with_capacity(size.min(16 * 1024 * 1024) as usize);
                 let mut buf = [0u8; 8192];
                 let mut src_off = 0;
@@ -424,13 +440,15 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
 
     fn flush(&mut self) -> FsInjectorResult {
         let cd_start_offset = self.current_offset;
+        let mut cursor = cd_start_offset;
 
-        // Write all Central Directory entries
         for entry in &self.entries {
-            let cd_offset = self.current_offset;
-            let mut cdh = [0u8; CENTRAL_DIR_HEADER_FIXED_SIZE];
-            cdh[0..4].copy_from_slice(&CENTRAL_DIR_HEADER_SIG.to_le_bytes());
-            cdh[4..6].copy_from_slice(&VERSION_MADE_BY_UNIX.to_le_bytes());
+            let cd_offset = cursor;
+            let mut cdh = ZipCentralDirectoryHeader {
+                signature: (CENTRAL_DIR_HEADER_SIG).into(),
+                ..Default::default()
+            };
+            cdh.version_made_by = (VERSION_MADE_BY_UNIX).into();
 
             let needs_zip64 = entry.compressed_size >= 0xFFFF_FFFF
                 || entry.uncompressed_size >= 0xFFFF_FFFF
@@ -441,12 +459,12 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
             } else {
                 VERSION_NEEDED_DEFAULT
             };
-            cdh[6..8].copy_from_slice(&version_needed.to_le_bytes());
-            cdh[8..10].copy_from_slice(&FLAG_UTF8_FILENAME.to_le_bytes());
-            cdh[10..12].copy_from_slice(&entry.compression_method.to_le_bytes());
-            cdh[12..14].copy_from_slice(&entry.mtime_dos.to_le_bytes());
-            cdh[14..16].copy_from_slice(&entry.mdate_dos.to_le_bytes());
-            cdh[16..20].copy_from_slice(&entry.crc32.to_le_bytes());
+            cdh.version_needed = (version_needed).into();
+            cdh.flags = (FLAG_UTF8_FILENAME).into();
+            cdh.compression_method = (entry.compression_method).into();
+            cdh.mtime = (entry.mtime_dos).into();
+            cdh.mdate = (entry.mdate_dos).into();
+            cdh.crc32 = (entry.crc32).into();
 
             let comp_32 = if entry.compressed_size >= 0xFFFF_FFFF {
                 0xFFFF_FFFF
@@ -458,11 +476,11 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
             } else {
                 entry.uncompressed_size as u32
             };
-            cdh[20..24].copy_from_slice(&comp_32.to_le_bytes());
-            cdh[24..28].copy_from_slice(&uncomp_32.to_le_bytes());
+            cdh.compressed_size = (comp_32).into();
+            cdh.uncompressed_size = (uncomp_32).into();
 
             let name_bytes = entry.name.as_bytes();
-            cdh[28..30].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            cdh.name_len = (name_bytes.len() as u16).into();
 
             let mut extra = Vec::new();
             if let Some(dt) = entry.timestamp {
@@ -472,28 +490,39 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
                 extra.extend_from_slice(&encode_unix_uid_gid_extra(uid, gid));
             }
             if needs_zip64 {
-                extra.extend_from_slice(&EXTRA_ZIP64_ID.to_le_bytes());
-                let zip64_len: u16 = 24; // uncompressed (8) + compressed (8) + offset (8)
-                extra.extend_from_slice(&zip64_len.to_le_bytes());
-                extra.extend_from_slice(&entry.uncompressed_size.to_le_bytes());
-                extra.extend_from_slice(&entry.compressed_size.to_le_bytes());
-                extra.extend_from_slice(&entry.local_header_offset.to_le_bytes());
+                let zip64_len: u16 = 8
+                    * ((entry.uncompressed_size >= 0xFFFF_FFFF) as u16
+                        + (entry.compressed_size >= 0xFFFF_FFFF) as u16
+                        + (entry.local_header_offset >= 0xFFFF_FFFF) as u16);
+                extra.extend_from_slice(
+                    crate::headers::ZipExtraFieldHeader {
+                        id: EXTRA_ZIP64_ID.into(),
+                        data_len: zip64_len.into(),
+                    }
+                    .as_bytes(),
+                );
+                if entry.uncompressed_size >= 0xFFFF_FFFF {
+                    extra.extend_from_slice(&entry.uncompressed_size.to_le_bytes());
+                }
+                if entry.compressed_size >= 0xFFFF_FFFF {
+                    extra.extend_from_slice(&entry.compressed_size.to_le_bytes());
+                }
+                if entry.local_header_offset >= 0xFFFF_FFFF {
+                    extra.extend_from_slice(&entry.local_header_offset.to_le_bytes());
+                }
             }
 
-            cdh[30..32].copy_from_slice(&(extra.len() as u16).to_le_bytes());
-            // comment_len (32..34) = 0
-            // disk_start (34..36) = 0
-            // internal_attr (36..38) = 0
-            cdh[38..42].copy_from_slice(&entry.external_attributes.to_le_bytes());
+            cdh.extra_len = (extra.len() as u16).into();
+            cdh.external_attributes = (entry.external_attributes).into();
 
             let lfh_32 = if entry.local_header_offset >= 0xFFFF_FFFF {
                 0xFFFF_FFFF
             } else {
                 entry.local_header_offset as u32
             };
-            cdh[42..46].copy_from_slice(&lfh_32.to_le_bytes());
+            cdh.local_header_offset = (lfh_32).into();
 
-            self.io.write_at(cd_offset, &cdh)?;
+            self.io.write_struct(cd_offset, &cdh)?;
             self.io
                 .write_at(cd_offset + CENTRAL_DIR_HEADER_FIXED_SIZE as u64, name_bytes)?;
             if !extra.is_empty() {
@@ -503,57 +532,59 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
                 )?;
             }
 
-            self.current_offset +=
+            cursor +=
                 CENTRAL_DIR_HEADER_FIXED_SIZE as u64 + name_bytes.len() as u64 + extra.len() as u64;
         }
 
-        let cd_size = self.current_offset - cd_start_offset;
+        let cd_size = cursor - cd_start_offset;
         let num_entries = self.entries.len();
 
         let needs_zip64_eocd =
             num_entries >= 0xFFFF || cd_size >= 0xFFFF_FFFF || cd_start_offset >= 0xFFFF_FFFF;
 
         if needs_zip64_eocd {
-            let zip64_eocd_offset = self.current_offset;
-            let mut eocd64 = [0u8; ZIP64_EOCD_FIXED_SIZE];
-            eocd64[0..4].copy_from_slice(&ZIP64_END_OF_CENTRAL_DIR_SIG.to_le_bytes());
+            let zip64_eocd_offset = cursor;
+            let mut eocd64 = Zip64Eocd {
+                signature: (ZIP64_END_OF_CENTRAL_DIR_SIG).into(),
+                ..Default::default()
+            };
             let eocd64_size: u64 = 44; // size of remaining record
-            eocd64[4..12].copy_from_slice(&eocd64_size.to_le_bytes());
-            eocd64[12..14].copy_from_slice(&VERSION_MADE_BY_UNIX.to_le_bytes());
-            eocd64[14..16].copy_from_slice(&VERSION_NEEDED_ZIP64.to_le_bytes());
-            // disk_num (16..20) = 0, cd_disk (20..24) = 0
-            eocd64[24..32].copy_from_slice(&(num_entries as u64).to_le_bytes());
-            eocd64[32..40].copy_from_slice(&(num_entries as u64).to_le_bytes());
-            eocd64[40..48].copy_from_slice(&cd_size.to_le_bytes());
-            eocd64[48..56].copy_from_slice(&cd_start_offset.to_le_bytes());
+            eocd64.record_size = (eocd64_size).into();
+            eocd64.version_made_by = (VERSION_MADE_BY_UNIX).into();
+            eocd64.version_needed = (VERSION_NEEDED_ZIP64).into();
+            eocd64.disk_entries = (num_entries as u64).into();
+            eocd64.total_entries = (num_entries as u64).into();
+            eocd64.directory_size = (cd_size).into();
+            eocd64.directory_offset = (cd_start_offset).into();
 
-            self.io.write_at(zip64_eocd_offset, &eocd64)?;
-            self.current_offset += ZIP64_EOCD_FIXED_SIZE as u64;
+            self.io.write_struct(zip64_eocd_offset, &eocd64)?;
+            cursor += ZIP64_EOCD_FIXED_SIZE as u64;
 
             // ZIP64 Locator
-            let locator_offset = self.current_offset;
-            let mut locator = [0u8; ZIP64_LOCATOR_FIXED_SIZE];
-            locator[0..4].copy_from_slice(&ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIG.to_le_bytes());
-            // cd_disk (4..8) = 0
-            locator[8..16].copy_from_slice(&zip64_eocd_offset.to_le_bytes());
-            locator[16..20].copy_from_slice(&1u32.to_le_bytes()); // total disks = 1
+            let locator_offset = cursor;
+            let mut locator = Zip64Locator {
+                signature: (ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIG).into(),
+                ..Default::default()
+            };
+            locator.eocd_offset = (zip64_eocd_offset).into();
+            locator.total_disks = (1u32).into(); // total disks = 1
 
-            self.io.write_at(locator_offset, &locator)?;
-            self.current_offset += ZIP64_LOCATOR_FIXED_SIZE as u64;
+            self.io.write_struct(locator_offset, &locator)?;
+            cursor += ZIP64_LOCATOR_FIXED_SIZE as u64;
         }
 
-        // Standard EOCD Record
-        let eocd_offset = self.current_offset;
-        let mut eocd = [0u8; END_OF_CENTRAL_DIR_FIXED_SIZE];
-        eocd[0..4].copy_from_slice(&END_OF_CENTRAL_DIR_SIG.to_le_bytes());
-        // disk_num (4..6) = 0, cd_disk (6..8) = 0
+        let eocd_offset = cursor;
+        let mut eocd = ZipEocd {
+            signature: (END_OF_CENTRAL_DIR_SIG).into(),
+            ..Default::default()
+        };
         let entries_16 = if num_entries >= 0xFFFF {
             0xFFFF
         } else {
             num_entries as u16
         };
-        eocd[8..10].copy_from_slice(&entries_16.to_le_bytes());
-        eocd[10..12].copy_from_slice(&entries_16.to_le_bytes());
+        eocd.disk_entries = (entries_16).into();
+        eocd.total_entries = (entries_16).into();
 
         let cd_size_32 = if cd_size >= 0xFFFF_FFFF {
             0xFFFF_FFFF
@@ -565,14 +596,109 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<ZipHandle> for ZipInjector<'a, IO> {
         } else {
             cd_start_offset as u32
         };
-        eocd[12..16].copy_from_slice(&cd_size_32.to_le_bytes());
-        eocd[16..20].copy_from_slice(&cd_offset_32.to_le_bytes());
-        // comment_len (20..22) = 0
+        eocd.directory_size = (cd_size_32).into();
+        eocd.directory_offset = (cd_offset_32).into();
 
-        self.io.write_at(eocd_offset, &eocd)?;
-        self.current_offset += END_OF_CENTRAL_DIR_FIXED_SIZE as u64;
+        // Clear stale trailing archive records before publishing this EOCD.
+        let archive_end = eocd_offset
+            .checked_add(END_OF_CENTRAL_DIR_FIXED_SIZE as u64)
+            .ok_or(rimio::RimIOError::OutOfBounds)?;
+        let storage_end = self.io.total_size()?;
+        let clean_start = archive_end;
+        let clean_end = self
+            .cleaned_tail_start
+            .unwrap_or(storage_end)
+            .min(storage_end);
+        if clean_start < clean_end {
+            clean_trailing_storage(self.io, clean_start, clean_end)?;
+        }
+        self.cleaned_tail_start = Some(archive_end);
+        self.io.write_struct(eocd_offset, &eocd)?;
 
         self.io.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::core::traits::FsTreeResolver;
+    use alloc::vec;
+    use rimio::RimWrite;
+    #[test]
+    fn zip64_offset_only_roundtrip() {
+        let mut io = rimio::SparseRimIO::new((1u64 << 32) + 65536);
+        let meta = ZipMeta::default();
+        let mut injector = ZipInjector::new(&mut io, &meta).unwrap();
+        injector.current_offset = (1u64 << 32) + 512;
+        let mut source = rimio::SliceRimIO::new(b"content");
+        injector
+            .write_file("probe", &mut source, 7, &FileAttributes::new_file())
+            .unwrap();
+        injector.flush().unwrap();
+        let mut resolver = crate::ZipResolver::try_new(&mut io, &meta).unwrap();
+        assert_eq!(resolver.read_file("probe").unwrap(), b"content");
+    }
+    #[test]
+    fn stored_payload_checks_crc_including_zero_and_size() {
+        let meta = ZipMeta::default();
+        let mut storage = vec![0; 65536];
+        let mut io = rimio::MemRimIO::new(&mut storage);
+        let mut injector = ZipInjector::new(&mut io, &meta).unwrap();
+        injector
+            .write_file(
+                "probe",
+                &mut rimio::SliceRimIO::new(b"content"),
+                7,
+                &FileAttributes::new_file(),
+            )
+            .unwrap();
+        let central = injector.current_offset;
+        injector.flush().unwrap();
+        let mut good = vec![0; io.total_size().unwrap() as usize];
+        io.read_at(0, &mut good).unwrap();
+        for (offset, value) in [(central + 16, 0u32), (central + 24, 8u32)] {
+            let mut storage = good.clone();
+            let mut damaged = rimio::MemRimIO::new(&mut storage);
+            damaged.write_at(offset, &value.to_le_bytes()).unwrap();
+            let mut resolver = crate::ZipResolver::try_new(&mut damaged, &meta).unwrap();
+            assert!(resolver.open_file("probe").is_err());
+        }
+        let mut damaged = rimio::MemRimIO::new(&mut good);
+        damaged.write_at(central, &[0; 4]).unwrap();
+        assert!(crate::ZipResolver::try_new(&mut damaged, &meta).is_err());
+    }
+    #[cfg(feature = "deflate")]
+    #[test]
+    fn deflate_budget_and_zero_crc_are_enforced() {
+        let meta = ZipMeta {
+            compression_method: METHOD_DEFLATE,
+            ..ZipMeta::default()
+        };
+        let mut disk = vec![0; 65536];
+        let mut io = rimio::MemRimIO::new(&mut disk);
+        let mut injector = ZipInjector::new(&mut io, &meta).unwrap();
+        injector
+            .write_file(
+                "probe",
+                &mut rimio::SliceRimIO::new(&[7; 4096]),
+                4096,
+                &FileAttributes::new_file(),
+            )
+            .unwrap();
+        let central = injector.current_offset;
+        injector.flush().unwrap();
+        {
+            let mut resolver = crate::ZipResolver::with_payload_budget(&mut io, &meta, 1024);
+            assert!(resolver.open_file("probe").is_err());
+        }
+        {
+            let mut resolver = crate::ZipResolver::try_new(&mut io, &meta).unwrap();
+            assert_eq!(resolver.read_file("probe").unwrap(), [7; 4096]);
+        }
+        io.write_at(central + 16, &0u32.to_le_bytes()).unwrap();
+        let mut resolver = crate::ZipResolver::try_new(&mut io, &meta).unwrap();
+        assert!(resolver.open_file("probe").is_err());
     }
 }

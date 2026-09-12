@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! exFAT filesystem driver implementation.
+
 pub use crate::core::traits::*;
 
 use crate::traits::*;

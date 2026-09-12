@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Multi-format disk image and filesystem manipulation CLI.
+
 mod cli;
 mod commands;
 pub mod copy;

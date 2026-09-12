@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Sector, cluster, and boundary alignment arithmetic helpers.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec::Vec;
 

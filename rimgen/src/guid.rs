@@ -54,7 +54,6 @@ impl GuidGenerator for SeededGuidGenerator {
         let mut bytes = [0u8; 16];
         bytes[0..8].copy_from_slice(&lo.to_le_bytes());
         bytes[8..16].copy_from_slice(&hi.to_le_bytes());
-        // Set UUID v4 variant and version bits
         bytes[6] = (bytes[6] & 0x0F) | 0x40; // Version 4
         bytes[8] = (bytes[8] & 0x3F) | 0x80; // Variant RFC4122
         bytes

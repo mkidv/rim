@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! macOS diskutil and hdiutil automation scripts.
+
 use rimgen::LayoutConfig;
 use std::path::Path;
 use std::process::Command;

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Fast checksum and digest accumulation helpers.
+
 /// Minimal trait to abstract the rolling "rotate-right then add byte" checksum
 /// over different word sizes (u8, u32). This keeps the loop monomorphized and
 /// no_std-friendly.
@@ -97,9 +99,33 @@ pub fn checksum_u32(data: &[u8]) -> u32 {
     checksum::<u32>(data)
 }
 
+pub use crc32fast::Hasher as Crc32Hasher;
+
 /// CRC-32 (ISO 3309) - Poly: 0xEDB88320
 pub fn crc32(data: &[u8]) -> u32 {
     crc32fast::hash(data)
+}
+
+/// Compute CRC-32 by streaming in chunks from a reader.
+pub fn crc32_reader<R: rimio::RimRead + ?Sized>(
+    reader: &mut R,
+    offset: u64,
+    len: u64,
+) -> rimio::RimIOResult<u32> {
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut remaining = len;
+    let mut current_offset = offset;
+
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        reader.read_at(current_offset, &mut buf[..to_read])?;
+        hasher.update(&buf[..to_read]);
+        current_offset += to_read as u64;
+        remaining -= to_read as u64;
+    }
+
+    Ok(hasher.finalize())
 }
 
 /// CRC-32C (Castagnoli) - Poly: 0x82F63B78

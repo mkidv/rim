@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! exFAT up-case table decompression and generation.
+
 use crate::{
     FsMeta,
     core::{FsResolverResult, utils::upcase::UpcaseHandle as CoreUpcase},
@@ -55,7 +59,7 @@ impl UpcaseHandle {
         let mut blob = vec![0u8; len];
         let offset = meta.unit_offset(meta.upcase_cluster);
         // Upcase table is always contiguous
-        io.read_block_best_effort(offset, &mut blob, meta.unit_size())?;
+        io.read_block_best_effort(offset, &mut blob, meta.unit_size() as usize)?;
 
         // Use core constructor
         let handle = CoreUpcase::from_bytes(&blob).map_err(|_| "upcase_parse_error")?;
@@ -76,17 +80,9 @@ impl UpcaseHandle {
                 EXFAT_UPCASE_FULL_LENGTH,
             ),
         };
-        // The compressed data in constant/upcase.rs needs to be expanded or used?
         // Wait, original code did:
-        // blob.copy_from_slice(compressed);
         // This implies the constants are NOT compressed, just bytes.
 
-        // Original code:
-        // let mut blob = vec![0u8; len].into_boxed_slice();
-        // blob.copy_from_slice(compressed);
-        // Note: EXFAT_UPCASE_MINIMAL is an array reference.
-
-        // So we can just pass the bytes.
         let handle = CoreUpcase::from_bytes(compressed).expect("Invalid static upcase table");
         Self(handle)
     }

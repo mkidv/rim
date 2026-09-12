@@ -1,29 +1,20 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec::Vec;
 
-use rimio::prelude::*;
-use zerocopy::IntoBytes;
+//! exFAT volume formatter and boot sector generator.
 
 pub use crate::core::formatter::*;
-use crate::{
-    core::{
-        fat::*,
-        utils::checksum_utils::{accumulate_checksum, accumulate_checksum_with_escape},
-    },
-    {
-        constant::*,
-        meta::*,
-        types::*,
-        upcase::UpcaseHandle,
-        utils::{self},
-    },
+
+use rimio::prelude::*;
+
+use crate::allocator::ExFatAllocator;
+use crate::core::feature::{FsSystemFeature, execute_feature_pipeline};
+use crate::features::{
+    ExFatBitmapFeature, ExFatBootFeature, ExFatFatFeature, ExFatRootDirFeature, ExFatUpcaseFeature,
 };
+use crate::meta::ExFatMeta;
 
 /// ExFatFormatter:
-/// - Valid formatter for ExFAT.
+/// - Modular, valid formatter for ExFAT using `FsSystemFeature`.
 /// - Prepares VBR, FAT region, Allocation Bitmap, Root Dir.
 /// - No pre-allocation of FAT chains → injector does that.
 pub struct ExFatFormatter<'a, IO: RimIO + ?Sized> {
@@ -34,16 +25,20 @@ pub struct ExFatFormatter<'a, IO: RimIO + ?Sized> {
 impl<'a, IO: RimIO + ?Sized> FsFormatter for ExFatFormatter<'a, IO> {
     fn format(&mut self, full_format: bool) -> FsFormatterResult {
         if full_format {
-            crate::core::formatter::zero_cluster_heap(self.io, self.meta)?;
+            zero_cluster_heap(self.io, self.meta)?;
         }
 
-        self.write_vbr()?;
-        self.write_fat_region()?;
+        let mut boot = ExFatBootFeature::new();
+        let mut fat = ExFatFatFeature::new();
+        let mut bitmap = ExFatBitmapFeature::new();
+        let mut upcase = ExFatUpcaseFeature::new();
+        let mut root = ExFatRootDirFeature::new();
 
-        self.write_bitmap()?;
-        let (upcase_len, upcase_checksum) = self.write_upcase_table()?;
-        self.write_root_dir_cluster(upcase_len, upcase_checksum)?;
-        self.allocate_system_clusters()?;
+        let mut features: [&mut dyn FsSystemFeature<ExFatMeta, ExFatAllocator<'a>, IO>; 5] =
+            [&mut boot, &mut fat, &mut bitmap, &mut upcase, &mut root];
+
+        let mut allocator = ExFatAllocator::new(self.meta);
+        execute_feature_pipeline(&mut features, self.meta, &mut allocator, self.io)?;
 
         self.io.flush()?;
         Ok(())
@@ -54,157 +49,13 @@ impl<'a, IO: RimIO + ?Sized> ExFatFormatter<'a, IO> {
     pub fn new(io: &'a mut IO, meta: &'a ExFatMeta) -> Self {
         Self { io, meta }
     }
-
-    fn write_vbr(&mut self) -> FsFormatterResult {
-        let mut buf = Vec::with_capacity(12 * self.meta.bytes_per_sector as usize);
-
-        let partition_offset_sectors =
-            self.io.partition_offset() / (self.meta.bytes_per_sector as u64);
-        let mut checksum: u32 = 0;
-
-        // Sector 0
-        let vbr = ExFatBootSector::new_from_meta(self.meta)
-            .with_partition_offset(partition_offset_sectors)
-            .with_percent_in_use(self.meta.percent_in_use());
-        vbr.to_raw_buffer(&mut buf);
-        accumulate_checksum_with_escape(&mut checksum, vbr.as_bytes(), |i, _b| {
-            i == 106 || i == 107 || i == 112
-        });
-        // Sectors 1-8: Extended Boot Sectors
-        let ex = ExFatExBootSector::new();
-        for i in 1..=8 {
-            if i == 1 {
-                buf.extend_from_slice(&EXFAT_EXT_BOOT_SECTOR_1);
-                buf.extend_from_slice(&EXFAT_SIGNATURE);
-                accumulate_checksum(&mut checksum, &EXFAT_EXT_BOOT_SECTOR_1);
-                accumulate_checksum(&mut checksum, &EXFAT_SIGNATURE);
-            } else if i == 2 {
-                buf.extend_from_slice(&EXFAT_EXT_BOOT_SECTOR_2);
-                buf.extend_from_slice(&EXFAT_SIGNATURE);
-                accumulate_checksum(&mut checksum, &EXFAT_EXT_BOOT_SECTOR_2);
-                accumulate_checksum(&mut checksum, &EXFAT_SIGNATURE);
-            } else {
-                ex.to_raw_buffer(&mut buf);
-                accumulate_checksum(&mut checksum, ex.as_bytes());
-            }
-        }
-
-        // Sectors 9-10: OEM Parameters and Reserved (without signature per spec)
-        let empty = vec![0u8; self.meta.bytes_per_sector as usize];
-        for _i in 9..=10 {
-            buf.extend_from_slice(&empty);
-            accumulate_checksum(&mut checksum, &empty);
-        }
-
-        // Sector 11: Checksum sector
-        let sec = self.meta.bytes_per_sector as usize;
-        let mut chk = vec![0u8; sec];
-        for i in (0..sec).step_by(4) {
-            chk[i..i + 4].copy_from_slice(&checksum.to_le_bytes());
-        }
-        buf.extend_from_slice(&chk);
-
-        // Write VBR and backup
-        let offset = EXFAT_VBR_SECTOR * self.meta.bytes_per_sector as u64;
-        self.io.write_at(offset, &buf)?;
-
-        let backup_offset = EXFAT_VBR_BACKUP_SECTOR * self.meta.bytes_per_sector as u64;
-        self.io.write_at(backup_offset, &buf)?;
-
-        Ok(())
-    }
-
-    fn write_fat_region(&mut self) -> FsFormatterResult {
-        let offset = self.meta.fat_table_offset(0);
-        let total_fat_bytes = self.meta.fat_size_sectors as u64 * self.meta.bytes_per_sector as u64;
-
-        // 1. Zero-fill the FAT region
-        self.io.zero_fill(offset, total_fat_bytes as usize)?;
-
-        // 2. Write reserved entries (Media Descriptor + EOC) using FatDriver
-        let mut driver = FatDriver::new(self.meta);
-        let media_val = 0xFFFFFF00 | EXFAT_MEDIA_DESCRIPTOR as u32;
-        driver.write_entry(self.io, 0, media_val)?;
-        driver.write_entry(self.io, 1, EXFAT_EOC)?;
-
-        Ok(())
-    }
-
-    fn write_bitmap(&mut self) -> FsFormatterResult {
-        let first = self.meta.bitmap_cluster;
-        let n = self.meta.bitmap_clusters();
-        for i in 0..n {
-            let off = self.meta.unit_offset(first + i);
-            self.io.zero_fill(off, self.meta.unit_size())?;
-        }
-        Ok(())
-    }
-
-    fn write_upcase_table(&mut self) -> FsFormatterResult<(u64, u32)> {
-        let offset = self.meta.unit_offset(self.meta.upcase_cluster);
-
-        let upcase = UpcaseHandle::from_flavor(&self.meta.upcase_flavor);
-
-        self.io
-            .write_block_best_effort(offset, upcase.as_bytes(), self.meta.unit_size())?;
-
-        Ok((upcase.len() as u64, upcase.checksum()))
-    }
-
-    fn write_root_dir_cluster(
-        &mut self,
-        upcase_len: u64,
-        upcase_checksum: u32,
-    ) -> FsFormatterResult {
-        let mut buf = Vec::with_capacity(self.meta.unit_size());
-
-        ExFatBitmapEntry::new(
-            self.meta.bitmap_cluster,
-            self.meta.bitmap_size_bytes, // Size in BYTES (1 bit per cluster, rounded up)
-        )
-        .to_raw_buffer(&mut buf);
-        ExFatUpcaseEntry::new(self.meta.upcase_cluster, upcase_len, upcase_checksum)
-            .to_raw_buffer(&mut buf);
-        ExFatVolumeLabelEntry::new(self.meta.volume_label).to_raw_buffer(&mut buf);
-        if let Some(guid) = self.meta.volume_guid {
-            ExFatGuidEntry::new(guid).to_raw_buffer(&mut buf);
-        }
-
-        ExFatEodEntry::new().to_raw_buffer(&mut buf);
-
-        let offset = self.meta.unit_offset(self.meta.root_unit());
-        self.io.write_at(offset, &buf)?;
-
-        Ok(())
-    }
-
-    /// Allocates all system clusters (bitmap, upcase, root) at once
-    fn allocate_system_clusters(&mut self) -> FsFormatterResult {
-        let build_run = |start: u32, len: u32| -> RunList {
-            let mut rl = RunList::new();
-            rl.push(Run {
-                start: start as u64,
-                length: len as u64,
-            });
-            rl
-        };
-        let bitmap_chain = build_run(self.meta.bitmap_cluster, self.meta.bitmap_clusters());
-        let upcase_chain = build_run(self.meta.upcase_cluster, self.meta.upcase_clusters());
-        let root_chain = build_run(self.meta.root_unit(), self.meta.root_clusters());
-
-        let mut driver = FatDriver::new(self.meta);
-
-        // Write the FAT (chaining + EOC) and the bitmap (bits set to 1) for each chain
-        for ch in [&bitmap_chain, &upcase_chain, &root_chain] {
-            driver.write_run_list(self.io, ch)?;
-            utils::write_bitmap(self.io, self.meta, ch)?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
+    extern crate std;
+    use self::std::{print, println};
+    use alloc::vec::Vec;
     use crate::{
         core::fat::FatFsMeta,
         {constant::EXFAT_FIRST_CLUSTER, prelude::*},
@@ -303,7 +154,6 @@ mod test {
                 "Invalid repeated checksum at index {i}",
             );
         }
-        // Verify that the last 2 bytes before the signature are the first 2 bytes of the checksum
         let partial_word_start = complete_words * 4;
         assert_eq!(
             &checksum_sector[partial_word_start..partial_word_start + 2],
@@ -312,9 +162,9 @@ mod test {
         );
         hexdump("VBR Checksum Sector (11)", checksum_sector);
 
+        #[cfg(feature = "std")]
         println!("VBR checksum = 0x{checksum:08X}");
 
-        // Read backup VBR (sectors 12 to 23)
         let mut backup_sectors = [0u8; 512 * 12];
         let backup_offset = 12 * 512;
         io.read_at(backup_offset as u64, &mut backup_sectors)
@@ -336,7 +186,6 @@ mod test {
 
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
 
-        // read the entire FAT
         let fat_bytes = meta.fat_size_sectors * meta.bytes_per_sector as u32;
         let mut fat_buf = vec![0u8; fat_bytes as usize];
         io.read_at(meta.fat_offset_bytes, &mut fat_buf).unwrap();
@@ -407,10 +256,9 @@ mod test {
 
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
 
-        // read the full bitmap (across N clusters if necessary)
         let bm_first = meta.bitmap_cluster;
         let bm_clusters = meta.bitmap_clusters();
-        let cs = meta.unit_size();
+        let cs = meta.unit_size() as usize;
         let mut bitmap = vec![0u8; meta.bitmap_size_bytes as usize];
 
         for i in 0..bm_clusters as usize {
@@ -429,7 +277,11 @@ mod test {
 
         // helpers
         let bit_is_set = |clus: u32| -> bool {
-            let (byte_index, bit_mask) = meta.bitmap_entry_offset(clus);
+            let bit = meta.bitmap_bit(clus).unwrap() as usize;
+
+            let byte_index = bit / 8;
+            let bit_mask = 1u8 << (bit % 8);
+
             (bitmap[byte_index] & bit_mask) != 0
         };
 
@@ -494,7 +346,7 @@ mod test {
         let mut io = MemRimIO::new(&mut buffer);
 
         ExFatFormatter::new(&mut io, &meta).format(false).unwrap();
-        let mut root = vec![0u8; meta.unit_size()];
+        let mut root = vec![0u8; meta.unit_size() as usize];
         io.read_at(meta.unit_offset(meta.root_unit()), &mut root)
             .unwrap();
 
@@ -522,12 +374,12 @@ mod test {
         io.read_at(0, &mut vbr).unwrap();
         hexdump("Sector 0 (VBR)", &vbr);
 
-        let mut root = vec![0u8; meta.unit_size()];
+        let mut root = vec![0u8; meta.unit_size() as usize];
         io.read_at(meta.unit_offset(meta.root_unit()), &mut root)
             .unwrap();
         hexdump("Root Cluster", &root[..128]);
 
-        let mut bitmap = vec![0u8; meta.unit_size()];
+        let mut bitmap = vec![0u8; meta.unit_size() as usize];
         io.read_at(meta.unit_offset(meta.bitmap_cluster), &mut bitmap)
             .unwrap();
         hexdump("Allocation Bitmap", &bitmap[..64.min(bitmap.len())]);

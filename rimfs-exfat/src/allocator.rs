@@ -1,9 +1,18 @@
+// SPDX-License-Identifier: MIT
+
+//! exFAT cluster allocator and allocation bitmap synchronization.
+
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
+
 pub use crate::core::allocator::*;
+
 use crate::core::{bitmap::BitmapDriver, fat::*};
 use crate::meta::*;
-use alloc::vec::Vec;
+
 use rimio::prelude::*;
 
+/// Handle for an ExFAT allocation.
 #[derive(Debug, Clone)]
 pub struct ExFatHandle {
     pub cluster_id: u32,
@@ -11,19 +20,31 @@ pub struct ExFatHandle {
 }
 
 impl ExFatHandle {
+    /// Create a handle containing a single cluster.
     pub fn new(cluster_id: u32) -> Self {
-        ExFatHandle {
+        Self {
             cluster_id,
-            cluster_chain: RunList::from_units(&[cluster_id]),
+            cluster_chain: RunList::from_unit(cluster_id as u64),
         }
     }
 
+    /// Create a handle from an existing cluster chain.
     pub fn from_chain(cluster_chain: RunList) -> Self {
-        let cluster_id = cluster_chain.get_unit(0).map(|u| u as u32).unwrap_or(0);
+        let cluster_id = cluster_chain
+            .get_unit(0)
+            .map(|unit| unit as u32)
+            .unwrap_or(0);
+
         Self {
             cluster_id,
             cluster_chain,
         }
+    }
+
+    /// Number of clusters represented by this handle.
+    #[inline]
+    pub fn cluster_count(&self) -> u64 {
+        self.cluster_chain.total_units()
     }
 }
 
@@ -41,31 +62,54 @@ impl From<Vec<u32>> for ExFatHandle {
     }
 }
 
-/// Real ExFAT Allocator using on-disk Bitmap scanning via BitmapDriver.
+/// Real ExFAT allocator backed by the on-disk Allocation Bitmap.
+///
+/// `next_free_hint` is expressed as an ExFAT cluster number.
+///
+/// Bitmap indices use a different coordinate system:
+///
+/// ```text
+/// bitmap bit 0 -> cluster FIRST_CLUSTER
+/// bitmap bit n -> cluster FIRST_CLUSTER + n
+/// ```
 pub struct ExFatAllocator<'a> {
     pub meta: &'a ExFatMeta,
+
+    /// Physical cluster chain occupied by the Allocation Bitmap.
     pub bitmap_chain: RunList,
+
+    /// Cluster number from which the next allocation search should start.
     pub next_free_hint: u32,
-    pub used_clusters: u32,
+
+    /// Number of currently allocated clusters.
+    pub used_clusters: u64,
 }
 
 impl<'a> ExFatAllocator<'a> {
-    /// Creates a new ExFatAllocator with an empty bitmap.
+    /// Creates an allocator for a freshly-created filesystem.
+    ///
+    /// The initial hint skips the statically-positioned system structures.
     pub fn new(meta: &'a ExFatMeta) -> Self {
+        let mut bitmap_chain = RunList::new();
+        bitmap_chain.push(Run::new(
+            meta.bitmap_cluster as u64,
+            meta.bitmap_clusters() as u64,
+        ));
+
         Self {
             meta,
-            bitmap_chain: RunList::new(),
+            bitmap_chain,
             next_free_hint: meta.first_data_unit(),
             used_clusters: 0,
         }
     }
 
-    /// Creates an ExFatAllocator from existing components.
+    /// Creates an allocator from explicit state.
     pub fn from_raw_parts(
         meta: &'a ExFatMeta,
         bitmap_chain: RunList,
         next_free_hint: u32,
-        used_clusters: u32,
+        used_clusters: u64,
     ) -> Self {
         Self {
             meta,
@@ -75,29 +119,35 @@ impl<'a> ExFatAllocator<'a> {
         }
     }
 
-    pub fn from_io<IO: RimIO + ?Sized>(
-        io: &mut IO,
+    /// Reconstruct allocator state from an existing ExFAT Allocation Bitmap.
+    pub fn from_io<R: RimRead + ?Sized>(
+        io: &mut R,
         meta: &'a ExFatMeta,
     ) -> FsAllocatorResult<Self> {
-        let mut view = BitmapDriver::new(meta);
+        let mut driver = BitmapDriver::new(meta);
 
-        let used_clusters = view.count_ones(io).map_err(FsAllocatorError::IO)? as u32;
+        let used_clusters = driver.count_ones_ro(io).map_err(FsAllocatorError::IO)?;
 
-        // Scan for first free hint
-        let next_free_hint = if let Some(free_bit) = view
-            .find_next_free(io, 0, 1)
+        // Bitmap bit 0 corresponds to FIRST_CLUSTER, not first_data_unit().
+        let next_free_hint = match driver
+            .find_next_free_ro(io, 0, 1)
             .map_err(FsAllocatorError::IO)?
         {
-            meta.first_data_unit() + free_bit as u32
-        } else {
-            meta.first_data_unit() // Full?
+            Some(bit) => {
+                let bit = u32::try_from(bit).map_err(|_| FsAllocatorError::OutOfBlocks)?;
+
+                ExFatMeta::FIRST_CLUSTER
+                    .checked_add(bit)
+                    .ok_or(FsAllocatorError::OutOfBlocks)?
+            }
+            None => ExFatMeta::FIRST_CLUSTER,
         };
 
         let mut bitmap_chain = RunList::new();
-        bitmap_chain.push(Run {
-            start: meta.bitmap_cluster as u64,
-            length: meta.bitmap_clusters() as u64,
-        });
+        bitmap_chain.push(Run::new(
+            meta.bitmap_cluster as u64,
+            meta.bitmap_clusters() as u64,
+        ));
 
         Ok(Self::from_raw_parts(
             meta,
@@ -112,76 +162,147 @@ impl<'a> FsAllocator<ExFatHandle> for ExFatAllocator<'a> {
     fn allocate<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<ExFatHandle> {
-        self.allocate_contiguous(io, count)
+        if count == 0 {
+            return Err(FsAllocatorError::InvalidSize);
+        }
+
+        // Prefer one contiguous allocation.
+        match self.allocate_contiguous(io, count) {
+            Ok(handle) => return Ok(handle),
+            Err(FsAllocatorError::OutOfBlocks) => {}
+            Err(error) => return Err(error),
+        }
+
+        // Fall back to fragmented free space.
+        let mut driver = BitmapDriver::new(self.meta);
+
+        // Returned runs are expressed in bitmap-bit coordinates.
+        let bit_runs = driver
+            .find_free_runs(io, count)
+            .map_err(FsAllocatorError::IO)?
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
+
+        // Reserve all selected bitmap runs.
+        driver
+            .set_run_list(io, &bit_runs, true)
+            .map_err(FsAllocatorError::IO)?;
+
+        driver.flush(io).map_err(FsAllocatorError::IO)?;
+
+        // Translate bitmap coordinates into ExFAT cluster coordinates.
+        let mut cluster_chain = RunList::new();
+
+        for run in bit_runs.iter() {
+            let start = run
+                .start
+                .checked_add(ExFatMeta::FIRST_CLUSTER as u64)
+                .ok_or(FsAllocatorError::OutOfBlocks)?;
+
+            cluster_chain.push(Run::new(start, run.length));
+        }
+
+        // Materialize the cluster chain in the FAT.
+        //
+        // Bitmap is committed first intentionally: an interrupted operation may
+        // leak clusters, but must not leave clusters reusable while referenced
+        // by a FAT chain.
+        FatDriver::new(self.meta)
+            .write_run_list(io, &cluster_chain)
+            .map_err(FsAllocatorError::IO)?;
+
+        self.used_clusters = self
+            .used_clusters
+            .saturating_add(cluster_chain.total_units());
+
+        Ok(ExFatHandle::from_chain(cluster_chain))
     }
 
     fn allocate_contiguous<IO: RimIO + ?Sized>(
         &mut self,
         io: &mut IO,
-        count: usize,
+        count: u64,
     ) -> FsAllocatorResult<ExFatHandle> {
-        let count_u64 = count as u64;
+        if count == 0 {
+            return Err(FsAllocatorError::InvalidSize);
+        }
 
-        // Use BitmapDriver directly on the IO (assuming contiguous bitmap)
         let mut driver = BitmapDriver::new(self.meta);
 
-        // Start search from next_free_hint (converted to bit index)
-        let start_bit_search_index =
-            (self.next_free_hint.saturating_sub(ExFatMeta::FIRST_CLUSTER)) as u64;
+        // Convert ExFAT cluster coordinate -> bitmap bit coordinate.
+        let start_bit = u64::from(self.next_free_hint.saturating_sub(ExFatMeta::FIRST_CLUSTER));
 
-        // 1. Search from hint
-        let found_bit_index = match driver.find_next_free(io, start_bit_search_index, count_u64) {
-            Ok(Some(bit)) => Some(bit),
-            Ok(None) => {
-                // 2. Wrap around to 0
-                driver
-                    .find_next_free(io, 0, count_u64)
-                    .map_err(FsAllocatorError::IO)?
-            }
-            Err(e) => return Err(FsAllocatorError::IO(e)),
+        // Search from the hint, then wrap once to the beginning.
+        let bit_index = match driver
+            .find_next_free(io, start_bit, count)
+            .map_err(FsAllocatorError::IO)?
+        {
+            Some(bit) => bit,
+
+            None if start_bit != 0 => driver
+                .find_next_free(io, 0, count)
+                .map_err(FsAllocatorError::IO)?
+                .ok_or(FsAllocatorError::OutOfBlocks)?,
+
+            None => return Err(FsAllocatorError::OutOfBlocks),
         };
 
-        let bit_index = found_bit_index.ok_or(FsAllocatorError::OutOfBlocks)?;
-        let start_cluster = ExFatMeta::FIRST_CLUSTER + bit_index as u32;
+        // Defensive check. BitmapDriver should already enforce
+        // bitmap_valid_bits(), but keeping this invariant explicit is cheap.
+        let end_bit = bit_index
+            .checked_add(count)
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
 
-        // Mark bits as used
+        if end_bit > self.meta.total_units() {
+            return Err(FsAllocatorError::OutOfBlocks);
+        }
+
+        // Reserve the bitmap range.
         driver
-            .set_bits_range(io, bit_index, count_u64, true)
+            .set_bits_range(io, bit_index, count, true)
             .map_err(FsAllocatorError::IO)?;
 
-        // Helper to flush is built-in to set_bits_range for window, but final flush needed?
-        // BitmapDriver::set_bits_range sets dirty=true.
-        // We must flush.
         driver.flush(io).map_err(FsAllocatorError::IO)?;
 
-        // Update state
-        self.used_clusters += count as u32;
-        self.next_free_hint = start_cluster + count as u32;
+        // Convert bitmap bit -> ExFAT cluster number.
+        let bit_index_u32 = u32::try_from(bit_index).map_err(|_| FsAllocatorError::OutOfBlocks)?;
 
-        if self.next_free_hint >= self.meta.cluster_count + ExFatMeta::FIRST_CLUSTER {
-            self.next_free_hint = self.meta.first_data_unit();
-        }
+        let start_cluster = ExFatMeta::FIRST_CLUSTER
+            .checked_add(bit_index_u32)
+            .ok_or(FsAllocatorError::OutOfBlocks)?;
 
-        // Return handle and write FAT chain directly from RunList (O4)
-        let mut chain = RunList::new();
-        if count > 0 {
-            chain.push(Run {
-                start: start_cluster as u64,
-                length: count as u64,
-            });
-        }
-        FatDriver::new(self.meta).write_run_list(io, &chain)?;
+        // Represent the contiguous allocation as a single Run.
+        let mut cluster_chain = RunList::new();
+        cluster_chain.push(Run::new(start_cluster as u64, count));
 
-        Ok(ExFatHandle::from_chain(chain))
+        // Materialize the chain in the FAT.
+        FatDriver::new(self.meta)
+            .write_run_list(io, &cluster_chain)
+            .map_err(FsAllocatorError::IO)?;
+
+        self.used_clusters = self.used_clusters.saturating_add(count);
+
+        // Update the hint in bitmap space first, then convert back to
+        // an ExFAT cluster coordinate.
+        self.next_free_hint = if end_bit >= self.meta.total_units() {
+            ExFatMeta::FIRST_CLUSTER
+        } else {
+            let next_bit = u32::try_from(end_bit).map_err(|_| FsAllocatorError::OutOfBlocks)?;
+
+            ExFatMeta::FIRST_CLUSTER
+                .checked_add(next_bit)
+                .ok_or(FsAllocatorError::OutOfBlocks)?
+        };
+
+        Ok(ExFatHandle::from_chain(cluster_chain))
     }
 
-    fn used_units(&self) -> usize {
-        self.used_clusters as usize
+    fn used_units(&self) -> u64 {
+        self.used_clusters
     }
 
-    fn remaining_units(&self) -> usize {
-        (self.meta.cluster_count - self.used_clusters) as usize
+    fn remaining_units(&self) -> u64 {
+        self.meta.total_units().saturating_sub(self.used_clusters)
     }
 }

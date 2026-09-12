@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext4 block group descriptor table writing and initialization.
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -7,7 +9,6 @@ use rimio::prelude::*;
 use zerocopy::IntoBytes;
 
 use crate::allocator::{ExtAllocator, ExtBlockBitmap, ExtInodeBitmap};
-use crate::constant::*;
 use crate::core::bitmap::BitmapDriver;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
@@ -17,9 +18,7 @@ use crate::types::GroupLayout;
 
 #[derive(Default)]
 pub struct BlockGroupFeature {
-    bgdt_data: Option<Vec<u8>>,
     group_layouts: Vec<GroupLayout>,
-
     block_size: u32,
     blocks_per_group: u32,
     inodes_per_group: u32,
@@ -48,10 +47,8 @@ impl BlockGroupFeature {
 
         let group_block_count = meta.group_total_blocks(group) as u64;
 
-        // Clear valid bits first (0..count) - mark as free
         view.set_bits_range(io, 0, group_block_count, false)?;
 
-        // Mark reserved blocks (Superblock, GDT, Bitmaps, Inode Table)
         let reserved_count = layout.first_data_block - layout.group_start;
         view.set_bits_range(io, 0, reserved_count, true)?;
 
@@ -85,35 +82,10 @@ impl BlockGroupFeature {
 
         let group_inode_count = meta.group_total_inodes(group) as u64;
 
-        // Clear valid inode bits - mark as free
         view.set_bits_range(io, 0, group_inode_count, false)?;
 
         // Group 0: Mark reserved inodes (1..10) as used
-        // Inode bitmap is 0-indexed (inode 1 is bit 0).
-        // Standard reserved inodes are 1..10.
-        // And usually we might want to mark 11 (lost+found) if we pre-allocate it?
-        // But the Allocator handles 11+ allocation.
-        // Wait, `ExtMetadataAllocator` starts at 12.
-        // So we MUST mark 0..10 (inodes 1..11) as used?
-        // Or 0..9 (inodes 1..10)?
-        // Root is 2.
-        // If we mark them used here, `allocate` calls for Root will find them used?
-        // The `Allocator` logic finds free bits.
-        // `ExtMetadataAllocator` handles dynamic allocation.
-        // If we pre-allocate Root/LostFound in `write`, we should mark them used here OR there.
-        // Since `fs/ext/features/root.rs` manually writes the inode but does NOT allocate it via allocator,
-        // we should mark it used here to prevent double allocation.
-
         if group == 0 {
-            // Mark 1..11 (bits 0..10) as used.
-            // 1..10 = Reserved.
-            // 11 = Next free?
-            // `ExtMetadataAllocator` starts at 12.
-            // So we mark 0..11 (12 bits) as used (Inodes 1..12).
-            // Wait, Inode 11 is Lost+Found.
-            // Inode 2 is Root.
-
-            // Mark bits 0 to 10 (Inodes 1 to 11).
             view.set_bits_range(io, 0, 11, true)?;
         }
 
@@ -132,23 +104,16 @@ impl<'p, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, ExtAllocator<'p>, IO> for 
         self.blocks_per_group = meta.blocks_per_group;
         self.inodes_per_group = meta.inodes_per_group;
 
-        let bgdt_buf = vec![0u8; meta.bgdt_entry_size * meta.group_count as usize];
         self.group_layouts.clear();
-
         for group in 0..meta.group_count as usize {
             let layout = GroupLayout::compute(meta, group as u32);
             self.group_layouts.push(layout);
         }
 
-        self.bgdt_data = Some(bgdt_buf);
-
         Ok(())
     }
 
     fn allocate(&mut self, io: &mut IO, allocator: &mut ExtAllocator) -> FsFeatureResult<()> {
-        // Initialize bitmaps on disk for ALL groups.
-        // This ensures the disk state is valid for subsequent persistent allocations.
-
         for (group, layout) in self.group_layouts.iter().enumerate() {
             self.init_block_bitmap(io, allocator.blocks.params, group, layout)?;
             self.init_inode_bitmap(io, allocator.blocks.params, group, layout)?;
@@ -158,13 +123,8 @@ impl<'p, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, ExtAllocator<'p>, IO> for 
     }
 
     fn write(&self, io: &mut IO, allocator: &ExtAllocator) -> FsFeatureResult<()> {
-        let mut bgdt_buf = self
-            .bgdt_data
-            .as_ref()
-            .cloned()
-            .ok_or(crate::core::errors::FsFeatureError::NotPrepared)?;
-
         let bgdt_entry_size = allocator.blocks.params.bgdt_entry_size;
+        let mut bgdt_buf = vec![0u8; bgdt_entry_size * self.group_layouts.len()];
 
         for (group_idx, layout) in self.group_layouts.iter().enumerate() {
             let total_blocks = allocator.blocks.params.group_total_blocks(group_idx);
@@ -193,15 +153,13 @@ impl<'p, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, ExtAllocator<'p>, IO> for 
             let group_offset = group_idx * bgdt_entry_size;
             bgdt_buf[group_offset..group_offset + bgdt_entry_size]
                 .copy_from_slice(&bgd.as_bytes()[..bgdt_entry_size]);
+        }
 
-            // --- Write Features ---
+        let bgdt_offset =
+            (allocator.blocks.params.first_data_block as u64 + 1) * self.block_size as u64;
+        io.write_at(bgdt_offset, &bgdt_buf)?;
 
-            // We do NOT write bitmaps here. They are already initialized by `allocate`
-            // and potentially modified by the allocator (Root/Lost+Found).
-            // Writing them again here (especially regenerating them) would overwrite
-            // allocations made during formatting!
-
-            // Sparse BGDT copies logic
+        for layout in &self.group_layouts {
             let is_backup = layout.reserved_blocks > 0 && layout.group_id != 0;
             if is_backup {
                 let sb_copy_offset = layout
@@ -218,10 +176,6 @@ impl<'p, IO: RimIO + ?Sized> FsSystemFeature<ExtMeta, ExtAllocator<'p>, IO> for 
                 io.write_at(bgdt_copy_offset, &bgdt_buf)?;
             }
         }
-
-        // Write Primary BGDT
-        let bgdt_offset = (EXT_SUPERBLOCK_BLOCK_NUMBER + 1) as u64 * self.block_size as u64;
-        io.write_at(bgdt_offset, &bgdt_buf)?;
 
         Ok(())
     }

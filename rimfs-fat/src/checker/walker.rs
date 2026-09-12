@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT directory tree reachability walker.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
@@ -7,11 +11,12 @@ pub use crate::core::checker::stats::WalkerStats;
 use crate::core::fat::*;
 use crate::core::utils::checksum_utils::checksum;
 use crate::core::{cursor::ClusterCursor, errors::*};
-use crate::{attr::FatAttributes, constant::*, meta::FatMeta};
+use crate::{attr::FatFileAttributes, constant::*, meta::FatMeta};
 use rimio::prelude::*;
 
 use super::{Finding, FsCheckerResult, VerifyReport};
-use crate::types::FatEntries;
+use crate::types::{FatEntries, FatEntry};
+use zerocopy::FromBytes;
 
 pub struct FatWalker<'a, IO: RimIO + ?Sized> {
     io: &'a mut IO,
@@ -30,10 +35,6 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
             tracker: ReachabilityTracker::new(FAT_FIRST_CLUSTER, count),
         }
     }
-
-    // --- Directory Scanning Logic ---
-
-    // --- Directory Scanning Logic ---
 
     /// Iterates over **all** entries in a directory, reading by runs.
     pub fn scan_directory<F>(
@@ -63,7 +64,7 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
                 let attr = chunk[11];
 
                 // LFN piece
-                if attr == FatAttributes::LFN.bits() {
+                if attr == FatFileAttributes::LFN.bits() {
                     // Safe: chunks_exact(32) guarantees length 32
                     if let Ok(arr) = chunk.try_into() {
                         lfn_stack.push(arr);
@@ -72,14 +73,14 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
                 }
 
                 // Volume label
-                if attr & FatAttributes::VOLUME_ID.bits() != 0 {
+                if attr & FatFileAttributes::VOLUME_ID.bits() != 0 {
                     lfn_stack.clear();
                     continue;
                 }
 
                 // "." / ".."
                 let name11 = &chunk[0..11];
-                if (attr & FatAttributes::DIRECTORY.bits() != 0)
+                if (attr & FatFileAttributes::DIRECTORY.bits() != 0)
                     && (name11 == FAT_DOT_NAME || name11 == FAT_DOTDOT_NAME)
                 {
                     lfn_stack.clear();
@@ -104,7 +105,7 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
         }
 
         // Handle standard Cluster Chain Directory (FAT32 or subdirs)
-        let cs = meta.unit_size();
+        let cs = meta.unit_size() as usize;
         let mut cur = ClusterCursor::new(meta, start_cluster);
 
         cur.for_each_run(io, |io, run_start, run_len| {
@@ -118,7 +119,6 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
         Ok(())
     }
 
-    // --- Tree Walking Logic ---
     pub fn walk_from_root(
         &mut self,
         check_lfn: bool,
@@ -140,7 +140,6 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
                 continue;
             }
 
-            // Mark directory clusters as reachable (skip for fixed root)
             let is_fixed_root = self.meta.root_entry_count > 0 && dir_cluster == 1;
             if !is_fixed_root {
                 let meta = self.meta;
@@ -183,10 +182,10 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
                         ));
                     }
 
-                    let attr = sfn[11];
-                    let fst_lo = u16::from_le_bytes([sfn[26], sfn[27]]) as u32;
-                    let fst_hi = u16::from_le_bytes([sfn[20], sfn[21]]) as u32;
-                    let first_cluster = (fst_hi << 16) | fst_lo;
+                    let entry = FatEntry::ref_from_bytes(sfn)
+                        .map_err(|_| rimio::RimIOError::Invalid("Truncated FAT directory entry"))?;
+                    let attr = entry.attr;
+                    let first_cluster = entry.first_cluster();
 
                     if first_cluster >= FAT_FIRST_CLUSTER {
                         if (attr & 0x10) != 0 {
@@ -216,7 +215,6 @@ impl<'a, IO: RimIO + ?Sized> FatWalker<'a, IO> {
                 ));
             }
 
-            // Mark file clusters as reachable
             for fc in file_heads {
                 let meta = self.meta;
                 let tracker = &mut self.tracker;

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Formatted terminal table printer for partition and file listings.
+
 use crate::ui::badge::fs_badge;
 use crate::ui::format::pretty_bytes;
 use colored::Colorize;

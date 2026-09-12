@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! exFAT volume and stream flags.
+
 bitflags::bitflags! {
     /// Volume Flags for exFAT Boot Sector
     ///
@@ -161,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_volume_flags_serialization_size() {
-        use std::mem;
+        use core::mem;
         assert_eq!(mem::size_of::<VolumeFlags>(), mem::size_of::<u16>());
     }
 }

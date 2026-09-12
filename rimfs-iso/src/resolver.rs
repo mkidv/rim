@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660, Joliet, and Rock Ridge directory resolver.
+
+use crate::records::{IsoBootSectionHeader, IsoBootValidationEntry, IsoCatalogBootEntry};
+use rimio::RimReadStructExt;
+use zerocopy::FromBytes;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{
     boxed::Box,
-    collections::BTreeMap,
     format,
     string::{String, ToString},
     vec,
@@ -17,7 +22,7 @@ use crate::meta::IsoMeta;
 use crate::types::*;
 use rimfs_core::errors::{FsResolverError, FsResolverResult};
 use rimfs_core::normalize_fs_path;
-use rimfs_core::resolver::{FsTreeResolver, attr::FileAttributes, attr::NodeKind};
+use rimfs_core::resolver::{FsTreeResolver, PathIndex, attr::FileAttributes, attr::NodeKind};
 use rimio::RimRead;
 use rimio::prelude::*;
 use time::OffsetDateTime;
@@ -29,6 +34,7 @@ pub struct IsoResolvedEntry {
     pub lba: u32,
     pub size: u64,
     pub is_dir: bool,
+    pub is_hidden: bool,
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub mode: Option<u32>,
@@ -54,7 +60,7 @@ pub struct ElToritoBootEntry {
 pub struct IsoResolver<'a, IO: RimRead + ?Sized> {
     io: &'a mut IO,
     _meta: &'a IsoMeta,
-    entries: BTreeMap<String, IsoResolvedEntry>,
+    index: PathIndex<IsoResolvedEntry>,
     pub is_joliet: bool,
     status: FsResolverResult<()>,
 }
@@ -64,7 +70,7 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
         let mut resolver = Self {
             io,
             _meta: meta,
-            entries: BTreeMap::new(),
+            index: PathIndex::new(),
             is_joliet: false,
             status: Ok(()),
         };
@@ -76,7 +82,7 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
         let mut resolver = Self {
             io,
             _meta: meta,
-            entries: BTreeMap::new(),
+            index: PathIndex::new(),
             is_joliet: false,
             status: Ok(()),
         };
@@ -101,8 +107,10 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
             if &vd[1..6] != ISO_STANDARD_ID {
                 break;
             }
-            if vd[0] == VD_BOOT_RECORD && &vd[7..39] == EL_TORITO_SYS_ID {
-                let cat = u32::from_le_bytes([vd[71], vd[72], vd[73], vd[74]]);
+            let boot = IsoBootDescriptor::ref_from_bytes(&vd)
+                .map_err(|_| FsResolverError::Invalid("Invalid ISO boot descriptor"))?;
+            if boot.kind == VD_BOOT_RECORD && &boot.system_id == EL_TORITO_SYS_ID {
+                let cat = boot.catalog_lba.get();
                 if cat > 0 {
                     catalog_lba = Some(cat);
                     break;
@@ -121,17 +129,20 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
         self.io
             .read_at(checked_iso_offset(cat_lba)?, &mut cat_buf)?;
 
-        // Check Validation Entry (offset 0..32)
-        if cat_buf[0] != 0x01 || cat_buf[30] != 0x55 || cat_buf[31] != 0xAA {
+        let validation = IsoBootValidationEntry::ref_from_bytes(&cat_buf[..32])
+            .map_err(|_| FsResolverError::Invalid("Invalid boot validation entry"))?;
+        if validation.header_id != 1 || validation.key != [0x55, 0xAA] {
             return Ok(None);
         }
 
-        let val_platform = cat_buf[1];
+        let val_platform = validation.platform_id;
 
         // 1. Check if Initial Entry (offset 32..64) is an EFI boot image
-        let init_bootable = cat_buf[32] == 0x88;
-        let init_sectors_512 = u16::from_le_bytes([cat_buf[38], cat_buf[39]]);
-        let init_lba = u32::from_le_bytes([cat_buf[40], cat_buf[41], cat_buf[42], cat_buf[43]]);
+        let initial = IsoCatalogBootEntry::ref_from_bytes(&cat_buf[32..64])
+            .map_err(|_| FsResolverError::Invalid("Invalid initial boot entry"))?;
+        let init_bootable = initial.boot_indicator == 0x88;
+        let init_sectors_512 = initial.sector_count.get();
+        let init_lba = initial.image_lba.get();
 
         if init_bootable && init_lba > 0 && val_platform == 0xEF {
             let size = if init_sectors_512 > 0 {
@@ -150,26 +161,25 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
         // 2. Scan section headers starting at offset 64
         let mut off = 64;
         while off + 32 <= cat_buf.len() {
-            let header_indicator = cat_buf[off];
+            let section = IsoBootSectionHeader::ref_from_bytes(&cat_buf[off..off + 32])
+                .map_err(|_| FsResolverError::Invalid("Invalid boot section header"))?;
+            let header_indicator = section.indicator;
             if header_indicator != 0x90 && header_indicator != 0x91 {
                 break;
             }
-            let platform_id = cat_buf[off + 1];
-            let entries_count = u16::from_le_bytes([cat_buf[off + 2], cat_buf[off + 3]]) as usize;
+            let platform_id = section.platform_id;
+            let entries_count = section.entry_count.get() as usize;
             off += 32;
 
             for _ in 0..entries_count.max(1) {
                 if off + 32 > cat_buf.len() {
                     break;
                 }
-                let boot_ind = cat_buf[off];
-                let sec_cnt_512 = u16::from_le_bytes([cat_buf[off + 6], cat_buf[off + 7]]);
-                let boot_lba = u32::from_le_bytes([
-                    cat_buf[off + 8],
-                    cat_buf[off + 9],
-                    cat_buf[off + 10],
-                    cat_buf[off + 11],
-                ]);
+                let entry = IsoCatalogBootEntry::ref_from_bytes(&cat_buf[off..off + 32])
+                    .map_err(|_| FsResolverError::Invalid("Invalid catalog boot entry"))?;
+                let boot_ind = entry.boot_indicator;
+                let sec_cnt_512 = entry.sector_count.get();
+                let boot_lba = entry.image_lba.get();
 
                 if boot_ind == 0x88 && boot_lba > 0 && platform_id == 0xEF {
                     let size = if sec_cnt_512 > 0 {
@@ -227,9 +237,11 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
             // Determine actual FAT image size if BPB is valid
             let mut bpb = [0u8; 512];
             if self.io.read_at(phys_off, &mut bpb).is_ok() && bpb[510] == 0x55 && bpb[511] == 0xAA {
-                let bps = u16::from_le_bytes([bpb[11], bpb[12]]) as u64;
-                let s16 = u16::from_le_bytes([bpb[19], bpb[20]]) as u64;
-                let s32 = u32::from_le_bytes([bpb[32], bpb[33], bpb[34], bpb[35]]) as u64;
+                let (header, _) = rimfs_fat::types::FatCommonBpb::ref_from_prefix(&bpb)
+                    .map_err(|_| FsResolverError::Invalid("Invalid boot image BPB"))?;
+                let bps = header.bytes_per_sector.get() as u64;
+                let s16 = header.total_sectors_16.get() as u64;
+                let s32 = header.total_sectors_32.get() as u64;
                 let total_secs = if s16 != 0 { s16 } else { s32 };
                 if bps >= 512 && total_secs > 0 {
                     size_bytes = total_secs * bps;
@@ -258,29 +270,28 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
 
     /// Loads the directory tree starting from PVD or Joliet SVD.
     fn load_tree(&mut self) -> FsResolverResult<()> {
-        let mut pvd_buf = [0u8; ISO_SECTOR_SIZE];
-        self.io.read_at(16 * ISO_SECTOR_SIZE as u64, &mut pvd_buf)?;
+        let pvd_buf: IsoVolumeDescriptor = self.io.read_struct(16 * ISO_SECTOR_SIZE as u64)?;
 
-        if &pvd_buf[1..6] != ISO_STANDARD_ID || pvd_buf[0] != VD_PRIMARY {
+        if &pvd_buf.standard_id != ISO_STANDARD_ID || pvd_buf.kind != VD_PRIMARY {
             return Err(FsResolverError::Invalid("Not a valid ISO 9660 image"));
         }
 
-        // Check if Joliet SVD exists at sector 17
-        let mut svd_buf = [0u8; ISO_SECTOR_SIZE];
-        let mut root_lba = get_both_u32(&pvd_buf[158..166]);
-        let mut root_size = get_both_u32(&pvd_buf[166..174]) as u64;
+        let mut svd_buf = IsoVolumeDescriptor::default();
+        let mut root_lba = pvd_buf.root.header.extent_lba.get()?;
+        let mut root_size = pvd_buf.root.header.data_length.get()? as u64;
         let mut use_joliet = false;
 
         if self
             .io
-            .read_at(17 * ISO_SECTOR_SIZE as u64, &mut svd_buf)
+            .read_struct::<IsoVolumeDescriptor>(17 * ISO_SECTOR_SIZE as u64)
+            .map(|value| svd_buf = value)
             .is_ok()
-            && &svd_buf[1..6] == ISO_STANDARD_ID
-            && svd_buf[0] == VD_SUPPLEMENTARY
-            && &svd_buf[88..91] == JOLIET_ESCAPE_UCS2_LVL3
+            && &svd_buf.standard_id == ISO_STANDARD_ID
+            && svd_buf.kind == VD_SUPPLEMENTARY
+            && &svd_buf.escape_sequences[..3] == JOLIET_ESCAPE_UCS2_LVL3
         {
-            root_lba = get_both_u32(&svd_buf[158..166]);
-            root_size = get_both_u32(&svd_buf[166..174]) as u64;
+            root_lba = svd_buf.root.header.extent_lba.get()?;
+            root_size = svd_buf.root.header.data_length.get()? as u64;
             use_joliet = true;
         }
 
@@ -310,14 +321,12 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
 
         let mut offset = 0;
         while offset < dir_buf.len() {
-            // Check if we reached the sector end padding
             let sector_rem = ISO_SECTOR_SIZE - (offset % ISO_SECTOR_SIZE);
             if offset + 1 > dir_buf.len() {
                 break;
             }
             let rec_len = dir_buf[offset] as usize;
             if rec_len == 0 {
-                // Skip padding to next sector boundary
                 offset += sector_rem;
                 continue;
             }
@@ -332,28 +341,20 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
                 continue;
             }
 
-            let entry_lba = get_both_u32(&entry_buf[2..10]);
-            let entry_size = get_both_u32(&entry_buf[10..18]) as u64;
-            let date_bin: [u8; 7] = [
-                entry_buf[18],
-                entry_buf[19],
-                entry_buf[20],
-                entry_buf[21],
-                entry_buf[22],
-                entry_buf[23],
-                entry_buf[24],
-            ];
-            let dt = parse_iso_binary_datetime(&date_bin);
-            let flags = entry_buf[25];
-            let is_dir = (flags & DIR_FLAG_DIRECTORY) != 0;
-            let name_len = entry_buf[32] as usize;
+            let (header, tail) = IsoDirectoryHeader::ref_from_prefix(entry_buf)
+                .map_err(|_| FsResolverError::Invalid("Invalid directory header"))?;
+            let entry_lba = header.extent_lba.get()?;
+            let entry_size = header.data_length.get()? as u64;
+            let dt = parse_iso_binary_datetime(&header.recorded);
+            let is_dir = (header.flags & DIR_FLAG_DIRECTORY) != 0;
+            let is_hidden = (header.flags & 0x01) != 0;
+            let name_len = header.name_len as usize;
 
             if 33 + name_len > entry_buf.len() {
                 continue;
             }
 
-            let raw_name_bytes = &entry_buf[33..33 + name_len];
-            // Skip "." (\0) and ".." (\1) entries
+            let raw_name_bytes = &tail[..name_len];
             if raw_name_bytes == [0] || raw_name_bytes == [1] {
                 continue;
             }
@@ -373,7 +374,6 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
             let mut is_symlink = false;
             let mut symlink_target = None;
 
-            // Parse SUSP / Rock Ridge fields if present
             let mut susp_offset = 33 + name_len;
             if !susp_offset.is_multiple_of(2) {
                 susp_offset += 1;
@@ -391,9 +391,9 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
                 match &sig {
                     b"PX" => {
                         if field_data.len() >= 36 {
-                            mode = Some(get_both_u32(&field_data[4..12]));
-                            uid = Some(get_both_u32(&field_data[20..28]));
-                            gid = Some(get_both_u32(&field_data[28..36]));
+                            mode = Some(get_both_u32(&field_data[4..12])?);
+                            uid = Some(get_both_u32(&field_data[20..28])?);
+                            gid = Some(get_both_u32(&field_data[28..36])?);
                         }
                     }
                     b"NM" => {
@@ -422,13 +422,14 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
                 format!("{}/{}", cur_path, name)
             };
 
-            self.entries.insert(
-                full_entry_path.clone(),
+            self.index.insert_with_kind(
+                &full_entry_path,
                 IsoResolvedEntry {
                     name,
                     lba: entry_lba,
                     size: entry_size,
                     is_dir,
+                    is_hidden,
                     is_symlink,
                     symlink_target,
                     mode,
@@ -436,6 +437,7 @@ impl<'a, IO: RimRead + ?Sized> IsoResolver<'a, IO> {
                     gid,
                     modified: dt,
                 },
+                is_dir,
             );
 
             if is_dir && entry_lba != lba {
@@ -452,59 +454,27 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
         if self.status.is_err() {
             return false;
         }
-        let clean = normalize_fs_path(path);
-        if clean.is_empty() {
-            return true;
-        }
-        if self.entries.contains_key(clean) {
-            return true;
-        }
-        let prefix = format!("{}/", clean);
-        for key in self.entries.keys() {
-            if key.starts_with(&prefix) {
-                return true;
-            }
-        }
-        false
+        self.index.contains_path(path)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResolverResult<Vec<String>> {
         self.status?;
         let clean = normalize_fs_path(path);
-        let prefix = if clean.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", clean)
-        };
-
-        let mut children = Vec::new();
-        for name in self.entries.keys() {
-            if !prefix.is_empty() && !name.starts_with(&prefix) {
-                continue;
-            }
-            let sub = if prefix.is_empty() {
-                name.as_str()
-            } else {
-                &name[prefix.len()..]
-            };
-            if sub.is_empty() {
-                continue;
-            }
-
-            let first_comp = sub.split('/').next().unwrap_or("");
-            if !first_comp.is_empty() && !children.contains(&first_comp.to_string()) {
-                children.push(first_comp.to_string());
-            }
+        let trimmed = clean.trim_end_matches('/');
+        if self.index.get(trimmed).is_some_and(|entry| !entry.is_dir) {
+            return Err(FsResolverError::Invalid("Path is not a directory"));
         }
-
-        Ok(children)
+        if !self.index.is_dir(trimmed) {
+            return Err(FsResolverError::NotFound);
+        }
+        Ok(self.index.children(trimmed).unwrap_or_default())
     }
 
     fn open_file<'b>(&'b mut self, path: &str) -> FsResolverResult<Box<dyn RimRead + 'b>> {
         self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
-            .entries
+            .index
             .get(clean)
             .cloned()
             .ok_or(FsResolverError::NotFound)?;
@@ -525,7 +495,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
         self.status?;
         let clean = normalize_fs_path(path);
         let entry = self
-            .entries
+            .index
             .get(clean)
             .cloned()
             .ok_or(FsResolverError::NotFound)?;
@@ -542,11 +512,12 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
     fn read_attributes(&mut self, path: &str) -> FsResolverResult<FileAttributes> {
         self.status?;
         let clean = normalize_fs_path(path);
-        if clean.is_empty() {
+        let trimmed = clean.trim_end_matches('/');
+        if trimmed.is_empty() {
             return Ok(FileAttributes::new_dir());
         }
 
-        if let Some(entry) = self.entries.get(clean) {
+        if let Some(entry) = self.index.get(trimmed) {
             let kind = if entry.is_symlink {
                 NodeKind::Symlink
             } else if entry.is_dir {
@@ -561,6 +532,8 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
                 _ => FileAttributes::new_file(),
             };
 
+            attr.read_only = true;
+            attr.hidden = entry.is_hidden;
             attr.mode = entry.mode;
             attr.uid = entry.uid;
             attr.gid = entry.gid;
@@ -568,8 +541,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for IsoResolver<'a, IO> {
             return Ok(attr);
         }
 
-        let children = self.read_dir(path)?;
-        if !children.is_empty() {
+        if self.index.is_dir(trimmed) {
             return Ok(FileAttributes::new_dir());
         }
 

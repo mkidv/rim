@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to manipulate and list disk partition tables.
+
 use crate::ui::format::pretty_bytes;
 use crate::ui::table::print_scan_table;
 use anyhow::Context;

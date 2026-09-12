@@ -400,9 +400,7 @@ fn inject_into_dest(
     }
 }
 
-// -----------------------------------------------------------------------------
 // Cross-filesystem matrix tests
-// -----------------------------------------------------------------------------
 
 #[test]
 fn test_copy_fat32_to_ext4() {
@@ -444,9 +442,7 @@ fn test_copy_iso_to_ext4() {
     transfer_fs_to_fs(FsKind::Iso, FsKind::Ext);
 }
 
-// -----------------------------------------------------------------------------
 // Host filesystem tests
-// -----------------------------------------------------------------------------
 
 #[test]
 fn test_copy_host_to_host() {
@@ -532,9 +528,7 @@ fn test_copy_host_to_ext4_and_back_to_host() {
     let _ = fs::remove_dir_all(&temp_root);
 }
 
-// -----------------------------------------------------------------------------
 // Policies and edge case tests
-// -----------------------------------------------------------------------------
 
 #[test]
 fn test_unsupported_symlink_policies() {
@@ -547,7 +541,6 @@ fn test_unsupported_symlink_policies() {
         },
     ]);
 
-    // Build EXT4 with a symlink
     let mut ext_bytes = vec![0u8; fs_image_size(FsKind::Ext)];
     let ext_meta = ext::ExtMeta::new(ext_bytes.len() as u64, Some("SYM")).unwrap();
     let mut ext_io = MemRimIO::new(&mut ext_bytes);
@@ -657,7 +650,6 @@ fn test_case_sensitive_destination_accepts_case_variants() {
         "No case collision warnings on case-sensitive destination"
     );
 
-    // Verify both files exist with distinct contents in EXT4 destination
     let mut dst_resolver = ext::ExtResolver::new(&mut dst_io, &dst_meta);
     let v1 = dst_resolver.read_file("/Readme.TXT").unwrap();
     let v2 = dst_resolver.read_file("/README.txt").unwrap();
@@ -729,7 +721,6 @@ fn test_case_insensitive_destination_fat32_semantics() {
             CopyWarningKind::CaseCollision { .. }
         ));
 
-        // Read back from FAT destination to confirm no data corruption
         let mut fat_resolver = fat::FatResolver::new(&mut fat_io, &fat_meta);
         let content = fat_resolver.read_file("/Readme.TXT").unwrap();
         assert_eq!(content, b"Version 1", "Original file content preserved");
@@ -1005,7 +996,6 @@ fn test_dry_run_simulation_leaves_destination_untouched() {
             b"file1 content".len() as u64 + b"file2 nested content".len() as u64
         );
 
-        // Verify host destination directory was NEVER created or modified on disk!
         assert!(
             !temp_dst.exists(),
             "Host destination must not even exist on disk in dry-run mode"
@@ -1106,7 +1096,6 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
 
-    // Verify disk.img:1:/ resolves a.txt and NOT b.txt
     let out_a = dir.path().join("out_a");
     rimcli::commands::copy::run(
         format!("{}:1:/", img_path.display()),
@@ -1127,7 +1116,6 @@ fn test_multi_partition_addressing_and_isolation() {
     );
     assert!(!out_a.join("b.txt").exists());
 
-    // Verify disk.img:2:/ resolves b.txt and NOT a.txt
     let out_b = dir.path().join("out_b");
     rimcli::commands::copy::run(
         format!("{}:2:/", img_path.display()),
@@ -1182,7 +1170,6 @@ fn test_multi_partition_addressing_and_isolation() {
     )
     .unwrap();
 
-    // Verify partition 2 now contains NEW.TXT
     let out_b2 = dir.path().join("out_b2");
     rimcli::commands::copy::run(
         format!("{}:2:/", img_path.display()),
@@ -1202,7 +1189,6 @@ fn test_multi_partition_addressing_and_isolation() {
         b"New payload for partition 2"
     );
 
-    // Verify partition 1 remained byte-for-byte identical!
     let img_bytes_after = fs::read(&img_path).unwrap();
     let p1_bytes_after = &img_bytes_after[p1_start..p1_start + p1_size];
     assert_eq!(
@@ -1294,7 +1280,6 @@ fn test_unpartitioned_raw_fs_copy_and_missing_selector() {
     let dir = tempfile::tempdir().unwrap();
     let img_path = dir.path().join("rootfs.ext4");
 
-    // Format raw unpartitioned EXT4 filesystem
     let mut bytes = vec![0u8; 32 * 1024 * 1024];
     {
         let len = bytes.len() as u64;
@@ -1325,7 +1310,6 @@ fn test_unpartitioned_raw_fs_copy_and_missing_selector() {
     )
     .unwrap();
 
-    // Read back without partition selector (transparent unpartitioned handling)
     let out = dir.path().join("out_unpart");
     rimcli::commands::copy::run(
         format!("{}:/", img_path.display()),
@@ -1435,7 +1419,6 @@ fn test_container_copy_vhd_and_vmdk() {
     )
     .unwrap();
 
-    // Read back from VHD container via rim copy
     let out = dir.path().join("out_vhd");
     rimcli::commands::copy::run(
         format!("{}:1:/", vhd_path.display()),
@@ -1455,7 +1438,6 @@ fn test_container_copy_vhd_and_vmdk() {
         b"VHD container write payload"
     );
 
-    // Write to VMDK container via rim copy
     let src_vmdk = dir.path().join("src_vmdk");
     fs::create_dir_all(&src_vmdk).unwrap();
     fs::write(
@@ -1478,7 +1460,6 @@ fn test_container_copy_vhd_and_vmdk() {
     )
     .unwrap();
 
-    // Read back from VMDK container
     let out_vmdk = dir.path().join("out_vmdk");
     rimcli::commands::copy::run(
         format!("{}:1:/", vmdk_path.display()),
@@ -1521,7 +1502,6 @@ fn test_container_copy_vhd_and_vmdk() {
     )
     .unwrap();
 
-    // Read back from QCOW2 container
     let out_qcow2 = dir.path().join("out_qcow2");
     rimcli::commands::copy::run(
         format!("{}:1:/", qcow2_path.display()),

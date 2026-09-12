@@ -148,7 +148,6 @@ mod tests {
 
         println!("Volume ID u32 {id1:02X?} {id2:02X?}");
 
-        // Check correct length
         assert_eq!(id1.to_le_bytes().len(), 4);
         assert_eq!(id2.to_le_bytes().len(), 4);
 

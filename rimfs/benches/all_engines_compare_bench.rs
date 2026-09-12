@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rimfs::{
     FsFormatter, FsTreeInjector, FsTreeResolver,
@@ -463,10 +465,225 @@ fn bench_resolve_tree_all_engines(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_inject_tree_all_engines(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compare_inject_tree_100_files");
+    group.throughput(Throughput::Elements(NUM_FILES as u64));
+
+    let make_tree = || {
+        let files: Vec<FsNode> = (0..NUM_FILES)
+            .map(|i| FsNode::new_file(format!("file_{i}.txt"), vec![0xBB; FILE_SIZE]))
+            .collect();
+        FsNode::Container {
+            attr: FileAttributes::new_dir(),
+            children: files,
+        }
+    };
+
+    // FAT12
+    {
+        let meta = FatMeta::new_fat12(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        FatFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("FAT12", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = FatInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // FAT32
+    {
+        let meta = FatMeta::new_fat32(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        FatFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("FAT32", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = FatInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // RimFAT
+    {
+        let meta = FatMeta::new_rimfat(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        FatFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("RimFAT", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = FatInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // exFAT
+    {
+        let meta = ExFatMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        ExFatFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("exFAT", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = ExFatInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // EXT4
+    {
+        let meta = ExtMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        ExtFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("EXT4", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = ExtInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // NTFS
+    {
+        let meta = NtfsMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        NtfsFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("NTFS", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = NtfsInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // POSIX TAR
+    {
+        let meta = TarMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        TarFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("POSIX TAR", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = TarInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // ZIP
+    {
+        let meta = ZipMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        ZipFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("ZIP", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = ZipInjector::new(&mut io, &meta).unwrap();
+                    injector.inject_tree(&mut make_tree()).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    // ISO 9660
+    {
+        let meta = IsoMeta::new(SIZE_BYTES, Some("BENCH")).unwrap();
+        let mut disk = vec![0u8; SIZE_BYTES as usize];
+        IsoFormatter::new(&mut MemRimIO::new(&mut disk), &meta)
+            .format(false)
+            .unwrap();
+
+        group.bench_function(BenchmarkId::new("ISO 9660", "100_files"), |b| {
+            b.iter_with_setup(
+                || disk.clone(),
+                |mut local_disk| {
+                    let mut io = MemRimIO::new(&mut local_disk);
+                    let mut injector = IsoInjector::new(&mut io, &meta).unwrap();
+                    let mut tree = FsNode::Container {
+                        attr: FileAttributes::new_dir(),
+                        children: (0..NUM_FILES)
+                            .map(|i| {
+                                FsNode::new_file(format!("file_{i}.txt"), vec![0xBB; FILE_SIZE])
+                            })
+                            .collect(),
+                    };
+                    injector.inject_tree(&mut tree).unwrap();
+                    injector.flush().unwrap();
+                },
+            );
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_format_all_engines,
     bench_write_large_all_engines,
+    bench_inject_tree_all_engines,
     bench_resolve_tree_all_engines,
 );
 criterion_main!(benches);

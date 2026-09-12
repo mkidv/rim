@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Filesystem assertion and error construction macros.
+
 #[macro_export]
 macro_rules! fs_error_wiring {
     (

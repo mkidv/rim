@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 specification constants, magic numbers, and creator tags.
+
+#![allow(dead_code)]
+
 // Creator Tag (stored at end of s_reserved in superblock)
 
 pub const EXT_CREATOR_TAG: &[u8; 8] = b"RIM     ";

@@ -7,13 +7,13 @@ use crate::meta::ExtMeta;
 #[derive(Debug, Clone, Copy)]
 pub struct GroupLayout {
     pub group_id: u32,
-    pub group_start: u64,        // Start of the group in the storage space
-    pub block_bitmap_block: u64, // Block where the block bitmap is located
-    pub inode_bitmap_block: u64, // Block where the inode bitmap is located
-    pub inode_table_block: u64,  // Block where the inode table starts
-    pub inode_table_blocks: u32, // Number of blocks needed for the inode table
-    pub first_data_block: u64,   // First data block for this group
-    pub reserved_blocks: u32,    // Number of reserved blocks (e.g., for the superblock, BGDT)
+    pub group_start: u64,
+    pub block_bitmap_block: u64,
+    pub inode_bitmap_block: u64,
+    pub inode_table_block: u64,
+    pub inode_table_blocks: u32,
+    pub first_data_block: u64,
+    pub reserved_blocks: u32,
 }
 
 impl GroupLayout {
@@ -22,7 +22,6 @@ impl GroupLayout {
         let group_start =
             params.first_data_block as u64 + group_id as u64 * params.blocks_per_group as u64;
 
-        // Utility function: reserved for each group
         let reserved_blocks = Self::reserved_blocks_in_group(group_id, params);
 
         // Calculations of blocks for bitmaps and inode table
@@ -32,7 +31,6 @@ impl GroupLayout {
         let inode_table_blocks =
             (params.inodes_per_group * params.inode_size / params.block_size).div_ceil(1);
 
-        // First data block
         let first_data_block = Self::first_data_block_in_group(params, group_id);
 
         Self {
@@ -52,9 +50,6 @@ impl GroupLayout {
         (self.first_data_block - self.group_start) as u32
     }
 
-    // Utility functions moved into GroupLayout
-
-    // Calculates reserved blocks in the group (Superblock + BGDT)
     fn reserved_blocks_in_group(group_id: u32, params: &ExtMeta) -> u32 {
         use crate::utils::is_sparse_super_group;
 
@@ -66,7 +61,7 @@ impl GroupLayout {
             let bgdt_size = params.group_count as u64 * params.bgdt_entry_size as u64;
             let bgdt_blocks = bgdt_size.div_ceil(params.block_size as u64);
             let bgdt_blocks = u32::try_from(bgdt_blocks).unwrap_or(u32::MAX);
-            1 + bgdt_blocks // SB (1 block) + BGDT blocks
+            1 + bgdt_blocks
         } else {
             0
         }
@@ -109,7 +104,6 @@ mod tests {
         for group_id in 0..meta.group_count {
             let layout = GroupLayout::compute(&meta, group_id);
 
-            // Verify group start
             let expected_start =
                 meta.first_data_block as u64 + group_id as u64 * meta.blocks_per_group as u64;
             assert_eq!(

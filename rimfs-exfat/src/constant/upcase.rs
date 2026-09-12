@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Compressed minimal exFAT up-case table bytes.
+
 pub const UPCASE_TABLE_SIZE: usize = 65_536;
 
 pub const EXFAT_UPCASE_MINIMAL_CHECKSUM: u32 = 0x4E394AE1;

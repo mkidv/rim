@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! UEFI memory and block I/O protocol adapters.
+
 use crate::{RimIO, RimIOError, RimIOResult, RimRead, RimWrite, checked_add_offset};
 
 use uefi::boot::ScopedProtocol;

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 on-disk volume descriptor and directory record structures.
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -42,30 +44,36 @@ pub const DIR_FLAG_MULTIEXTENT: u8 = 0x80;
 pub struct IsoHandle(pub u64);
 impl FsHandle for IsoHandle {}
 
-/// Writes a 32-bit integer in ISO 733 both-endian format (4 bytes Little Endian + 4 bytes Big Endian).
-#[inline]
+impl From<u64> for IsoHandle {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
+
+pub use crate::records::*;
+use zerocopy::{FromBytes, IntoBytes};
+
+/// Write the ISO 733 encoding into an existing composite buffer.
 pub fn put_both_u32(buf: &mut [u8], val: u32) {
-    buf[0..4].copy_from_slice(&val.to_le_bytes());
-    buf[4..8].copy_from_slice(&val.to_be_bytes());
+    buf[..8].copy_from_slice(BothE32::from(val).as_bytes());
 }
-
-/// Reads a 32-bit integer from ISO 733 both-endian format.
-#[inline]
-pub fn get_both_u32(buf: &[u8]) -> u32 {
-    u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+/// Read and validate both copies of an ISO 733 value.
+pub fn get_both_u32(buf: &[u8]) -> rimio::RimIOResult<u32> {
+    BothE32::ref_from_prefix(buf)
+        .map_err(|_| rimio::RimIOError::Invalid("Truncated ISO integer"))?
+        .0
+        .get()
 }
-
-/// Writes a 16-bit integer in ISO 723 both-endian format (2 bytes Little Endian + 2 bytes Big Endian).
-#[inline]
+/// Write the ISO 723 encoding into an existing composite buffer.
 pub fn put_both_u16(buf: &mut [u8], val: u16) {
-    buf[0..2].copy_from_slice(&val.to_le_bytes());
-    buf[2..4].copy_from_slice(&val.to_be_bytes());
+    buf[..4].copy_from_slice(BothE16::from(val).as_bytes());
 }
-
-/// Reads a 16-bit integer from ISO 723 both-endian format.
-#[inline]
-pub fn get_both_u16(buf: &[u8]) -> u16 {
-    u16::from_le_bytes([buf[0], buf[1]])
+/// Read and validate both copies of an ISO 723 value.
+pub fn get_both_u16(buf: &[u8]) -> rimio::RimIOResult<u16> {
+    BothE16::ref_from_prefix(buf)
+        .map_err(|_| rimio::RimIOError::Invalid("Truncated ISO integer"))?
+        .0
+        .get()
 }
 
 /// Formats a 17-byte text date and time according to ISO 9660 Section 8.4.26.1 (YYYYMMDDHHMMSS00 + offset).

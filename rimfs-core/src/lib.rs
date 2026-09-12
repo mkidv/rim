@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimfs-core: Common traits and structures for the RIM filesystem suite.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]

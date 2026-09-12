@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // cargo bench -p rimpart --features std,mem
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rimpart::gpt_stream::GptStreamReader;
@@ -34,12 +36,9 @@ fn make_header_and_entries(
         gpt::GptHeader::new_with_table(sector, total, make_guid(0), n as u32, entry_sz).unwrap();
 
     // Prepare N alloc requests (type, unique_guid, len_sectors, attrs, name)
-    //    Ici on prend 1024 secteurs/part (~512 KiB à 512B) pour le bench.
     let len_sectors = 1024u64;
     let attrs = 0u64;
 
-    // Génère les tuples attendus par make_aligned_entries (réfs requises)
-    // On stocke les GUID et noms pour fournir des références stables
     let uids: Vec<[u8; 16]> = (0..n).map(|i| make_guid(i + 1)).collect();
     let names: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
 
@@ -69,15 +68,14 @@ fn bench_crc(c: &mut Criterion) {
         let (hdr, entries) = make_header_and_entries(sector, total, n);
 
         // Simule la "region" (table entries complète, num_entries slots)
-        let es = hdr.entry_size as usize;
-        let ne = hdr.num_entries as usize;
+        let es = hdr.entry_size.get() as usize;
+        let ne = hdr.num_entries.get() as usize;
         let base = core::mem::size_of::<gpt::GptEntry>();
         let mut region = vec![0u8; es * ne];
         for (i, p) in entries.iter().enumerate() {
             let head = p.as_bytes();
             let dst = &mut region[i * es..i * es + base];
             dst.copy_from_slice(&head[..base]);
-            // tail déjà zéro
         }
 
         group.bench_with_input(BenchmarkId::new("iter_entries_heads", n), &n, |b, &_n| {
@@ -122,7 +120,6 @@ fn bench_read_stream_vs_alloc(c: &mut Criterion) {
         let mut buf = vec![0u8; (sector_size * total) as usize];
         let mut io = MemRimIO::new(&mut buf);
 
-        // MBR protectif
         mbr::write_mbr_protective(&mut io, total).unwrap();
 
         // Header + entries
@@ -135,7 +132,7 @@ fn bench_read_stream_vs_alloc(c: &mut Criterion) {
                 let mut count = 0usize;
                 for e in reader.iter() {
                     let e = e.unwrap();
-                    count += (e.end_lba - e.start_lba + 1) as usize;
+                    count += (e.end_lba.get() - e.start_lba.get() + 1) as usize;
                 }
                 std::hint::black_box(count)
             });
@@ -162,15 +159,14 @@ fn bench_write_stream_vs_alloc(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("stream_writer", n), &n, |b, &_n| {
             b.iter(|| {
-                // Disque vierge et MBR protectif
                 let mut buf = vec![0u8; (sector * total) as usize];
                 let mut io = MemRimIO::new(&mut buf);
                 mbr::write_mbr_protective(&mut io, total).unwrap();
 
                 // Header dimensionné + parts
                 let (mut hdr, entries) = make_header_and_entries(sector, total, n);
-                hdr.num_entries = entries.len() as u32;
-                hdr.entry_size = core::mem::size_of::<gpt::GptEntry>() as u32;
+                hdr.num_entries = (entries.len() as u32).into();
+                hdr.entry_size = (core::mem::size_of::<gpt::GptEntry>() as u32).into();
 
                 // Ecriture stream
                 let mut w = GptStreamWriter::<_, 4096>::from_header(&mut io, sector, hdr).unwrap();
@@ -189,8 +185,8 @@ fn bench_write_stream_vs_alloc(c: &mut Criterion) {
                 mbr::write_mbr_protective(&mut io, total).unwrap();
 
                 let (mut hdr, entries) = make_header_and_entries(sector, total, n);
-                hdr.num_entries = entries.len() as u32;
-                hdr.entry_size = core::mem::size_of::<gpt::GptEntry>() as u32;
+                hdr.num_entries = (entries.len() as u32).into();
+                hdr.entry_size = (core::mem::size_of::<gpt::GptEntry>() as u32).into();
 
                 gpt::write_gpt_with_header(&mut io, hdr, &entries, sector).unwrap();
 

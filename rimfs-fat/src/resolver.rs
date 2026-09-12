@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc", test))]
-use alloc::string::ToString;
+
+//! FAT directory tree and cluster chain resolver.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec, vec::Vec};
 
@@ -34,14 +35,15 @@ use crate::core::resolver::walker::WalkerDataSource;
 
 impl<'a, IO: RimRead + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
     type Entry = FatEntries;
+    type NodeId = u32;
 
-    fn root_cluster(&self) -> u32 {
+    fn root_node(&self) -> Self::NodeId {
         self.meta.root_unit()
     }
 
     fn find_entry(
         &mut self,
-        dir_cluster: u32,
+        dir_cluster: Self::NodeId,
         name: &str,
     ) -> FsResolverResult<Option<Self::Entry>> {
         find_in_dir(self.io, self.meta, dir_cluster, name)
@@ -51,7 +53,7 @@ impl<'a, IO: RimRead + ?Sized> WalkerDataSource for FatResolver<'a, IO> {
         entry.is_dir()
     }
 
-    fn entry_cluster(&self, entry: &Self::Entry) -> u32 {
+    fn entry_node(&self, entry: &Self::Entry) -> Self::NodeId {
         entry.first_cluster()
     }
 }
@@ -79,7 +81,7 @@ impl<'a, IO: RimRead + ?Sized> FsTreeResolver for FatResolver<'a, IO> {
             return Ok(alloc::boxed::Box::new(rimio::SliceRimIO::new(&[])));
         }
 
-        let cs = self.meta.unit_size() as u64;
+        let cs = self.meta.unit_size();
         let mut extents = Vec::new();
         let mut logical_offset = 0u64;
         let total_size = size as u64;
@@ -121,7 +123,7 @@ fn read_dir_entries<IO: RimRead + ?Sized>(
     meta: &FatMeta,
     start_cluster: u32,
 ) -> FsResolverResult<Vec<FatEntries>> {
-    let cs = meta.unit_size();
+    let cs = meta.unit_size() as usize;
     let mut out = vec![];
     let mut lfn_stack = vec![];
 
@@ -147,7 +149,7 @@ fn read_dir_entries<IO: RimRead + ?Sized>(
             }
             let attr = chunk[11];
 
-            if attr == FatAttributes::LFN.bits() {
+            if attr == FatFileAttributes::LFN.bits() {
                 // Safe: chunks_exact(32) guarantees length 32
                 if let Ok(arr) = chunk.try_into() {
                     lfn_stack.push(arr);
@@ -155,14 +157,14 @@ fn read_dir_entries<IO: RimRead + ?Sized>(
                 continue;
             }
 
-            if attr & FatAttributes::VOLUME_ID.bits() != 0 {
+            if attr & FatFileAttributes::VOLUME_ID.bits() != 0 {
                 lfn_stack.clear();
                 continue;
             }
 
             let name11 = &chunk[0..11];
 
-            if attr & FatAttributes::DIRECTORY.bits() != 0
+            if attr & FatFileAttributes::DIRECTORY.bits() != 0
                 && (name11 == FAT_DOT_NAME || name11 == FAT_DOTDOT_NAME)
             {
                 lfn_stack.clear();
@@ -194,7 +196,7 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
     dir_cluster: u32,
     target: &str,
 ) -> FsResolverResult<Option<FatEntries>> {
-    let cs = meta.unit_size();
+    let cs = meta.unit_size() as usize;
 
     // Directories -> allow system clusters (root=2)
     let mut cur = ClusterCursor::new(meta, dir_cluster);
@@ -225,7 +227,7 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
 
             let attr = chunk[11];
 
-            if attr == FatAttributes::LFN.bits() {
+            if attr == FatFileAttributes::LFN.bits() {
                 // Safe: chunks_exact(32) guarantees length 32
                 if let Ok(arr) = chunk.try_into() {
                     lfn_stack.push(arr);
@@ -233,14 +235,14 @@ pub fn find_in_dir<IO: RimRead + ?Sized>(
                 continue;
             }
 
-            if attr & FatAttributes::VOLUME_ID.bits() != 0 {
+            if attr & FatFileAttributes::VOLUME_ID.bits() != 0 {
                 lfn_stack.clear();
                 continue;
             }
 
             let name11 = &chunk[0..11];
 
-            if attr & FatAttributes::DIRECTORY.bits() != 0
+            if attr & FatFileAttributes::DIRECTORY.bits() != 0
                 && (name11 == FAT_DOT_NAME || name11 == FAT_DOTDOT_NAME)
             {
                 lfn_stack.clear();

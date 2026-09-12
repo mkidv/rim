@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: MIT
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::vec;
 
-use rimio::prelude::*;
+//! exFAT timestamp decoding and path conversion utilities.
 
-use crate::{
-    core::{
-        bitmap::BitmapOps,
-        resolver::*,
-        utils::time_utils::{self, TimeConversion},
-    },
-    meta::*,
+use crate::core::{
+    resolver::*,
+    utils::time_utils::{self, TimeConversion},
 };
+
+use time::OffsetDateTime;
 
 /// Get datetime from attribute or fallback to now
 pub fn datetime_from_attr(attr: &FileAttributes) -> (u32, u8, u8) {
@@ -19,41 +15,93 @@ pub fn datetime_from_attr(attr: &FileAttributes) -> (u32, u8, u8) {
     ts.to_exfat_datetime()
 }
 
-pub fn write_bitmap<IO: RimIO + ?Sized>(
-    io: &mut IO,
-    meta: &ExFatMeta,
-    clusters: &RunList,
-) -> RimIOResult {
-    let clusters_count = meta.bitmap_clusters() as usize;
-    let cs = meta.unit_size();
-    let mut bitmap = vec![0u8; clusters_count * cs];
-    for i in 0..clusters_count {
-        let off = meta.unit_offset(meta.bitmap_cluster + i as u32);
-        io.read_block_best_effort(off, &mut bitmap[i * cs..(i + 1) * cs], cs)?;
+/// Converts exFAT packed date/time, 10ms increment, and UTC offset byte into an [`OffsetDateTime`].
+pub fn exfat_to_datetime(
+    packed: u32,
+    fine_10ms: u8,
+    utc_offset_byte: u8,
+) -> Option<OffsetDateTime> {
+    if packed == 0 {
+        return None;
     }
 
-    // Flip bits using optimized generic set_bits_in_range
-    // Robustness: Use meta.bitmap_entry_offset to determine start bit,
-    // ensuring we respect the filesystem's internal cluster-to-bit logic.
-    for run in clusters.iter() {
-        let start_cluster = run.start as u32;
+    let year = 1980 + ((packed >> 25) & 0x7F) as i32;
+    let month_val = ((packed >> 21) & 0x0F) as u8;
+    let day = ((packed >> 16) & 0x1F) as u8;
+    let hour = ((packed >> 11) & 0x1F) as u8;
+    let minute = ((packed >> 5) & 0x3F) as u8;
+    let sec_double = (packed & 0x1F) as u8;
 
-        // Calculate bit offset using meta's logic
-        let (byte_index, bit_mask) = meta.bitmap_entry_offset(start_cluster);
-        let bit_offset_start = byte_index * 8 + bit_mask.trailing_zeros() as usize;
+    let base_sec = sec_double * 2;
+    if fine_10ms >= 200 {
+        return None;
+    }
+    let second = base_sec + fine_10ms / 100;
+    let milli = (fine_10ms % 100) as u16 * 10;
 
-        // Check if start is within bounds (robustness check similar to original)
-        // If the start itself is out of bounds, we skip.
-        // set_bits_in_range will handle the end bound clamping.
-        if byte_index < bitmap.len() {
-            let count = run.length as usize;
-            bitmap.set_bits_in_range(bit_offset_start, bit_offset_start + count, true);
+    let offset = if utc_offset_byte & 0x80 != 0 {
+        let raw7 = (utc_offset_byte & 0x7F) as i16;
+        let intervals_15min = if raw7 >= 64 { raw7 - 128 } else { raw7 };
+        let offset_seconds = (intervals_15min as i32) * 15 * 60;
+        time::UtcOffset::from_whole_seconds(offset_seconds).ok()?
+    } else {
+        time::UtcOffset::UTC
+    };
+
+    let month = time::Month::try_from(month_val).ok()?;
+    let date_obj = time::Date::from_calendar_date(year, month, day).ok()?;
+    let time_obj = time::Time::from_hms_milli(hour, minute, second, milli).ok()?;
+    Some(date_obj.with_time(time_obj).assume_offset(offset))
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exfat_to_datetime_roundtrip() {
+        let offset = time::UtcOffset::from_hms(2, 0, 0).unwrap();
+        let date = time::Date::from_calendar_date(2024, time::Month::August, 20).unwrap();
+        let time = time::Time::from_hms_milli(16, 45, 30, 250).unwrap();
+        let original = date.with_time(time).assume_offset(offset);
+
+        let (packed, fine_10ms, utc_offset_byte) = original.to_exfat_datetime();
+        let decoded = exfat_to_datetime(packed, fine_10ms, utc_offset_byte).unwrap();
+
+        assert_eq!(decoded.year(), 2024);
+        assert_eq!(decoded.month(), time::Month::August);
+        assert_eq!(decoded.day(), 20);
+        assert_eq!(decoded.hour(), 16);
+        assert_eq!(decoded.minute(), 45);
+        assert_eq!(decoded.second(), 30);
+        assert_eq!(decoded.millisecond(), 250);
+        assert_eq!(decoded.offset(), offset);
+
+        // Invalid packed value
+        assert!(exfat_to_datetime(0, 0, 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod timestamp_boundaries {
+    use super::*;
+    #[test]
+    fn preserves_second_parity_and_rejects_invalid_fields() {
+        let date = time::Date::from_calendar_date(2024, time::Month::August, 20).unwrap();
+        for second in 0..60 {
+            for millis in [0, 10, 250, 990] {
+                for minutes in [-720, -345, 0, 330, 840] {
+                    let offset = time::UtcOffset::from_whole_seconds(minutes * 60).unwrap();
+                    let source = date
+                        .with_hms_milli(16, 45, second, millis)
+                        .unwrap()
+                        .assume_offset(offset);
+                    let (packed, fine, utc) = source.to_exfat_datetime();
+                    assert_eq!(exfat_to_datetime(packed, fine, utc), Some(source));
+                    assert!(exfat_to_datetime(packed, 200, utc).is_none());
+                    assert!(exfat_to_datetime((packed & !31) | 31, 0, utc).is_none());
+                }
+            }
         }
     }
-
-    for i in 0..clusters_count {
-        let off = meta.unit_offset(meta.bitmap_cluster + i as u32);
-        io.write_block_best_effort(off, &bitmap[i * cs..(i + 1) * cs], cs)?;
-    }
-    Ok(())
 }

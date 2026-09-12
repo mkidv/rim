@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Top-level CLI command implementations.
+
 pub mod check;
 pub mod convert;
 pub mod copy;

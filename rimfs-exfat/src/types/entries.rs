@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
+
+//! exFAT directory entry set, stream extension, and filename structures.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{string::String, vec::Vec};
 
+use zerocopy::byteorder::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
@@ -35,11 +39,27 @@ impl ExFatEntries {
     }
 
     pub fn size(&self) -> usize {
-        self.stream.data_length as usize
+        self.stream.data_length.get() as usize
     }
 
     pub fn attr(&self) -> FileAttributes {
-        FileAttributes::from_exfat_attr(self.primary.file_attributes)
+        let mut attr = FileAttributes::from_exfat_attr(self.primary.file_attributes.get());
+        attr.created = crate::utils::exfat_to_datetime(
+            self.primary.create_timestamp.get(),
+            self.primary.create_10ms_increment,
+            self.primary.create_utc_offset,
+        );
+        attr.modified = crate::utils::exfat_to_datetime(
+            self.primary.modify_timestamp.get(),
+            self.primary.modify_10ms_increment,
+            self.primary.modify_utc_offset,
+        );
+        attr.accessed = crate::utils::exfat_to_datetime(
+            self.primary.access_timestamp.get(),
+            0,
+            self.primary.access_utc_offset,
+        );
+        attr
     }
 
     pub fn is_dir(&self) -> bool {
@@ -47,7 +67,7 @@ impl ExFatEntries {
     }
 
     pub fn first_cluster(&self) -> u32 {
-        self.stream.first_cluster
+        self.stream.first_cluster.get()
     }
 
     pub fn dir(
@@ -230,17 +250,15 @@ fn name_entries(name: &str) -> Vec<ExFatNameEntry> {
 }
 
 fn decode_name(names: &[ExFatNameEntry]) -> FsParsingResult<String> {
-    let mut name_utf16 = Vec::with_capacity(names.len() * 15);
-    for name_entry in names {
-        let name_chars = name_entry.name_chars;
-        for &c in name_chars.iter() {
-            if c == 0x0000 || c == 0xFFFF {
-                break;
-            }
-            name_utf16.push(c);
-        }
-    }
-    String::from_utf16(&name_utf16)
+    let units = names.iter().flat_map(|entry| {
+        entry
+            .name_chars
+            .iter()
+            .map(|unit| unit.get())
+            .take_while(|&unit| unit != 0 && unit != 0xffff)
+    });
+    core::char::decode_utf16(units)
+        .collect::<Result<String, _>>()
         .map_err(|_| FsParsingError::Invalid("Invalid UTF-16 in ExFat name"))
 }
 
@@ -262,16 +280,16 @@ fn name_length_utf16(name: &str) -> FsParsingResult<u8> {
 }
 
 #[derive(Debug, Clone, Copy, IntoBytes, FromBytes, KnownLayout, Immutable)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct ExFatPrimaryEntry {
     pub entry_type: u8,
     pub secondary_count: u8,
-    pub set_checksum: u16,
-    pub file_attributes: u16,
-    pub reserved1: u16,
-    pub create_timestamp: u32,
-    pub modify_timestamp: u32,
-    pub access_timestamp: u32,
+    pub set_checksum: U16,
+    pub file_attributes: U16,
+    pub reserved1: U16,
+    pub create_timestamp: U32,
+    pub modify_timestamp: U32,
+    pub access_timestamp: U32,
     pub create_10ms_increment: u8,
     pub modify_10ms_increment: u8,
     pub create_utc_offset: u8,
@@ -293,12 +311,12 @@ impl ExFatPrimaryEntry {
         Self {
             entry_type: EXFAT_ENTRY_PRIMARY,
             secondary_count,
-            set_checksum: 0, // computed later
-            file_attributes: attr.as_exfat_attr(),
-            reserved1: 0,
-            create_timestamp: c_time,
-            modify_timestamp: m_time,
-            access_timestamp: a_time,
+            set_checksum: (0).into(), // computed later
+            file_attributes: (attr.as_exfat_attr()).into(),
+            reserved1: (0).into(),
+            create_timestamp: (c_time).into(),
+            modify_timestamp: (m_time).into(),
+            access_timestamp: (a_time).into(),
             create_10ms_increment: c_fine,
             modify_10ms_increment: m_fine,
             create_utc_offset: c_utc,
@@ -333,7 +351,7 @@ impl ExFatPrimaryEntry {
             }
         }
 
-        self.set_checksum = sum;
+        self.set_checksum = sum.into();
     }
 
     #[inline(always)]
@@ -356,18 +374,18 @@ impl Validate<()> for ExFatPrimaryEntry {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct ExFatStreamEntry {
     pub entry_type: u8,
     pub general_secondary_flags: u8,
     pub reserved1: u8,
     pub name_length: u8,
-    pub name_hash: u16,
-    pub reserved2: u16,
-    pub valid_data_length: u64,
-    pub reserved3: u32,
-    pub first_cluster: u32,
-    pub data_length: u64,
+    pub name_hash: U16,
+    pub reserved2: U16,
+    pub valid_data_length: U64,
+    pub reserved3: U32,
+    pub first_cluster: U32,
+    pub data_length: U64,
 }
 
 impl ExFatStreamEntry {
@@ -377,12 +395,12 @@ impl ExFatStreamEntry {
             general_secondary_flags: 0,
             reserved1: 0,
             name_length,
-            name_hash,
-            reserved2: 0,
-            valid_data_length: data_length,
-            reserved3: 0,
-            first_cluster,
-            data_length,
+            name_hash: name_hash.into(),
+            reserved2: (0).into(),
+            valid_data_length: (data_length).into(),
+            reserved3: (0).into(),
+            first_cluster: first_cluster.into(),
+            data_length: data_length.into(),
         }
     }
 
@@ -408,16 +426,18 @@ impl Validate<ExFatMeta> for ExFatStreamEntry {
             return Err(FsParsingError::Invalid("exFAT: Stream.entry_type"));
         }
         // Head cluster must be in range (0 is allowed if the file is empty)
-        let c = self.first_cluster;
+        let c = self.first_cluster.get();
         if c != 0 {
             let first = EXFAT_FIRST_CLUSTER;
             let last = EXFAT_FIRST_CLUSTER + meta.cluster_count - 1;
             if c < first || c > last {
-                return Err(FsParsingError::Invalid("exFAT: Stream.first_cluster OOR"));
+                return Err(FsParsingError::Invalid(
+                    "exFAT: Stream.first_cluster.get() OOR",
+                ));
             }
         }
         // valid_data_length <= data_length (exFAT rule)
-        if self.valid_data_length > self.data_length {
+        if self.valid_data_length.get() > self.data_length.get() {
             return Err(FsParsingError::Invalid("exFAT: VDL > DataLength"));
         }
         Ok(())
@@ -425,11 +445,11 @@ impl Validate<ExFatMeta> for ExFatStreamEntry {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct ExFatNameEntry {
     pub entry_type: u8,
     pub reserved: u8,
-    pub name_chars: [u16; 15],
+    pub name_chars: [U16; 15],
 }
 
 impl ExFatNameEntry {
@@ -437,7 +457,7 @@ impl ExFatNameEntry {
         Self {
             entry_type: EXFAT_ENTRY_NAME,
             reserved: 0,
-            name_chars,
+            name_chars: name_chars.map(U16::new),
         }
     }
 
@@ -461,7 +481,7 @@ impl Validate<()> for ExFatNameEntry {
 }
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable, Copy, Clone, Debug, Default)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct ExFatEodEntry {
     pub entry_type: u8,
     pub reserved: [u8; 31],
@@ -519,7 +539,7 @@ pub fn validate_exfat_set(
         return Err(FsParsingError::Invalid("exFAT: name_length mismatch"));
     }
     // Name hash verification (optional but useful)
-    let got_hash = stream.name_hash;
+    let got_hash = stream.name_hash.get();
     let real_hash = compute_name_hash(
         &decode_name(names).map_err(|_| FsParsingError::Invalid("exFAT: name decode"))?,
         upcase,
@@ -527,14 +547,60 @@ pub fn validate_exfat_set(
     if got_hash != real_hash {
         return Err(FsParsingError::Invalid("exFAT: name_hash mismatch"));
     }
-    // Set checksum
-    let p = *primary;
-    let s = *stream;
-    let ns = names.to_vec();
-    let mut recompute = p;
-    recompute.compute_set_checksum(&s, &ns);
-    if p.set_checksum != recompute.set_checksum {
+    let mut recompute = *primary;
+    recompute.compute_set_checksum(stream, names);
+    if primary.set_checksum.get() != recompute.set_checksum.get() {
         return Err(FsParsingError::Invalid("exFAT: set_checksum mismatch"));
     }
     Ok(())
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<ExFatPrimaryEntry>() == 32);
+    assert!(core::mem::size_of::<ExFatStreamEntry>() == 32);
+    assert!(core::mem::size_of::<ExFatNameEntry>() == 32);
+    assert!(core::mem::align_of::<ExFatPrimaryEntry>() == 1);
+    assert!(core::mem::align_of::<ExFatStreamEntry>() == 1);
+    assert!(core::mem::align_of::<ExFatNameEntry>() == 1);
+    assert!(core::mem::offset_of!(ExFatStreamEntry, valid_data_length) == 8);
+    assert!(core::mem::offset_of!(ExFatStreamEntry, first_cluster) == 20);
+    assert!(core::mem::offset_of!(ExFatStreamEntry, data_length) == 24);
+};
+#[cfg(test)]
+mod endian_tests {
+    use super::*;
+    #[test]
+    fn stream_golden_bytes_and_unaligned_view() {
+        let stream = ExFatStreamEntry::new(0x12345678, 0x1122334455667788, 2, 0x1234);
+        assert_eq!(&stream.as_bytes()[4..6], &[0x34, 0x12]);
+        assert_eq!(&stream.as_bytes()[20..24], &[0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(
+            &stream.as_bytes()[24..],
+            &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]
+        );
+        let mut bytes = [0; 33];
+        bytes[1..].copy_from_slice(stream.as_bytes());
+        let view = ExFatStreamEntry::ref_from_bytes(&bytes[1..]).unwrap();
+        assert_eq!(view.first_cluster.get(), 0x12345678);
+        assert!(ExFatStreamEntry::ref_from_bytes(&bytes[1..32]).is_err());
+    }
+    #[test]
+    fn unicode_name_crosses_entry_boundary_and_checksum_detects_mutation() {
+        let name = "abcdefghijklmn\u{1f600}.txt";
+        let names = name_entries(name);
+        assert_eq!(names[0].name_chars[14].get(), 0xd83d);
+        assert_eq!(names[1].name_chars[0].get(), 0xde00);
+        assert_eq!(decode_name(&names).unwrap(), name);
+        let mut primary = ExFatPrimaryEntry::new(&FileAttributes::new_file(), 3);
+        let stream = ExFatStreamEntry::new(2, 42, name.encode_utf16().count() as u8, 0);
+        primary.compute_set_checksum(&stream, &names);
+        let checksum = primary.set_checksum.get();
+        let mut changed = names.clone();
+        changed[0].name_chars[0] = 0x42.into();
+        primary.compute_set_checksum(&stream, &changed);
+        assert_ne!(primary.set_checksum.get(), checksum);
+        let mut invalid = [0; 15];
+        invalid[0] = 0xd800;
+        assert!(decode_name(&[ExFatNameEntry::new(invalid)]).is_err());
+    }
 }

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+//! Filesystem formatting contracts and volume initialization traits.
+
 pub use crate::errors::{FsFormatterError, FsFormatterResult};
+use crate::meta::FsMeta;
+use rimio::prelude::*;
 
 /// A Formatter for a filesystem type.
 ///
@@ -24,9 +28,6 @@ pub trait FsFormatter {
     }
 }
 
-use crate::meta::FsMeta;
-use rimio::prelude::*;
-
 /// Helper to zero out the data region (cluster heap) of a filesystem.
 pub fn zero_cluster_heap<U, M, IO>(io: &mut IO, meta: &M) -> FsFormatterResult
 where
@@ -41,7 +42,7 @@ where
     }
 
     let start = meta.unit_offset(first);
-    let end = meta.unit_offset(last) + meta.unit_size() as u64;
+    let end = meta.unit_offset(last) + meta.unit_size();
     let len = end.saturating_sub(start) as usize;
 
     io.zero_fill(start, len)?;

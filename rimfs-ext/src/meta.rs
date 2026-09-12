@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ext2/3/4 metadata descriptors and block group geometry.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::string::{String, ToString};
 
@@ -72,9 +74,9 @@ impl ExtFeatureSet {
     };
 
     pub fn from_superblock(sb: &ExtSuperblock) -> Self {
-        let compat = ExtCompatFeatures::from_bits_truncate(sb.s_feature_compat);
-        let incompat = ExtIncompatFeatures::from_bits_truncate(sb.s_feature_incompat);
-        let ro_compat = ExtRoCompatFeatures::from_bits_truncate(sb.s_feature_ro_compat);
+        let compat = ExtCompatFeatures::from_bits_truncate(sb.s_feature_compat.get());
+        let incompat = ExtIncompatFeatures::from_bits_truncate(sb.s_feature_incompat.get());
+        let ro_compat = ExtRoCompatFeatures::from_bits_truncate(sb.s_feature_ro_compat.get());
 
         Self {
             has_compat: compat
@@ -264,29 +266,29 @@ impl ExtMeta {
             return Err(FsError::Invalid("Invalid Ext superblock magic"));
         }
 
-        let block_size = 1024 << sb.s_log_block_size;
+        let block_size = 1024 << sb.s_log_block_size.get();
         let features = ExtFeatureSet::from_superblock(&sb);
 
         let block_count = if features.has_64bit {
-            (sb.s_blocks_count_lo as u64) | ((sb.s_blocks_count_hi as u64) << 32)
+            (sb.s_blocks_count_lo.get() as u64) | ((sb.s_blocks_count_hi.get() as u64) << 32)
         } else {
-            sb.s_blocks_count_lo as u64
+            sb.s_blocks_count_lo.get() as u64
         };
 
-        let inode_count = sb.s_inodes_count as u64;
+        let inode_count = sb.s_inodes_count.get() as u64;
 
         let volume_size_bytes = block_count * block_size as u64;
 
-        let inode_size = if sb.s_inode_size != 0 {
-            sb.s_inode_size as u32
+        let inode_size = if sb.s_inode_size.get() != 0 {
+            sb.s_inode_size.get() as u32
         } else if features.has_extents || features.has_64bit {
             EXT_DEFAULT_INODE_SIZE
         } else {
             EXT2_DEFAULT_INODE_SIZE
         };
 
-        let bgdt_entry_size = if sb.s_desc_size != 0 {
-            sb.s_desc_size as usize
+        let bgdt_entry_size = if sb.s_desc_size.get() != 0 {
+            sb.s_desc_size.get() as usize
         } else if features.has_64bit {
             EXT4_BGDT_ENTRY_SIZE
         } else {
@@ -300,16 +302,16 @@ impl ExtMeta {
             volume_size_bytes,
             block_size,
             block_count,
-            blocks_per_group: sb.s_blocks_per_group,
-            group_count: block_count.div_ceil(sb.s_blocks_per_group as u64) as u32,
+            blocks_per_group: sb.s_blocks_per_group.get(),
+            group_count: block_count.div_ceil(sb.s_blocks_per_group.get() as u64) as u32,
             inode_count,
-            inodes_per_group: sb.s_inodes_per_group,
-            first_data_block: sb.s_first_data_block,
+            inodes_per_group: sb.s_inodes_per_group.get(),
+            first_data_block: sb.s_first_data_block.get(),
             inode_size,
             bgdt_entry_size,
             use_integrity: false,
             use_group_integrity: false,
-            is_dirty: sb.s_state == 2, // 2 = ERROR_FS, usually indicates dirty if not explicitly 1
+            is_dirty: sb.s_state.get() == 2, // 2 = ERROR_FS, usually indicates dirty if not explicitly 1
         };
 
         // Detect RimExt Creator Tag in s_reserved (at offset 0x3F0, which is 380 in s_reserved)
@@ -348,8 +350,8 @@ impl ExtMeta {
 }
 
 impl FsMeta<u32> for ExtMeta {
-    fn unit_size(&self) -> usize {
-        self.block_size as usize
+    fn unit_size(&self) -> u64 {
+        self.block_size as u64
     }
 
     fn unit_offset(&self, unit: u32) -> u64 {
@@ -368,8 +370,8 @@ impl FsMeta<u32> for ExtMeta {
         (self.block_count.saturating_sub(1)) as u32
     }
 
-    fn total_units(&self) -> usize {
-        self.block_count as usize
+    fn total_units(&self) -> u64 {
+        self.block_count
     }
 
     fn size_bytes(&self) -> u64 {
@@ -410,6 +412,7 @@ fn default_inodes_per_group(block_size: u32, blocks_per_group: u32) -> FsResult<
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -424,13 +427,13 @@ mod tests {
         );
         assert_eq!(meta.label(), "TESTEXT", "Volume label mismatch");
 
-        // Calculate expected block count
         let expected_block_count = SIZE_BYTES / meta.block_size as u64;
         assert_eq!(
             meta.block_count, expected_block_count,
             "Block count mismatch"
         );
 
+        #[cfg(feature = "std")]
         println!(
             "✓ EXT meta created: size={SIZE_BYTES}, block_count={}",
             meta.block_count
@@ -445,6 +448,7 @@ mod tests {
         let expected_groups = meta.block_count.div_ceil(meta.blocks_per_group as u64) as u32;
         assert_eq!(meta.group_count, expected_groups, "Group count mismatch");
 
+        #[cfg(feature = "std")]
         println!(
             "✓ EXT group count: {} groups for {} blocks",
             meta.group_count, meta.block_count
@@ -494,6 +498,7 @@ mod tests {
             "Group 10 should NOT be sparse super"
         );
 
+        #[cfg(feature = "std")]
         println!("✓ Sparse super group detection verified");
     }
 
@@ -509,13 +514,13 @@ mod tests {
             "Total inode count mismatch"
         );
 
-        // Verify inodes per group is reasonable
         assert!(meta.inodes_per_group > 0, "Inodes per group should be > 0");
         assert!(
             meta.inodes_per_group <= meta.blocks_per_group * 16,
             "Too many inodes per group"
         );
 
+        #[cfg(feature = "std")]
         println!(
             "✓ EXT inode allocation: {} inodes, {} per group",
             meta.inode_count, meta.inodes_per_group
@@ -533,8 +538,8 @@ mod tests {
         assert_eq!(over.block_count, u32::MAX as u64 + 1);
 
         let sb = ExtSuperblock::from_meta(&over, 0, 0);
-        let blocks_count_lo = sb.s_blocks_count_lo;
-        let blocks_count_hi = sb.s_blocks_count_hi;
+        let blocks_count_lo = sb.s_blocks_count_lo.get();
+        let blocks_count_hi = sb.s_blocks_count_hi.get();
         assert_eq!(blocks_count_lo, 0);
         assert_eq!(blocks_count_hi, 1);
     }
@@ -548,7 +553,7 @@ mod tests {
 
         assert_eq!(
             meta.unit_size(),
-            meta.block_size as usize,
+            meta.block_size as u64,
             "unit_size mismatch"
         );
         assert_eq!(
@@ -556,11 +561,7 @@ mod tests {
             EXT_ROOT_INODE,
             "root_unit should be root inode"
         );
-        assert_eq!(
-            meta.total_units(),
-            meta.block_count as usize,
-            "total_units mismatch"
-        );
+        assert_eq!(meta.total_units(), meta.block_count, "total_units mismatch");
         assert_eq!(meta.size_bytes(), SIZE_BYTES, "size_bytes mismatch");
 
         // Test unit_offset
@@ -573,6 +574,7 @@ mod tests {
             "Block 1 offset should be block_size"
         );
 
+        #[cfg(feature = "std")]
         println!("✓ FsMeta trait implementation verified");
     }
 }

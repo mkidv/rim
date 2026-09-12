@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Clap command-line argument parser definitions.
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

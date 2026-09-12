@@ -8,15 +8,13 @@
 use rimio::prelude::*;
 
 use crate::allocator::NtfsAllocator;
-use crate::attr::NtfsFileNameNamespace;
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
 use crate::types::{NtfsAttribute, NtfsMftRecord};
-use crate::utils::build_mft_reference;
+use crate::mft::build_mft_reference;
 
 #[derive(Default)]
 pub struct NtfsBadClusFeature;
@@ -36,7 +34,6 @@ impl NtfsBadClusFeature {
             "$BadClus",
             0,
             attrs,
-            NtfsFileNameNamespace::Win32AndDos,
         ));
         record.add_attribute(NtfsAttribute::data_empty());
         record.add_attribute(NtfsAttribute::sparse_badclus(meta));
@@ -66,10 +63,8 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
     fn write(&self, io: &mut IO, allocator: &NtfsAllocator<'a>) -> FsFeatureResult<()> {
         let meta = allocator.meta;
         let record = Self::build_record(meta, SECURITY_ID_SYSTEM);
-        let raw = record
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_BADCLUS, &raw)
+        record
+            .write_to_mft(io, meta, MFT_RECORD_BADCLUS)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
         Ok(())
     }

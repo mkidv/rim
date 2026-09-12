@@ -4,6 +4,8 @@
 //! Reference: Microsoft NTFS On-Disk Format (public documentation)
 //! and Linux ntfs-3g sources.
 
+pub mod upcase;
+
 /// Boot sector signature
 pub const NTFS_BOOT_SIGNATURE: [u8; 8] = *b"NTFS    ";
 
@@ -49,44 +51,31 @@ pub const MFT_RECORD_QUOTA: u64 = 24; // $Extend\$Quota
 pub const MFT_RECORD_OBJID: u64 = 25; // $Extend\$ObjId
 pub const MFT_RECORD_REPARSE: u64 = 26; // $Extend\$Reparse
 pub const MFT_RECORD_USNJRNL: u64 = 27; // $Extend\$UsnJrnl
-pub const MFT_RECORD_FIRST_USER: u64 = 1024; // First user file/directory
+// pub const MFT_RECORD_FIRST_USER: u64 = 1024; // First user file/directory
 
 /// Minimum reserved MFT records for system files
 pub const NTFS_RESERVED_MFT_RECORDS: u64 = 1024;
-
-// Attribute types
-pub const ATTR_STANDARD_INFORMATION: u32 = 0x10;
-pub const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
-pub const ATTR_FILE_NAME: u32 = 0x30;
-pub const ATTR_OBJECT_ID: u32 = 0x40;
-pub const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
-pub const ATTR_VOLUME_NAME: u32 = 0x60;
-pub const ATTR_VOLUME_INFORMATION: u32 = 0x70;
-pub const ATTR_DATA: u32 = 0x80;
-pub const ATTR_INDEX_ROOT: u32 = 0x90;
-pub const ATTR_INDEX_ALLOCATION: u32 = 0xA0;
-pub const ATTR_BITMAP: u32 = 0xB0;
-pub const ATTR_REPARSE_POINT: u32 = 0xC0;
-pub const ATTR_EA_INFORMATION: u32 = 0xD0;
-pub const ATTR_EA: u32 = 0xE0;
-pub const ATTR_LOGGED_UTILITY_STREAM: u32 = 0x100;
-pub const ATTR_END: u32 = 0xFFFFFFFF;
 
 // Security IDs
 pub const SECURITY_ID_EVERYONE: u32 = 0x100;
 pub const SECURITY_ID_SYSTEM: u32 = 0x101;
 
-#[allow(unused_imports)]
-pub use crate::types::sid::*;
+pub const SID_SYSTEM: &[u8] = &[
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+];
 
-// Filename namespace
-pub const FILE_NAME_POSIX: u8 = 0;
-pub const FILE_NAME_WIN32: u8 = 1;
-pub const FILE_NAME_DOS: u8 = 2;
-pub const FILE_NAME_WIN32_AND_DOS: u8 = 3;
+pub const SID_ADMINISTRATORS: &[u8] = &[
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
+];
 
-/// End-of-cluster marker (not applicable for NTFS in the same way as FAT,
-/// but we use a sentinel for allocation tracking)
-pub const NTFS_CLUSTER_UNUSED: u64 = 0;
+pub const SID_EVERYONE: &[u8] = &[
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+];
 
-pub mod upcase;
+pub const SID_AUTHENTICATED_USERS: &[u8] = &[
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0b, 0x00, 0x00, 0x00,
+];
+
+pub const SID_USERS: &[u8] = &[
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x21, 0x02, 0x00, 0x00,
+];

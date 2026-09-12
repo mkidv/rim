@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use rimfs_core::resolver::{attr::FileAttributes, node::FsNode};
 use rimfs_fat::prelude::*;
@@ -35,7 +37,7 @@ fn bench_rimfat_format(c: &mut Criterion) {
         b.iter(|| {
             let file = tempfile::tempfile().unwrap();
             file.set_len(SIZE_BYTES).unwrap();
-            let mut io = MmapRimIO::new(file).unwrap();
+            let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
             let meta = FatMeta::new_rimfat(SIZE_BYTES, Some("BENCH_RIMFAT")).unwrap();
             FatFormatter::new(&mut io, &meta).format(false).unwrap();
         });

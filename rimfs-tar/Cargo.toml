@@ -16,6 +16,7 @@ alloc = ["rimfs-core/alloc", "rimio/alloc"]
 std = ["alloc", "rimfs-core/std", "rimio/std"]
 
 [dependencies]
+zerocopy = { version = "0.8", features = ["derive"] }
 rimfs-core = { path = "../rimfs-core", version = "0.9.1", default-features = false }
 rimio = { path = "../rimio", version = "0.9.1", default-features = false }
 

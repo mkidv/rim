@@ -6,20 +6,86 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::{vec, vec::Vec};
 
-use crate::attr::AttributeType;
 use crate::flags::IndexEntryFlags;
 use crate::meta::NtfsMeta;
 use crate::types::{
-    FileNameAttribute, IndexNodeHeader, IndexRootHeader, NtfsFileAttributes, NtfsFileNameNamespace,
-    NtfsIndexEntry, StandardInformation, VolumeInformation,
+    FileNameAttribute, IndexNodeHeader, IndexRootHeader, NonResidentAttributeHeader,
+    NtfsIndexEntry, ResidentAttributeHeader, StandardInformation, StandardInformationHeader,
+    VolumeInformation,
 };
-use crate::utils::{current_ntfs_time, encode_data_run, encode_data_run_end};
+use crate::utils::{
+    current_ntfs_time, determine_file_name_namespace, encode_data_run, encode_data_run_end,
+};
+use crate::{attr::NtfsFileAttributes, types::AttributeHeader};
 use rimio::prelude::*;
 use zerocopy::IntoBytes;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum NtfsAttributeType {
+    StandardInformation = 0x10,
+    AttributeList = 0x20,
+    FileName = 0x30,
+    ObjectId = 0x40,
+    SecurityDescriptor = 0x50,
+    VolumeName = 0x60,
+    VolumeInformation = 0x70,
+    Data = 0x80,
+    IndexRoot = 0x90,
+    IndexAllocation = 0xA0,
+    Bitmap = 0xB0,
+    ReparsePoint = 0xC0,
+    EaInformation = 0xD0,
+    Ea = 0xE0,
+    LoggedUtilityStream = 0x100,
+    End = 0xFFFFFFFF,
+}
+
+impl NtfsAttributeType {
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+bitflags::bitflags! {
+    /// Attribute Header Flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[repr(transparent)]
+    pub struct AttributeFlags: u16 {
+        const COMPRESSED = 0x0001;
+        const ENCRYPTED  = 0x4000;
+        const SPARSE     = 0x8000;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NtfsFileNameNamespace {
+    Posix = 0,
+    Win32 = 1,
+    Dos = 2,
+    Win32AndDos = 3,
+}
+
+impl NtfsFileNameNamespace {
+    pub fn bits(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Posix,
+            1 => Self::Win32,
+            2 => Self::Dos,
+            3 => Self::Win32AndDos,
+            _ => Self::Win32AndDos,
+        }
+    }
+}
+
 /// Logical representation of an Attribute
 pub struct NtfsAttribute<'a> {
-    pub attr_type: AttributeType,
+    pub attr_type: NtfsAttributeType,
     pub content: NtfsAttributeContent,
     pub name: &'a str, // Named attributes (ADS)
     pub flags: u16,
@@ -52,8 +118,6 @@ impl<'a> NtfsAttribute<'a> {
         current_ntfs_time()
     }
 
-    // ---------- $STANDARD_INFORMATION ----------
-
     pub fn standard_info(attrs: NtfsFileAttributes, security_id: u32) -> Self {
         Self::standard_info_custom(attrs, security_id, Self::now())
     }
@@ -64,22 +128,24 @@ impl<'a> NtfsAttribute<'a> {
         timestamp: u64,
     ) -> Self {
         let info = StandardInformation {
-            creation_time: timestamp,
-            modification_time: timestamp,
-            mft_modification_time: timestamp,
-            access_time: timestamp,
-            file_attributes: attrs.bits(),
-            maximum_versions: 0,
-            version_number: 0,
-            class_id: 0,
-            owner_id: 0,
-            security_id,
-            quota_charged: 0,
-            usn: 0,
+            header: StandardInformationHeader {
+                creation_time: timestamp.into(),
+                modification_time: timestamp.into(),
+                mft_modification_time: timestamp.into(),
+                access_time: timestamp.into(),
+                file_attributes: attrs.bits().into(),
+                maximum_versions: 0.into(),
+                version_number: 0.into(),
+                class_id: 0.into(),
+            },
+            owner_id: 0.into(),
+            security_id: security_id.into(),
+            quota_charged: 0.into(),
+            usn: 0.into(),
         };
 
         Self {
-            attr_type: AttributeType::StandardInformation,
+            attr_type: NtfsAttributeType::StandardInformation,
             content: NtfsAttributeContent::StandardInformation(info),
             name: "",
             flags: 0,
@@ -87,30 +153,33 @@ impl<'a> NtfsAttribute<'a> {
     }
 
     pub fn standard_info_basic(attrs: NtfsFileAttributes, timestamp: u64) -> Self {
-        let mut data = vec![0u8; 48];
-        data[0..8].copy_from_slice(&timestamp.to_le_bytes());
-        data[8..16].copy_from_slice(&timestamp.to_le_bytes());
-        data[16..24].copy_from_slice(&timestamp.to_le_bytes());
-        data[24..32].copy_from_slice(&timestamp.to_le_bytes());
-        data[32..36].copy_from_slice(&attrs.bits().to_le_bytes());
+        let header = StandardInformationHeader {
+            creation_time: timestamp.into(),
+            modification_time: timestamp.into(),
+            mft_modification_time: timestamp.into(),
+            access_time: timestamp.into(),
+            file_attributes: attrs.bits().into(),
+            maximum_versions: 0.into(),
+            version_number: 0.into(),
+            class_id: 0.into(),
+        };
+        let data = header.as_bytes().to_vec();
         Self {
-            attr_type: AttributeType::StandardInformation,
+            attr_type: NtfsAttributeType::StandardInformation,
             content: NtfsAttributeContent::Resident(data),
             name: "",
             flags: 0,
         }
     }
 
-    // ---------- $FILE_NAME ----------
-
     pub fn file_name(
         parent_ref: u64,
         name: &str,
         data_size: u64,
         attrs: NtfsFileAttributes,
-        namespace: NtfsFileNameNamespace,
     ) -> Self {
-        Self::file_name_custom(parent_ref, name, data_size, attrs, namespace, Self::now())
+        let ns = determine_file_name_namespace(name);
+        Self::file_name_custom(parent_ref, name, data_size, attrs, ns, Self::now())
     }
 
     pub fn file_name_custom(
@@ -160,25 +229,23 @@ impl<'a> NtfsAttribute<'a> {
         let mut fn_attr =
             FileNameAttribute::new(parent_ref, data_size, attrs, name_len, namespace.bits());
 
-        fn_attr.allocated_size = allocated_size;
-        fn_attr.creation_time = timestamp;
-        fn_attr.modification_time = timestamp;
-        fn_attr.mft_modification_time = timestamp;
-        fn_attr.access_time = timestamp;
+        fn_attr.allocated_size = (allocated_size).into();
+        fn_attr.creation_time = (timestamp).into();
+        fn_attr.modification_time = (timestamp).into();
+        fn_attr.mft_modification_time = (timestamp).into();
+        fn_attr.access_time = (timestamp).into();
 
         Self {
-            attr_type: AttributeType::FileName,
+            attr_type: NtfsAttributeType::FileName,
             content: NtfsAttributeContent::FileName(fn_attr, name_u16),
             name: "",
             flags: 0,
         }
     }
 
-    // ---------- $DATA helpers ----------
-
     pub fn data_empty() -> Self {
         Self {
-            attr_type: AttributeType::Data,
+            attr_type: NtfsAttributeType::Data,
             content: NtfsAttributeContent::Resident(vec![]),
             name: "",
             flags: 0,
@@ -187,7 +254,7 @@ impl<'a> NtfsAttribute<'a> {
 
     pub fn data_resident(data: Vec<u8>) -> Self {
         Self {
-            attr_type: AttributeType::Data,
+            attr_type: NtfsAttributeType::Data,
             content: NtfsAttributeContent::Resident(data),
             name: "",
             flags: 0,
@@ -196,14 +263,12 @@ impl<'a> NtfsAttribute<'a> {
 
     pub fn data_resident_named(name: &'a str, data: Vec<u8>) -> Self {
         Self {
-            attr_type: AttributeType::Data,
+            attr_type: NtfsAttributeType::Data,
             content: NtfsAttributeContent::Resident(data),
             name,
             flags: 0,
         }
     }
-
-    // ---------- Index Root ($INDEX_ROOT) ----------
 
     /// Build an $INDEX_ROOT for the given index name.
     ///
@@ -218,9 +283,9 @@ impl<'a> NtfsAttribute<'a> {
         has_children: bool,
     ) -> Self {
         let root = IndexRootHeader {
-            indexed_attr_type,
-            collation_rule,
-            index_alloc_entry_size: index_record_size,
+            indexed_attr_type: indexed_attr_type.into(),
+            collation_rule: collation_rule.into(),
+            index_alloc_entry_size: (index_record_size).into(),
             clusters_per_index_record,
             padding: [0; 3],
         };
@@ -229,15 +294,15 @@ impl<'a> NtfsAttribute<'a> {
         let allocated = (index_len + 7) & !7;
 
         let node = IndexNodeHeader {
-            entries_offset: 16,
-            index_length: index_len,
-            allocated_size: allocated,
+            entries_offset: (16).into(),
+            index_length: (index_len).into(),
+            allocated_size: (allocated).into(),
             flags: if has_children { 1 } else { 0 },
             padding: [0; 3],
         };
 
         Self {
-            attr_type: AttributeType::IndexRoot,
+            attr_type: NtfsAttributeType::IndexRoot,
             content: NtfsAttributeContent::IndexRoot(root, node, entries),
             name,
             flags: 0,
@@ -253,7 +318,7 @@ impl<'a> NtfsAttribute<'a> {
     ) -> Self {
         Self::index_root_named(
             "$I30",
-            AttributeType::FileName.code(),
+            NtfsAttributeType::FileName.code(),
             1, // Collation: FileName
             entries,
             clusters_per_index_record,
@@ -275,21 +340,17 @@ impl<'a> NtfsAttribute<'a> {
         m
     }
 
-    // ---------- $SECURITY_DESCRIPTOR ----------
-
     pub fn security_descriptor(descriptor: Vec<u8>) -> Self {
         Self {
-            attr_type: AttributeType::SecurityDescriptor,
+            attr_type: NtfsAttributeType::SecurityDescriptor,
             content: NtfsAttributeContent::Resident(descriptor),
             name: "",
             flags: 0,
         }
     }
 
-    // ---------- Non-resident builder (from RunList) ----------
-
     pub fn non_resident(
-        attr_type: AttributeType,
+        attr_type: NtfsAttributeType,
         name: &'a str,
         meta: &NtfsMeta,
         runs: &rimio::run::RunList,
@@ -316,7 +377,7 @@ impl<'a> NtfsAttribute<'a> {
     pub fn sparse_badclus(meta: &NtfsMeta) -> Self {
         let data_size = meta.total_clusters * meta.bytes_per_cluster as u64;
         Self {
-            attr_type: AttributeType::Data,
+            attr_type: NtfsAttributeType::Data,
             content: NtfsAttributeContent::NonResident {
                 allocated_size: data_size,
                 data_size,
@@ -347,11 +408,9 @@ impl<'a> NtfsAttribute<'a> {
         (dataruns, total_clusters)
     }
 
-    // ---------- Bitmap / IndexAllocation wrappers ----------
-
     pub fn bitmap_named(name: &'a str, content: Vec<u8>) -> Self {
         Self {
-            attr_type: AttributeType::Bitmap,
+            attr_type: NtfsAttributeType::Bitmap,
             content: NtfsAttributeContent::Resident(content),
             name,
             flags: 0,
@@ -360,13 +419,13 @@ impl<'a> NtfsAttribute<'a> {
 
     pub fn volume_info() -> Self {
         let info = VolumeInformation {
-            reserved: 0,
+            reserved: (0).into(),
             major_version: 3,
             minor_version: 1,
-            flags: 0,
+            flags: (0).into(),
         };
         Self {
-            attr_type: AttributeType::VolumeInformation,
+            attr_type: NtfsAttributeType::VolumeInformation,
             content: NtfsAttributeContent::Resident(info.as_bytes().to_vec()),
             name: "",
             flags: 0,
@@ -375,7 +434,7 @@ impl<'a> NtfsAttribute<'a> {
 
     pub fn volume_name(label_utf16: Vec<u16>) -> Self {
         Self {
-            attr_type: AttributeType::VolumeName,
+            attr_type: NtfsAttributeType::VolumeName,
             content: NtfsAttributeContent::Resident(
                 label_utf16.iter().flat_map(|&c| c.to_le_bytes()).collect(),
             ),
@@ -392,20 +451,20 @@ impl<'a> NtfsAttribute<'a> {
         Some(
             NtfsIndexEntry::new(
                 file_ref,
-                file_name.parent_directory,
+                file_name.parent_directory.get(),
                 name.clone(),
-                NtfsFileAttributes::from_bits_retain(file_name.file_attributes),
+                NtfsFileAttributes::from_bits_retain(file_name.file_attributes.get()),
                 IndexEntryFlags::empty(),
                 None,
             )
             .with_timestamps_raw(
-                file_name.creation_time,
-                file_name.modification_time,
-                file_name.mft_modification_time,
-                file_name.access_time,
+                file_name.creation_time.get(),
+                file_name.modification_time.get(),
+                file_name.mft_modification_time.get(),
+                file_name.access_time.get(),
             )
             .with_namespace(NtfsFileNameNamespace::from_raw(file_name.namespace))
-            .with_sizes(file_name.data_size, file_name.allocated_size),
+            .with_sizes(file_name.data_size.get(), file_name.allocated_size.get()),
         )
     }
 
@@ -424,39 +483,39 @@ impl<'a> NtfsAttribute<'a> {
 
         let (attr_header, resident, non_resident, content_bytes, dataruns) = match &self.content {
             NtfsAttributeContent::Resident(data) => {
-                let resident = crate::types::ResidentAttributeHeader {
-                    value_length: data.len() as u32,
-                    value_offset: 0,
+                let resident = ResidentAttributeHeader {
+                    value_length: (data.len() as u32).into(),
+                    value_offset: (0).into(),
                     indexed: 0,
                     padding: 0,
                 };
-                let header = crate::types::AttributeHeader {
-                    attr_type: self.attr_type.code(),
-                    length: 0,
+                let header = AttributeHeader {
+                    attr_type: (self.attr_type.code()).into(),
+                    length: (0).into(),
                     non_resident: 0,
                     name_length: name_len,
-                    name_offset: 0,
-                    flags: self.flags,
-                    attr_id,
+                    name_offset: (0).into(),
+                    flags: (self.flags).into(),
+                    attr_id: attr_id.into(),
                 };
                 (header, Some(resident), None, Some(data.as_slice()), None)
             }
             NtfsAttributeContent::StandardInformation(info) => {
                 let data = info.as_bytes();
-                let resident = crate::types::ResidentAttributeHeader {
-                    value_length: data.len() as u32,
-                    value_offset: 0,
+                let resident = ResidentAttributeHeader {
+                    value_length: (data.len() as u32).into(),
+                    value_offset: (0).into(),
                     indexed: 0,
                     padding: 0,
                 };
-                let header = crate::types::AttributeHeader {
-                    attr_type: self.attr_type.code(),
-                    length: 0,
+                let header = AttributeHeader {
+                    attr_type: (self.attr_type.code()).into(),
+                    length: (0).into(),
                     non_resident: 0,
                     name_length: name_len,
-                    name_offset: 0,
-                    flags: self.flags,
-                    attr_id,
+                    name_offset: (0).into(),
+                    flags: (self.flags).into(),
+                    attr_id: attr_id.into(),
                 };
                 (header, Some(resident), None, Some(data), None)
             }
@@ -465,20 +524,20 @@ impl<'a> NtfsAttribute<'a> {
                 for c in fn_name {
                     data.extend_from_slice(&c.to_le_bytes());
                 }
-                let resident = crate::types::ResidentAttributeHeader {
-                    value_length: data.len() as u32,
-                    value_offset: 0,
+                let resident = ResidentAttributeHeader {
+                    value_length: (data.len() as u32).into(),
+                    value_offset: (0).into(),
                     indexed: 1,
                     padding: 0,
                 };
-                let header = crate::types::AttributeHeader {
-                    attr_type: self.attr_type.code(),
-                    length: 0,
+                let header = AttributeHeader {
+                    attr_type: (self.attr_type.code()).into(),
+                    length: (0).into(),
                     non_resident: 0,
                     name_length: name_len,
-                    name_offset: 0,
-                    flags: self.flags,
-                    attr_id,
+                    name_offset: (0).into(),
+                    flags: (self.flags).into(),
+                    attr_id: attr_id.into(),
                 };
 
                 return self.write_to_io_inner(
@@ -501,24 +560,24 @@ impl<'a> NtfsAttribute<'a> {
                 lowest_vcn,
                 highest_vcn,
             } => {
-                let non_resident = crate::types::NonResidentAttributeHeader {
-                    lowest_vcn: *lowest_vcn,
-                    highest_vcn: *highest_vcn,
-                    data_runs_offset: 0,
-                    compression_unit: 0,
-                    padding: 0,
-                    allocated_size: *allocated_size,
-                    data_size: *data_size,
-                    initialized_size: *initialized_size,
+                let non_resident = NonResidentAttributeHeader {
+                    lowest_vcn: (*lowest_vcn).into(),
+                    highest_vcn: (*highest_vcn).into(),
+                    data_runs_offset: (0).into(),
+                    compression_unit: (0).into(),
+                    padding: (0).into(),
+                    allocated_size: (*allocated_size).into(),
+                    data_size: (*data_size).into(),
+                    initialized_size: (*initialized_size).into(),
                 };
-                let header = crate::types::AttributeHeader {
-                    attr_type: self.attr_type.code(),
-                    length: 0,
+                let header = AttributeHeader {
+                    attr_type: (self.attr_type.code()).into(),
+                    length: (0).into(),
                     non_resident: 1,
                     name_length: name_len,
-                    name_offset: 0,
-                    flags: self.flags,
-                    attr_id,
+                    name_offset: (0).into(),
+                    flags: (self.flags).into(),
+                    attr_id: attr_id.into(),
                 };
                 (
                     header,
@@ -533,21 +592,22 @@ impl<'a> NtfsAttribute<'a> {
                 data.extend_from_slice(node.as_bytes());
                 data.extend_from_slice(entries);
 
-                let resident = crate::types::ResidentAttributeHeader {
-                    value_length: data.len() as u32,
-                    value_offset: 0,
+                let resident = ResidentAttributeHeader {
+                    value_length: (data.len() as u32).into(),
+                    value_offset: (0).into(),
                     indexed: 0,
                     padding: 0,
                 };
-                let header = crate::types::AttributeHeader {
-                    attr_type: self.attr_type.code(),
-                    length: 0,
+                let header = AttributeHeader {
+                    attr_type: (self.attr_type.code()).into(),
+                    length: (0).into(),
                     non_resident: 0,
                     name_length: name_len,
-                    name_offset: 0,
-                    flags: self.flags,
-                    attr_id,
+                    name_offset: (0).into(),
+                    flags: (self.flags).into(),
+                    attr_id: attr_id.into(),
                 };
+
                 return self.write_to_io_inner(
                     io,
                     offset,
@@ -595,18 +655,16 @@ impl<'a> NtfsAttribute<'a> {
         io: &mut IO,
         offset: u64,
         _attr_id: u16,
-        mut header: crate::types::AttributeHeader,
-        resident: Option<crate::types::ResidentAttributeHeader>,
-        non_resident: Option<crate::types::NonResidentAttributeHeader>,
+        mut header: AttributeHeader,
+        resident: Option<ResidentAttributeHeader>,
+        non_resident: Option<NonResidentAttributeHeader>,
         content: &[u8],
         dataruns: Option<&[u8]>,
         name_bytes: &[u8],
     ) -> rimio::prelude::RimIOResult<usize> {
-        use crate::flags::AttributeFlags;
-        use rimio::RimIOError;
-
         let extended_non_resident = header.non_resident != 0
-            && (header.flags & (AttributeFlags::SPARSE | AttributeFlags::COMPRESSED).bits()) != 0;
+            && (header.flags.get() & (AttributeFlags::SPARSE | AttributeFlags::COMPRESSED).bits())
+                != 0;
 
         let header_len = if extended_non_resident {
             72
@@ -623,12 +681,12 @@ impl<'a> NtfsAttribute<'a> {
         if header.non_resident == 0 {
             let mut res =
                 resident.ok_or(RimIOError::Invalid("Missing resident attribute header"))?;
-            res.value_offset = content_offset as u16;
+            res.value_offset = (content_offset as u16).into();
 
             let full_len = content_offset + content.len();
             let aligned_len = (full_len + 7) & !7;
-            header.length = aligned_len as u32;
-            header.name_offset = name_offset as u16;
+            header.length = (aligned_len as u32).into();
+            header.name_offset = (name_offset as u16).into();
 
             io.write_struct(offset, &header)?;
             io.write_struct(offset + 16, &res)?;
@@ -648,12 +706,12 @@ impl<'a> NtfsAttribute<'a> {
             let mut non_res =
                 non_resident.ok_or(RimIOError::Invalid("Missing non-resident attribute header"))?;
             let dr = dataruns.unwrap_or(&[]);
-            non_res.data_runs_offset = content_offset as u16;
+            non_res.data_runs_offset = (content_offset as u16).into();
 
             let full_len = content_offset + dr.len();
             let aligned_len = (full_len + 7) & !7;
-            header.length = aligned_len as u32;
-            header.name_offset = name_offset as u16;
+            header.length = (aligned_len as u32).into();
+            header.name_offset = (name_offset as u16).into();
 
             io.write_struct(offset, &header)?;
             io.write_struct(offset + 16, &non_res)?;

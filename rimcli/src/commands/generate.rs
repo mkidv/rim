@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to build disk images from declarative layout specifications.
+
 use crate::ui::badge::fs_badge;
 use crate::ui::format::{format_duration, pretty_bytes, sep_u64};
 use crate::ui::progress::create_spinner;

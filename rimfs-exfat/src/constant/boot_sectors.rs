@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Pre-compressed exFAT boot sector template.
+
 // Windows x86 boot code for extended boot sector 1
 #[rustfmt::skip]
 pub const EXFAT_EXT_BOOT_SECTOR_1: [u8; 510] = [

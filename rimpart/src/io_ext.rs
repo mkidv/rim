@@ -26,7 +26,7 @@ pub trait RimReadLbaExt: RimRead {
     #[inline]
     fn read_struct_lba<T>(&mut self, lba: u64, sector_size: u64) -> RimIOResult<T>
     where
-        T: zerocopy::FromBytes + zerocopy::KnownLayout + zerocopy::Immutable,
+        T: zerocopy::FromBytes + zerocopy::IntoBytes + zerocopy::KnownLayout + zerocopy::Immutable,
     {
         let off = lba_offset(lba, sector_size)?;
         self.read_struct::<T>(off)

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! ISO 9660 filesystem driver implementation.
+
 use crate::checker::IsoChecker;
 use crate::formatter::IsoFormatter;
 use crate::injector::IsoInjector;
@@ -14,7 +16,7 @@ use rimio::RimIO;
 pub struct Iso;
 
 impl<'a> FsFilesystem<'a> for Iso {
-    type Unit = IsoHandle;
+    type Unit = u32;
     type Meta = IsoMeta;
     type Handle = IsoHandle;
     type Formatter = IsoFormatter<'a, dyn RimIO + 'a>;

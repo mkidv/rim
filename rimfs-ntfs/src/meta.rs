@@ -5,14 +5,15 @@
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::string::String;
+use rimfs_core::bitmap::BitmapFsMeta;
 
 pub use crate::core::meta::*;
 
-use zerocopy::FromBytes;
+use rimio::RimReadStructExt;
 
 use crate::constant::*;
 use crate::core::{FsError, FsResult};
-use crate::types::NtfsBootSector;
+use crate::types::{NtfsAttributeType, NtfsBootSector};
 use crate::upcase::UpcaseFlavor;
 
 /// NTFS filesystem metadata
@@ -69,55 +70,45 @@ pub struct NtfsMeta {
     pub bitmap_lcn: u64,
 }
 
-use crate::core::bitmap::BitmapFsMeta;
-
-impl BitmapFsMeta for NtfsMeta {
-    fn bitmap_offset(&self) -> u64 {
-        self.lcn_to_offset(self.bitmap_lcn)
-    }
-
-    fn bitmap_size(&self) -> u64 {
-        self.bitmap_size_bytes
-    }
-}
-
 impl NtfsMeta {
     /// Read NTFS metadata from volume boot sector
     pub fn from_io<IO: rimio::RimRead + ?Sized>(io: &mut IO) -> FsResult<Self> {
-        let mut boot_buf = [0u8; 512];
-        io.read_at(0, &mut boot_buf).map_err(FsError::IO)?;
-
-        let boot = NtfsBootSector::read_from_bytes(&boot_buf)
-            .map_err(|_| FsError::Invalid("Failed to read NTFS boot sector"))?;
+        let boot: NtfsBootSector = io.read_struct(0).map_err(FsError::IO)?;
 
         let oem_id = boot.oem_id;
         crate::ensure!(
-            &oem_id == b"NTFS    ",
+            oem_id == NTFS_BOOT_SIGNATURE,
             FsError::Invalid("Not an NTFS volume (OEM ID mismatch)")
         );
 
-        let end_marker = boot.end_marker;
+        let end_marker = boot.end_marker.get();
         crate::ensure!(
             end_marker == 0xAA55,
             FsError::Invalid("Invalid boot sector signature")
         );
 
-        let bytes_per_sector = boot.bytes_per_sector;
+        let bytes_per_sector = boot.bytes_per_sector.get();
         let sectors_per_cluster = boot.sectors_per_cluster;
         crate::ensure!(
             bytes_per_sector > 0 && sectors_per_cluster > 0,
             FsError::Invalid("Invalid sector or cluster size")
         );
         let bytes_per_cluster = boot.bytes_per_cluster();
-        let total_sectors = boot.total_sectors;
+        let total_sectors = boot.total_sectors.get();
         let volume_size_bytes = (total_sectors + 1) * bytes_per_sector as u64;
         let total_clusters = total_sectors / sectors_per_cluster as u64;
 
         let mft_record_size = boot.mft_record_size();
         let index_record_size = boot.index_record_size();
 
-        let mft_lcn = boot.mft_lcn;
-        let mft_mirr_lcn = boot.mft_mirr_lcn;
+        crate::ensure!(
+            mft_record_size >= bytes_per_sector as u32
+                && index_record_size >= bytes_per_sector as u32,
+            FsError::Invalid("Invalid NTFS record size")
+        );
+
+        let mft_lcn = boot.mft_lcn.get();
+        let mft_mirr_lcn = boot.mft_mirr_lcn.get();
 
         let bitmap_size_bytes = total_clusters.div_ceil(8);
         let mirr_clusters = (4 * mft_record_size as u64).div_ceil(bytes_per_cluster as u64);
@@ -132,11 +123,10 @@ impl NtfsMeta {
         let mft_base = mft_lcn * bytes_per_cluster as u64;
         let mut rec_buf = alloc::vec![0u8; mft_record_size as usize];
 
-        // Read Record 0 ($MFT) to find allocated size of $MFT
         if io.read_at(mft_base, &mut rec_buf).is_ok()
             && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
             && let Ok(view0) = crate::view::mft_view::MftRecordView::new(&rec_buf)
-            && let Ok(Some(data_attr)) = view0.find(crate::constant::ATTR_DATA)
+            && let Ok(Some(data_attr)) = view0.find(NtfsAttributeType::Data)
             && let Ok(crate::view::attr_view::AttrView::NonResident { allocated_size, .. }) =
                 data_attr.as_view()
         {
@@ -146,13 +136,12 @@ impl NtfsMeta {
             }
         }
 
-        // Read Record 2 ($LogFile) to find actual logfile_lcn
         if io
             .read_at(mft_base + 2 * mft_record_size as u64, &mut rec_buf)
             .is_ok()
             && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
             && let Ok(view2) = crate::view::mft_view::MftRecordView::new(&rec_buf)
-            && let Ok(Some(data_attr)) = view2.find(crate::constant::ATTR_DATA)
+            && let Ok(Some(data_attr)) = view2.find(NtfsAttributeType::Data)
             && let Ok(crate::view::attr_view::AttrView::NonResident { runlist, .. }) =
                 data_attr.as_view()
             && let Some(lcn) = runlist.iter().find_map(|r| r.lcn)
@@ -160,13 +149,12 @@ impl NtfsMeta {
             logfile_lcn = lcn;
         }
 
-        // Read Record 6 ($Bitmap) to find actual bitmap_lcn
         if io
             .read_at(mft_base + 6 * mft_record_size as u64, &mut rec_buf)
             .is_ok()
             && crate::utils::decode_usa_fixup(&mut rec_buf, bytes_per_sector as usize)
             && let Ok(view6) = crate::view::mft_view::MftRecordView::new(&rec_buf)
-            && let Ok(Some(data_attr)) = view6.find(crate::constant::ATTR_DATA)
+            && let Ok(Some(data_attr)) = view6.find(NtfsAttributeType::Data)
             && let Ok(crate::view::attr_view::AttrView::NonResident { runlist, .. }) =
                 data_attr.as_view()
             && let Some(lcn) = runlist.iter().find_map(|r| r.lcn)
@@ -177,7 +165,7 @@ impl NtfsMeta {
         Ok(Self {
             volume_label: [0u16; 128],
             volume_label_len: 0,
-            volume_serial: boot.volume_serial,
+            volume_serial: boot.volume_serial.get(),
             bytes_per_sector,
             sectors_per_cluster,
             bytes_per_cluster,
@@ -245,7 +233,6 @@ impl NtfsMeta {
         // Total clusters covers only the active volume area
         let total_clusters = total_sectors / sectors_per_cluster as u64;
 
-        // Parse volume label
         let mut label_buf = [0u16; 128];
         let mut label_len = 0u8;
         if let Some(label) = volume_label {
@@ -274,7 +261,6 @@ impl NtfsMeta {
         // LogFile starts immediately after MFTMirr clusters
         let logfile_lcn = mft_mirr_lcn + mirr_clusters;
 
-        // Calculate system file range to avoid MFT overlap
         let log_clusters = (2 * 1024 * 1024)
             .min(volume_size_bytes / 10)
             .div_ceil(bytes_per_cluster as u64);
@@ -282,10 +268,8 @@ impl NtfsMeta {
         let upcase_clusters = (128 * 1024u64).div_ceil(bytes_per_cluster as u64);
 
         let bitmap_lcn = logfile_lcn + log_clusters;
-        // Skip system files
         let first_system_data = bitmap_lcn + bitmap_clusters + upcase_clusters;
 
-        // Calculate MFT position
         let mft_lcn = calculate_mft_lcn(total_clusters, first_system_data);
 
         Ok(Self {
@@ -390,8 +374,8 @@ impl NtfsMeta {
 }
 
 impl FsMeta<u64> for NtfsMeta {
-    fn unit_size(&self) -> usize {
-        self.bytes_per_cluster as usize
+    fn unit_size(&self) -> u64 {
+        self.bytes_per_cluster as u64
     }
 
     fn root_unit(&self) -> u64 {
@@ -400,8 +384,8 @@ impl FsMeta<u64> for NtfsMeta {
         self.mft_lcn
     }
 
-    fn total_units(&self) -> usize {
-        self.total_clusters as usize
+    fn total_units(&self) -> u64 {
+        self.total_clusters
     }
 
     fn size_bytes(&self) -> u64 {
@@ -429,6 +413,23 @@ impl FsMeta<u64> for NtfsMeta {
     }
 }
 
+impl BitmapFsMeta for NtfsMeta {
+    #[inline]
+    fn bitmap_offset(&self) -> u64 {
+        self.lcn_to_offset(self.bitmap_lcn)
+    }
+
+    #[inline]
+    fn bitmap_size(&self) -> u64 {
+        self.bitmap_size_bytes
+    }
+
+    #[inline]
+    fn bitmap_valid_bits(&self) -> u64 {
+        self.total_units()
+    }
+}
+
 /// Determines optimal cluster size based on volume size
 fn determine_cluster_size(size_bytes: u64) -> u32 {
     const GB: u64 = 1024 * 1024 * 1024;
@@ -438,10 +439,10 @@ fn determine_cluster_size(size_bytes: u64) -> u32 {
     // volumes. Smaller clusters make the fixed 16-sector $Boot file collide
     // with early system extents unless every layout calculation is adjusted.
     match size_bytes {
-        0..=DEFAULT_CLUSTER_LIMIT => 4096,
-        _ if size_bytes <= 32 * GB => 8192, // 16 GB - 32 GB: 8 KB
-        _ if size_bytes <= 64 * GB => 16384, // 32 GB - 64 GB: 16 KB
-        _ if size_bytes <= 128 * GB => 32768, // 64 GB - 128 GB: 32 KB
+        0..=DEFAULT_CLUSTER_LIMIT => NTFS_DEFAULT_CLUSTER_SIZE,
+        _ if size_bytes <= 32 * GB => 2 * NTFS_DEFAULT_CLUSTER_SIZE, // 16 GB - 32 GB: 8 KB
+        _ if size_bytes <= 64 * GB => 4 * NTFS_DEFAULT_CLUSTER_SIZE, // 32 GB - 64 GB: 16 KB
+        _ if size_bytes <= 128 * GB => 8 * NTFS_DEFAULT_CLUSTER_SIZE, // 64 GB - 128 GB: 32 KB
         _ => 65536,                         // > 128 GB: 64 KB
     }
 }
@@ -467,6 +468,23 @@ fn derive_volume_serial(label: &str, size_bytes: u64, cluster_size: u32) -> u64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_record_encoding_is_rejected_before_mft_read() {
+        use zerocopy::IntoBytes;
+        let meta = NtfsMeta::new(100 * 1024 * 1024, None).unwrap();
+        for encoding in [0, -32, -128] {
+            let mut boot = NtfsBootSector::new_from_meta(&meta);
+            boot.clusters_per_mft_record = encoding;
+            let mut bytes = [0; 512];
+            bytes.copy_from_slice(boot.as_bytes());
+            let mut io = rimio::MemRimIO::new(&mut bytes);
+            assert!(matches!(
+                NtfsMeta::from_io(&mut io),
+                Err(FsError::Invalid("Invalid NTFS record size"))
+            ));
+        }
+    }
 
     #[test]
     fn test_meta_creation() {

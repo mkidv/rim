@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Disk image container parsing and serialization errors.
+
 use core::fmt;
 
 use rimio::errors::RimIOError;

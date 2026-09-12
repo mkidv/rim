@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Execution report summarizing transferred bytes, files, and skipped items.
+
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

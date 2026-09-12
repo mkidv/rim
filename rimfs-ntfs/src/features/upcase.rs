@@ -10,15 +10,15 @@ use alloc::vec::Vec;
 use rimio::prelude::*;
 
 use crate::allocator::{NtfsAllocator, NtfsHandle};
+use crate::attr::NtfsFileAttributes;
 use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
-use crate::flags::NtfsFileAttributes;
 use crate::meta::NtfsMeta;
-use crate::mft;
-use crate::system::upcase::UpcaseHandle;
+use crate::upcase::UpcaseHandle;
 use crate::types::{NtfsAttribute, NtfsAttributeContent, NtfsMftRecord};
-use crate::utils::{build_mft_reference, encode_runs_to_dataruns};
+use crate::mft::build_mft_reference;
+use crate::utils::encode_runs_to_dataruns;
 
 #[derive(Default)]
 pub struct NtfsUpCaseFeature {
@@ -112,10 +112,8 @@ impl<'a, IO: RimIO + ?Sized> FsSystemFeature<NtfsMeta, NtfsAllocator<'a>, IO>
         let dataruns = encode_runs_to_dataruns(&handle.runs);
         let record = Self::build_record(meta, dataruns, size, SECURITY_ID_SYSTEM);
 
-        let raw = record
-            .to_raw_buffer(meta)
-            .map_err(|_| crate::core::errors::FsFeatureError::Other("MFT serialization failed"))?;
-        mft::write_record(io, meta, MFT_RECORD_UPCASE, &raw)
+        record
+            .write_to_mft(io, meta, MFT_RECORD_UPCASE)
             .map_err(crate::core::errors::FsFeatureError::IO)?;
 
         Ok(())

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Copy progress tracking events and lifecycle callbacks.
+
 use super::report::CopyWarning;
 
 /// Lifecycle events emitted during a copy operation.

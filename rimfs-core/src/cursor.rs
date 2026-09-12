@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Zero-allocation cursor for sequential block reading and writing.
+
 use crate::errors::FsCursorError;
 use crate::{FsCursorResult, fat::*};
 use rimio::prelude::*;
@@ -19,7 +21,7 @@ where
 {
     meta: &'a M,
     current: Option<u32>,
-    seen: usize,
+    seen: u64,
     allow_system: bool,
     driver: FatDriver<'a, M>,
 }
@@ -68,13 +70,21 @@ where
         IO: RimRead + ?Sized,
     {
         let c = self.current?;
+
+        // Validate before touching the FAT.
+        if !self.in_bounds(c) {
+            self.current = None;
+            return Some(Err(FsCursorError::InvalidCluster(c)));
+        }
+
         self.seen += 1;
+
         if self.seen > self.meta.total_units() {
             self.current = None;
             return Some(Err(FsCursorError::LoopDetected));
         }
 
-        let next = match self.driver.get_ro(io, c) {
+        let next = match self.driver.read_entry_ro(io, c) {
             Ok(n) => n,
             Err(e) => {
                 self.current = None;
@@ -82,20 +92,15 @@ where
             }
         };
 
-        // Check end-of-chain & bounds
-        if !self.in_bounds(c) {
-            self.current = None;
-            return Some(Err(FsCursorError::InvalidCluster(c)));
-        }
         if self.meta.is_eoc(next) {
             self.current = None;
+        } else if !self.in_bounds(next) {
+            self.current = None;
+            return Some(Err(FsCursorError::InvalidCluster(next)));
         } else {
-            if !self.in_bounds(next) {
-                self.current = None;
-                return Some(Err(FsCursorError::InvalidCluster(next)));
-            }
             self.current = Some(next);
         }
+
         Some(Ok(c))
     }
 
@@ -306,25 +311,6 @@ impl<'a, M: FatFsMeta> Iterator for LinearCursor<'a, M> {
 }
 
 impl<'a, M: FatFsMeta> LinearCursor<'a, M> {
-    /// Constructs from a cluster count
-    #[inline]
-    pub fn from_clusters_safe(meta: &'a M, start: u32, clusters: u32) -> Self {
-        Self {
-            meta,
-            next: start,
-            end_excl: start.saturating_add(clusters),
-            allow_system: false,
-        }
-    }
-
-    /// Constructs from a logical length in bytes
-    #[inline]
-    pub fn from_len_bytes_safe(meta: &'a M, start: u32, len_bytes: u64) -> Self {
-        let cs = meta.unit_size() as u64;
-        let clusters = len_bytes.div_ceil(cs); // ceil
-        Self::from_clusters_safe(meta, start, clusters as u32)
-    }
-
     #[inline]
     pub fn from_clusters(meta: &'a M, start: u32, clusters: u32) -> Self {
         Self {
@@ -337,10 +323,13 @@ impl<'a, M: FatFsMeta> LinearCursor<'a, M> {
 
     /// Constructs from a logical length in bytes
     #[inline]
-    pub fn from_len_bytes(meta: &'a M, start: u32, len_bytes: u64) -> Self {
-        let cs = meta.unit_size() as u64;
-        let clusters = len_bytes.div_ceil(cs); // ceil
-        Self::from_clusters(meta, start, clusters as u32)
+    pub fn from_len_bytes(meta: &'a M, start: u32, len_bytes: u64) -> FsCursorResult<Self> {
+        let clusters = len_bytes.div_ceil(meta.unit_size());
+
+        let clusters =
+            u32::try_from(clusters).map_err(|_| FsCursorError::Other("cluster_count_overflow"))?;
+
+        Ok(Self::from_clusters(meta, start, clusters))
     }
 
     #[inline]
@@ -358,7 +347,7 @@ impl<'a, M: FatFsMeta> LinearCursor<'a, M> {
     /// `IO` is passed to allow direct I/O batching in the callback.
     pub fn for_each_run<IO, F>(&mut self, io: &mut IO, mut f: F) -> FsCursorResult<()>
     where
-        IO: RimIO + ?Sized,
+        IO: RimRead + ?Sized,
         F: FnMut(&mut IO, u32, u32) -> FsCursorResult<()>,
     {
         // Since it's linear, the entire range is a single run if size > 0.
@@ -384,34 +373,45 @@ impl<'a, M: FatFsMeta> LinearCursor<'a, M> {
 
     /// Reads stream directly into `dst`, batching by runs.
     /// `total_len` = logical bytes to read (truncates last run if needed).
-    pub fn read_into<IO: RimIO + ?Sized>(
+    pub fn read_into<IO: RimRead + ?Sized>(
         &mut self,
         io: &mut IO,
         total_len: usize,
         dst: &mut [u8],
     ) -> FsCursorResult<()> {
-        assert!(dst.len() >= total_len);
-        let cs = self.meta.unit_size();
+        if dst.len() < total_len {
+            return Err(FsCursorError::Other("buffer_too_small"));
+        }
+
+        let cs = usize::try_from(self.meta.unit_size())
+            .map_err(|_| FsCursorError::Other("unit_size_too_large"))?;
+
         let mut written = 0usize;
 
         self.for_each_run(io, |io, run_start, run_len| {
             if written >= total_len {
                 return Ok(());
             }
-            // Size in bytes of this run
-            let run_bytes = (run_len as usize) * cs;
-            let to_copy = core::cmp::min(run_bytes, total_len - written);
-            if to_copy > 0 {
+
+            let run_bytes = (run_len as usize)
+                .checked_mul(cs)
+                .ok_or(FsCursorError::Other("run_size_overflow"))?;
+
+            let to_copy = run_bytes.min(total_len - written);
+
+            if to_copy != 0 {
                 let off = self.meta.unit_offset(run_start);
                 io.read_at(off, &mut dst[written..written + to_copy])?;
                 written += to_copy;
             }
+
             Ok(())
         })?;
 
-        if written < total_len {
+        if written != total_len {
             return Err(FsCursorError::Other("linear_short_read"));
         }
+
         Ok(())
     }
 }

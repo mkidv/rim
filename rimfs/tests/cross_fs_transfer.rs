@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use rimfs::core::checker::{FsChecker, VerifyReport};
 use rimfs::core::formatter::FsFormatter;
 use rimfs::core::injector::FsTreeInjector;
@@ -694,4 +696,25 @@ fn assert_mode_bits(actual: Option<u32>, expected: u32, kind: &str, dest_engine:
         Some(expected),
         "Ext->{dest_engine:?}: {kind} mode bits were not preserved"
     );
+}
+
+#[test]
+fn archive_directory_kind_contract() {
+    for engine in [Engine::Tar, Engine::Zip, Engine::Iso] {
+        let tree = FsNode::new_container(vec![
+            FsNode::Dir {
+                name: "empty".into(),
+                children: vec![],
+                attr: FileAttributes::new_dir(),
+            },
+            FsNode::new_file("file.txt", b"payload".to_vec()),
+        ]);
+        let mut image = build_image(engine, tree);
+        with_resolver(&mut image, |resolver| {
+            assert!(resolver.exists("empty"), "{engine:?}");
+            assert!(resolver.read_dir("empty").unwrap().is_empty(), "{engine:?}");
+            assert!(resolver.read_dir("file.txt").is_err(), "{engine:?}");
+            assert!(resolver.read_dir("absent").is_err(), "{engine:?}");
+        });
+    }
 }

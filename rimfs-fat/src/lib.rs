@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! rimfs-fat: FAT12, FAT16, FAT32, and RimFAT filesystem driver.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
@@ -9,18 +13,15 @@ pub use rimfs_core::{bail, ensure};
 
 mod allocator;
 mod attr;
-#[allow(dead_code)]
-mod boot_code;
 mod checker;
-#[allow(dead_code)]
 pub(crate) mod constant;
+pub mod features;
 mod filesystem;
 mod formatter;
 mod injector;
 mod meta;
 mod resolver;
 pub mod types;
-#[allow(dead_code)]
 pub(crate) mod utils;
 
 pub mod traits {
@@ -48,3 +49,7 @@ pub use prelude::*;
 #[cfg(feature = "std")]
 pub use rimfs_core::StdResolver;
 pub use rimfs_core::utils::{path_utils::*, volume::*};
+
+#[cfg(test)]
+mod tests;
+

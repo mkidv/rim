@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Linux-native storage management and formatting scripts.
+
 use rimgen::LayoutConfig;
 use std::path::Path;
 use std::process::Command;

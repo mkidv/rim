@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Generic filesystem consistency verification framework.
+
 mod types;
 
 pub use types::{

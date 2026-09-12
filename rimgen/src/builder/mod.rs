@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Disk image synthesis and build pipeline engine.
+
 pub mod gpt;
 pub mod inject;
 
@@ -85,7 +87,7 @@ pub fn build_on_io_with_options(
     build_on_io_with_options_and_events(layout, io, options, |_| {})
 }
 
-/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+/// Builds a layout configuration onto a `RimIO` stream with default options.
 #[cfg(feature = "std")]
 pub fn build_config_on_io(layout: &LayoutConfig, io: &mut dyn RimIO) -> GenResult<BuildReport> {
     build_config_on_io_with_options_and_events(
@@ -98,7 +100,7 @@ pub fn build_config_on_io(layout: &LayoutConfig, io: &mut dyn RimIO) -> GenResul
     )
 }
 
-/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+/// Builds a layout configuration onto a `RimIO` stream with custom options.
 #[cfg(feature = "std")]
 pub fn build_config_on_io_with_options(
     layout: &LayoutConfig,
@@ -108,7 +110,7 @@ pub fn build_config_on_io_with_options(
     build_config_on_io_with_options_and_events(layout, io, options, |_| {})
 }
 
-/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+/// Builds a layout configuration onto a `RimIO` stream, reporting progress events via callback.
 #[cfg(feature = "std")]
 pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     layout: &LayoutConfig,
@@ -125,7 +127,7 @@ pub fn build_config_on_io_with_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     )
 }
 
-/// Resolve a layout config with host files and build it onto an open `RimIO` stream.
+/// Builds a layout configuration onto a `RimIO` stream with custom options and event reporting.
 #[cfg(feature = "std")]
 pub fn build_config_on_io_with_options_and_events<F: for<'a> FnMut(BuildEvent<'a>)>(
     layout: &LayoutConfig,

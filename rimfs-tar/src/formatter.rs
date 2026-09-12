@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Empty TAR archive initialization.
+
 use crate::meta::TarMeta;
 use rimfs_core::formatter::{FsFormatter, FsFormatterResult};
 use rimio::RimIO;
@@ -18,8 +20,7 @@ impl<'a, IO: RimIO + ?Sized> TarFormatter<'a, IO> {
 
 impl<'a, IO: RimIO + ?Sized> FsFormatter for TarFormatter<'a, IO> {
     fn format(&mut self, _full_format: bool) -> FsFormatterResult {
-        let trailer = [0u8; 1024];
-        self.io.write_at(0, &trailer)?;
+        self.io.zero_at(0, 1024)?;
         self.io.flush()?;
         Ok(())
     }

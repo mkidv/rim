@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! ext2/3/4 filesystem integrity and consistency checker.
+
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use ::alloc::vec;
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -9,9 +12,9 @@ use crate::utils::is_sparse_super_group;
 use crate::{constant::*, meta::ExtMeta, types::GroupLayout};
 mod walker;
 
-use rimio::RimIO;
-
-use core::convert::TryInto;
+use crate::types::{ExtDirEntryHeader, ExtExtentHeader, ExtInodeHeader, ExtSuperblock};
+use rimio::{RimIO, RimReadStructExt};
+use zerocopy::FromBytes;
 
 #[derive(Clone, Debug)]
 pub struct ExtCheckerOptions {
@@ -84,7 +87,6 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
         _opt: &Self::Options,
         rep: &mut VerifyReport,
     ) -> FsCheckerResult<()> {
-        // Check Block Group Descriptor Table
         check_bgdt(self.io, self.meta, rep)?;
         Ok(())
     }
@@ -120,14 +122,96 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
             ),
         ));
 
+        let mut total_calculated_free_blocks = 0u64;
+        let mut total_declared_free_blocks = 0u64;
+        let mut all_block_bitmaps_ok = true;
+
+        let mut total_calculated_free_inodes = 0u64;
+        let mut total_declared_free_inodes = 0u64;
+        let mut all_inode_bitmaps_ok = true;
+
         for group in 0..self.meta.group_count {
             if opt.check_block_bitmaps {
-                check_block_bitmap(self.io, self.meta, group, rep)?;
-                // Future improvement: Compare walker.used_blocks_bitmap vs implementation
+                match check_block_bitmap(self.io, self.meta, group, rep)? {
+                    Some((calc, decl)) => {
+                        total_calculated_free_blocks += calc as u64;
+                        total_declared_free_blocks += decl as u64;
+                    }
+                    None => {
+                        all_block_bitmaps_ok = false;
+                    }
+                }
             }
             if opt.check_inode_bitmaps {
-                check_inode_bitmap(self.io, self.meta, group, rep)?;
-                // Future improvement: Compare walker.used_inodes_bitmap vs implementation
+                match check_inode_bitmap(self.io, self.meta, group, rep)? {
+                    Some((calc, decl)) => {
+                        total_calculated_free_inodes += calc as u64;
+                        total_declared_free_inodes += decl as u64;
+                    }
+                    None => {
+                        all_inode_bitmaps_ok = false;
+                    }
+                }
+            }
+        }
+
+        if (opt.check_block_bitmaps && all_block_bitmaps_ok)
+            || (opt.check_inode_bitmaps && all_inode_bitmaps_ok)
+        {
+            let sb: Result<ExtSuperblock, _> = self.io.read_struct(EXT_SUPERBLOCK_OFFSET);
+            match sb {
+                Ok(sb) => {
+                    if opt.check_block_bitmaps && all_block_bitmaps_ok {
+                        let sb_free_blocks = if self.meta.features.has_64bit {
+                            (sb.s_free_blocks_count_lo.get() as u64)
+                                | ((sb.s_free_blocks_count_hi.get() as u64) << 32)
+                        } else {
+                            sb.s_free_blocks_count_lo.get() as u64
+                        };
+                        if total_calculated_free_blocks != sb_free_blocks {
+                            rep.push(Finding::err(
+                                "SB.FREE_BLOCKS",
+                                format!(
+                                    "Superblock free blocks mismatch: declared {sb_free_blocks}, calculated {total_calculated_free_blocks}"
+                                ),
+                            ));
+                        }
+                        if total_declared_free_blocks != sb_free_blocks {
+                            rep.push(Finding::err(
+                                "SB.BGDT_FREE_BLOCKS",
+                                format!(
+                                    "Superblock free blocks mismatch: declared {sb_free_blocks}, sum of BGDT descriptors {total_declared_free_blocks}"
+                                ),
+                            ));
+                        }
+                    }
+
+                    if opt.check_inode_bitmaps && all_inode_bitmaps_ok {
+                        let sb_free_inodes = sb.s_free_inodes_count.get() as u64;
+                        if total_calculated_free_inodes != sb_free_inodes {
+                            rep.push(Finding::err(
+                                "SB.FREE_INODES",
+                                format!(
+                                    "Superblock free inodes mismatch: declared {sb_free_inodes}, calculated {total_calculated_free_inodes}"
+                                ),
+                            ));
+                        }
+                        if total_declared_free_inodes != sb_free_inodes {
+                            rep.push(Finding::err(
+                                "SB.BGDT_FREE_INODES",
+                                format!(
+                                    "Superblock free inodes mismatch: declared {sb_free_inodes}, sum of BGDT descriptors {total_declared_free_inodes}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    rep.push(Finding::err(
+                        "SB.IO",
+                        format!("Failed to read superblock for counter verification: {e:?}"),
+                    ));
+                }
             }
         }
         Ok(())
@@ -150,10 +234,6 @@ impl<'a, IO: RimIO + ?Sized> FsChecker for ExtChecker<'a, IO> {
     }
 }
 
-/* =========================================================================
-   Superblock Checks
-========================================================================= */
-
 fn check_superblock<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExtMeta,
@@ -161,12 +241,9 @@ fn check_superblock<IO: RimIO + ?Sized>(
     rep: &mut VerifyReport,
 ) -> FsCheckerResult<()> {
     let sb_offset = EXT_SUPERBLOCK_OFFSET;
-    let mut sb_buf = [0u8; EXT_SUPERBLOCK_SIZE];
-    io.read_at(sb_offset, &mut sb_buf)
-        .map_err(FsCheckerError::IO)?;
+    let sb: ExtSuperblock = io.read_struct(sb_offset).map_err(FsCheckerError::IO)?;
 
-    // Check magic number
-    let magic = u16::from_le_bytes(sb_buf[0x38..0x3A].try_into().unwrap());
+    let magic = sb.s_magic.get();
     if magic != EXT_SUPERBLOCK_MAGIC {
         rep.push(Finding::err(
             "SB.MAGIC",
@@ -178,9 +255,8 @@ fn check_superblock<IO: RimIO + ?Sized>(
     }
     rep.push(Finding::info("SB.MAGIC", "Superblock magic OK"));
 
-    // Check block count
-    let block_count_lo = u32::from_le_bytes(sb_buf[0x04..0x08].try_into().unwrap());
-    let block_count_hi = u32::from_le_bytes(sb_buf[0x150..0x154].try_into().unwrap());
+    let block_count_lo = sb.s_blocks_count_lo.get();
+    let block_count_hi = sb.s_blocks_count_hi.get();
     let block_count = block_count_lo as u64 | ((block_count_hi as u64) << 32);
     if block_count != meta.block_count {
         rep.push(Finding::warn(
@@ -197,8 +273,7 @@ fn check_superblock<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check inode count
-    let inode_count = u32::from_le_bytes(sb_buf[0x00..0x04].try_into().unwrap());
+    let inode_count = sb.s_inodes_count.get();
     if inode_count as u64 != meta.inode_count {
         rep.push(Finding::warn(
             "SB.INODES",
@@ -214,20 +289,17 @@ fn check_superblock<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check free blocks and inodes
-    let free_blocks = u32::from_le_bytes(sb_buf[0x0C..0x10].try_into().unwrap());
-    let free_inodes = u32::from_le_bytes(sb_buf[0x10..0x14].try_into().unwrap());
+    let free_blocks = sb.s_free_blocks_count_lo.get();
+    let free_inodes = sb.s_free_inodes_count.get();
     rep.push(Finding::info(
         "SB.FREE",
         format!("Free: {free_blocks} blocks, {free_inodes} inodes"),
     ));
 
-    // Check filesystem features
-    let feature_compat = u32::from_le_bytes(sb_buf[0x5C..0x60].try_into().unwrap());
-    let feature_incompat = u32::from_le_bytes(sb_buf[0x60..0x64].try_into().unwrap());
-    let feature_ro_compat = u32::from_le_bytes(sb_buf[0x64..0x68].try_into().unwrap());
+    let feature_compat = sb.s_feature_compat.get();
+    let feature_incompat = sb.s_feature_incompat.get();
+    let feature_ro_compat = sb.s_feature_ro_compat.get();
 
-    // Verify extents feature is enabled
     if feature_incompat & EXT_FEATURE_INCOMPAT_EXTENTS != 0 {
         rep.push(Finding::info("SB.FEAT", "Extents feature enabled"));
     } else {
@@ -244,9 +316,14 @@ fn check_superblock<IO: RimIO + ?Sized>(
         ),
     ));
 
-    // Check block size
-    let log_block_size = u32::from_le_bytes(sb_buf[0x18..0x1C].try_into().unwrap());
-    let actual_block_size = 1024u32 << log_block_size;
+    let log_block_size = sb.s_log_block_size.get();
+    let Some(actual_block_size) = 1024u32.checked_shl(log_block_size) else {
+        rep.push(Finding::err(
+            "SB.BLKSZ",
+            "Invalid superblock block-size shift",
+        ));
+        return Ok(());
+    };
     if actual_block_size != meta.block_size {
         rep.push(Finding::err(
             "SB.BLKSZ",
@@ -262,8 +339,7 @@ fn check_superblock<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check blocks per group
-    let blocks_per_group = u32::from_le_bytes(sb_buf[0x20..0x24].try_into().unwrap());
+    let blocks_per_group = sb.s_blocks_per_group.get();
     if blocks_per_group != meta.blocks_per_group {
         rep.push(Finding::warn(
             "SB.BPG",
@@ -274,8 +350,7 @@ fn check_superblock<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check inodes per group
-    let inodes_per_group = u32::from_le_bytes(sb_buf[0x28..0x2C].try_into().unwrap());
+    let inodes_per_group = sb.s_inodes_per_group.get();
     if inodes_per_group != meta.inodes_per_group {
         rep.push(Finding::warn(
             "SB.IPG",
@@ -299,11 +374,9 @@ fn check_superblock_backup<IO: RimIO + ?Sized>(
         meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
     let sb_offset = group_start_block * meta.block_size as u64;
 
-    let mut sb_buf = [0u8; EXT_SUPERBLOCK_SIZE];
-    io.read_at(sb_offset, &mut sb_buf)
-        .map_err(FsCheckerError::IO)?;
+    let sb: ExtSuperblock = io.read_struct(sb_offset).map_err(FsCheckerError::IO)?;
 
-    let magic = u16::from_le_bytes(sb_buf[0x38..0x3A].try_into().unwrap());
+    let magic = sb.s_magic.get();
     if magic != EXT_SUPERBLOCK_MAGIC {
         rep.push(Finding::warn(
             "SB.BACKUP",
@@ -319,42 +392,25 @@ fn check_superblock_backup<IO: RimIO + ?Sized>(
     Ok(())
 }
 
-/* =========================================================================
-   BGDT Checks
-========================================================================= */
-
 fn check_bgdt<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExtMeta,
     rep: &mut VerifyReport,
 ) -> FsCheckerResult<()> {
-    let bgdt_offset = (meta.first_data_block + 1) as u64 * meta.block_size as u64;
-
     for group in 0..meta.group_count {
-        let entry_offset = bgdt_offset + (group as u64 * meta.bgdt_entry_size as u64);
-
-        let mut entry = [0u8; 64];
-        io.read_at(entry_offset, &mut entry)
-            .map_err(FsCheckerError::IO)?;
-
-        let block_bitmap_lo = u32::from_le_bytes(entry[0..4].try_into().unwrap());
-        let inode_bitmap_lo = u32::from_le_bytes(entry[4..8].try_into().unwrap());
-        let inode_table_lo = u32::from_le_bytes(entry[8..12].try_into().unwrap());
-        let free_blocks = u16::from_le_bytes(entry[12..14].try_into().unwrap());
-        let free_inodes = u16::from_le_bytes(entry[14..16].try_into().unwrap());
-        let used_dirs = u16::from_le_bytes(entry[16..18].try_into().unwrap());
-
-        let block_bitmap_hi = u32::from_le_bytes(entry[32..36].try_into().unwrap());
-        let inode_bitmap_hi = u32::from_le_bytes(entry[36..40].try_into().unwrap());
-        let inode_table_hi = u32::from_le_bytes(entry[40..44].try_into().unwrap());
-
-        let block_bitmap = block_bitmap_lo as u64 | ((block_bitmap_hi as u64) << 32);
-        let inode_bitmap = inode_bitmap_lo as u64 | ((inode_bitmap_hi as u64) << 32);
-        let inode_table = inode_table_lo as u64 | ((inode_table_hi as u64) << 32);
+        let entry =
+            crate::utils::read_group_descriptor(io, meta, group).map_err(FsCheckerError::IO)?;
+        let block_bitmap = entry.block_bitmap(meta.features.has_64bit);
+        let inode_bitmap = entry.inode_bitmap(meta.features.has_64bit);
+        let inode_table = entry.inode_table(meta.features.has_64bit);
+        let free_blocks = entry.free_blocks_ext(meta.features.has_64bit);
+        let free_inodes = entry.free_inodes_ext(meta.features.has_64bit);
+        let used_dirs = entry.bg_used_dirs_count_lo.get();
 
         let group_start =
             meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
-        let group_end = group_start + meta.blocks_per_group as u64;
+        let group_blocks = meta.group_total_blocks(group as usize) as u64;
+        let group_end = group_start + group_blocks;
 
         let mut errors = Vec::new();
 
@@ -397,10 +453,6 @@ fn check_bgdt<IO: RimIO + ?Sized>(
     Ok(())
 }
 
-/* =========================================================================
-   Root Inode Check
-========================================================================= */
-
 fn check_root_inode<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExtMeta,
@@ -421,8 +473,10 @@ fn check_root_inode<IO: RimIO + ?Sized>(
     io.read_at(inode_offset, &mut inode_buf)
         .map_err(FsCheckerError::IO)?;
 
-    // Check mode (should be directory)
-    let i_mode = u16::from_le_bytes(inode_buf[0..2].try_into().unwrap());
+    let (inode, _) = ExtInodeHeader::ref_from_prefix(&inode_buf)
+        .map_err(|_| FsCheckerError::Invalid("Truncated root inode header"))?;
+
+    let i_mode = inode.i_mode.get();
     let is_dir = (i_mode & 0xF000) == 0x4000;
     if !is_dir {
         rep.push(Finding::err(
@@ -436,8 +490,7 @@ fn check_root_inode<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check links count (should be >= 2)
-    let i_links = u16::from_le_bytes(inode_buf[26..28].try_into().unwrap());
+    let i_links = inode.i_links_count.get();
     if i_links < 2 {
         rep.push(Finding::warn(
             "ROOT.LINKS",
@@ -450,13 +503,13 @@ fn check_root_inode<IO: RimIO + ?Sized>(
         ));
     }
 
-    // Check extents flag
-    let i_flags = u32::from_le_bytes(inode_buf[32..36].try_into().unwrap());
+    let i_flags = inode.i_flags.get();
     if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
         rep.push(Finding::info("ROOT.EXT", "Root inode uses extents"));
 
-        // Check extent header magic
-        let eh_magic = u16::from_le_bytes(inode_buf[40..42].try_into().unwrap());
+        let (header, _) = ExtExtentHeader::ref_from_prefix(&inode.i_block)
+            .map_err(|_| FsCheckerError::Invalid("Truncated root extent header"))?;
+        let eh_magic = header.eh_magic.get();
         if eh_magic != EXT_EXTENT_HEADER_MAGIC {
             rep.push(Finding::err(
                 "ROOT.EXT",
@@ -472,52 +525,48 @@ fn check_root_inode<IO: RimIO + ?Sized>(
 
     // Try to read root directory data
     if i_flags & EXT_INODE_FLAG_EXTENTS != 0 {
-        let eh_entries = u16::from_le_bytes(inode_buf[42..44].try_into().unwrap());
-        if eh_entries > 0 {
-            // First extent
-            let ee_block = u32::from_le_bytes(inode_buf[52..56].try_into().unwrap());
-            let ee_len = u16::from_le_bytes(inode_buf[56..58].try_into().unwrap());
-            let ee_start_lo = u32::from_le_bytes(inode_buf[60..64].try_into().unwrap());
+        let mut resolver = crate::resolver::ExtResolver::new(io, meta);
+        let extents = resolver
+            .read_extents(&inode_buf)
+            .map_err(|_| FsCheckerError::Invalid("Invalid root extent tree"))?;
+        if let Some(extent) = extents.first()
+            && extent.ee_block.get() == 0
+            && !extent.is_empty()
+            && !extent.is_uninit()
+        {
+            let root_dir_offset = extent.physical_start() * meta.block_size as u64;
+            let mut dir_buf = vec![0u8; meta.block_size as usize];
+            io.read_at(root_dir_offset, &mut dir_buf)
+                .map_err(FsCheckerError::IO)?;
 
-            if ee_block == 0 && ee_len > 0 {
-                // Try to read root dir block
-                let root_dir_offset = ee_start_lo as u64 * meta.block_size as u64;
-                let mut dir_buf = vec![0u8; meta.block_size as usize];
-                io.read_at(root_dir_offset, &mut dir_buf)
-                    .map_err(FsCheckerError::IO)?;
-
-                // Check first entry (should be ".")
-                let first_inode = u32::from_le_bytes(dir_buf[0..4].try_into().unwrap());
-                let first_name_len = dir_buf[6] as usize;
-                if first_inode == root_inode && first_name_len == 1 && dir_buf[8] == b'.' {
-                    rep.push(Finding::info("ROOT.DOT", "Root directory '.' entry OK"));
-                } else {
-                    rep.push(Finding::warn(
-                        "ROOT.DOT",
-                        "Root directory first entry is not '.'",
-                    ));
-                }
-
-                // Count entries
-                let mut pos = 0usize;
-                let mut entry_count = 0;
-                while pos + 8 <= dir_buf.len() {
-                    let rec_len =
-                        u16::from_le_bytes(dir_buf[pos + 4..pos + 6].try_into().unwrap()) as usize;
-                    let entry_inode = u32::from_le_bytes(dir_buf[pos..pos + 4].try_into().unwrap());
-                    if rec_len == 0 || rec_len > dir_buf.len() - pos {
-                        break;
-                    }
-                    if entry_inode != 0 {
-                        entry_count += 1;
-                    }
-                    pos += rec_len;
-                }
-                rep.push(Finding::info(
-                    "ROOT.ENTRIES",
-                    format!("Root directory has {entry_count} entries"),
+            let first = ExtDirEntryHeader::from_record(&dir_buf);
+            if first.is_some_and(|(h, name)| h.inode.get() == root_inode && name == b".") {
+                rep.push(Finding::info("ROOT.DOT", "Root directory '.' entry OK"));
+            } else {
+                rep.push(Finding::warn(
+                    "ROOT.DOT",
+                    "Root directory first entry is not '.'",
                 ));
             }
+
+            // Count entries
+            let mut pos = 0usize;
+            let mut entry_count = 0;
+            while pos + 8 <= dir_buf.len() {
+                let Some((header, _)) = ExtDirEntryHeader::from_record(&dir_buf[pos..]) else {
+                    break;
+                };
+                let rec_len = header.rec_len.get() as usize;
+                let entry_inode = header.inode.get();
+                if entry_inode != 0 {
+                    entry_count += 1;
+                }
+                pos += rec_len;
+            }
+            rep.push(Finding::info(
+                "ROOT.ENTRIES",
+                format!("Root directory has {entry_count} entries"),
+            ));
         }
     }
 
@@ -526,83 +575,104 @@ fn check_root_inode<IO: RimIO + ?Sized>(
     Ok(())
 }
 
-/* =========================================================================
-   Bitmap Checks
-========================================================================= */
-
 fn check_block_bitmap<IO: RimIO + ?Sized>(
     io: &mut IO,
     meta: &ExtMeta,
     group: u32,
     rep: &mut VerifyReport,
-) -> FsCheckerResult<()> {
-    let layout = GroupLayout::compute(meta, group);
-    let block_bitmap_offset = layout.block_bitmap_block * meta.block_size as u64;
+) -> FsCheckerResult<Option<(u32, u32)>> {
+    let entry = match crate::utils::read_group_descriptor(io, meta, group) {
+        Ok(entry) => entry,
+        Err(e) => {
+            rep.push(Finding::err(
+                "BGDT.IO",
+                format!("Group {group}: failed to read group descriptor: {e:?}"),
+            ));
+            return Ok(None);
+        }
+    };
 
-    let bitmap_size = (meta.blocks_per_group / 8) as usize;
-    let mut bitmap = vec![0u8; bitmap_size.min(meta.block_size as usize)];
-    io.read_at(block_bitmap_offset, &mut bitmap)
-        .map_err(FsCheckerError::IO)?;
+    let block_bitmap = entry.block_bitmap(meta.features.has_64bit);
+    let declared_free = entry.free_blocks_ext(meta.features.has_64bit);
 
-    // Expected used bits for metadata
-    let mut expected_used = alloc::vec::Vec::new();
+    let group_start = meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
+    let group_blocks = meta.group_total_blocks(group as usize) as u64;
+    let group_end = group_start + group_blocks;
 
-    // Reserved blocks (superblock, BGDT)
-    for i in 0..layout.reserved_blocks {
-        expected_used.push(i as u64);
+    if block_bitmap < group_start || block_bitmap >= group_end {
+        rep.push(Finding::err(
+            "BGDT.LOCATION",
+            format!(
+                "Group {group}: block_bitmap {block_bitmap} out of range [{group_start}..{group_end})"
+            ),
+        ));
+        return Ok(None);
     }
 
-    // Bitmaps
-    let _group_start = meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
-    expected_used.push(layout.block_bitmap_block - _group_start);
-    expected_used.push(layout.inode_bitmap_block - _group_start);
-
-    // Inode table
-    for i in 0..layout.inode_table_blocks {
-        expected_used.push(layout.inode_table_block - _group_start + i as u64);
+    let mut bm_buf = vec![0u8; meta.block_size as usize];
+    let bm_offset = block_bitmap * meta.block_size as u64;
+    if let Err(e) = io.read_at(bm_offset, &mut bm_buf) {
+        rep.push(Finding::err(
+            "BMP.IO",
+            format!("Group {group}: failed to read block bitmap at block {block_bitmap}: {e:?}"),
+        ));
+        return Ok(None);
     }
 
-    // Count set bits
-    let mut set_bits = 0u32;
-    for byte in &bitmap {
-        set_bits += byte.count_ones();
-    }
+    // Count free blocks in valid range 0..group_blocks.
+    // Exclude any padding bits beyond group_blocks.
+    let full_bytes = (group_blocks / 8) as usize;
+    let remaining_bits = (group_blocks % 8) as usize;
 
-    // For group 0, at minimum check reserved blocks are marked
-    if group == 0 {
-        let mut missing_reserved = Vec::new();
-        for &bit_idx in &expected_used {
-            let byte_idx = bit_idx as usize / 8;
-            let bit_mask = 1u8 << (bit_idx % 8);
-            if byte_idx < bitmap.len() && (bitmap[byte_idx] & bit_mask) == 0 {
-                missing_reserved.push(bit_idx);
+    let mut calculated_free = 0u32;
+    for &byte in &bm_buf[..full_bytes] {
+        calculated_free += byte.count_zeros();
+    }
+    if remaining_bits > 0 {
+        let last_byte = bm_buf[full_bytes];
+        for bit in 0..remaining_bits {
+            if last_byte & (1 << bit) == 0 {
+                calculated_free += 1;
             }
         }
-        if !missing_reserved.is_empty() {
+    }
+
+    // For group 0, check reserved blocks are marked
+    if group == 0 {
+        let layout = GroupLayout::compute(meta, group);
+        let reserved_count = layout.metadata_blocks() as u64;
+        let mut missing_reserved = 0usize;
+        for bit in 0..reserved_count.min(group_blocks) {
+            let byte_idx = (bit / 8) as usize;
+            let bit_mask = 1u8 << (bit % 8);
+            if bm_buf[byte_idx] & bit_mask == 0 {
+                missing_reserved += 1;
+            }
+        }
+        if missing_reserved > 0 {
             rep.push(Finding::warn(
                 "BMP.RESV",
-                format!(
-                    "Group {}: {} reserved blocks not marked in bitmap",
-                    group,
-                    missing_reserved.len()
-                ),
+                format!("Group {group}: {missing_reserved} reserved blocks not marked in bitmap"),
             ));
         }
     }
 
-    // Report summary
-    let total_blocks = if group == meta.group_count - 1 {
-        meta.block_count - (group as u64) * (meta.blocks_per_group as u64)
-    } else {
-        meta.blocks_per_group as u64
-    };
+    if declared_free != calculated_free {
+        rep.push(Finding::err(
+            "BMP.FREE_BLOCKS",
+            format!(
+                "Group {group}: free blocks mismatch: declared {declared_free}, calculated {calculated_free}"
+            ),
+        ));
+    }
 
+    let set_bits = (group_blocks as u32).saturating_sub(calculated_free);
     rep.push(Finding::info(
         "BMP.BLK",
-        format!("Group {group}: {set_bits} of {total_blocks} blocks used in bitmap"),
+        format!("Group {group}: {set_bits} of {group_blocks} blocks used in bitmap"),
     ));
 
-    Ok(())
+    Ok(Some((calculated_free, declared_free)))
 }
 
 fn check_inode_bitmap<IO: RimIO + ?Sized>(
@@ -610,42 +680,334 @@ fn check_inode_bitmap<IO: RimIO + ?Sized>(
     meta: &ExtMeta,
     group: u32,
     rep: &mut VerifyReport,
-) -> FsCheckerResult<()> {
-    let layout = GroupLayout::compute(meta, group);
-    let inode_bitmap_offset = layout.inode_bitmap_block * meta.block_size as u64;
+) -> FsCheckerResult<Option<(u32, u32)>> {
+    let entry = match crate::utils::read_group_descriptor(io, meta, group) {
+        Ok(entry) => entry,
+        Err(e) => {
+            rep.push(Finding::err(
+                "BGDT.IO",
+                format!("Group {group}: failed to read group descriptor: {e:?}"),
+            ));
+            return Ok(None);
+        }
+    };
 
-    let bitmap_size = (meta.inodes_per_group / 8) as usize;
-    let mut bitmap = vec![0u8; bitmap_size.min(meta.block_size as usize)];
-    io.read_at(inode_bitmap_offset, &mut bitmap)
-        .map_err(FsCheckerError::IO)?;
+    let inode_bitmap = entry.inode_bitmap(meta.features.has_64bit);
+    let declared_free = entry.free_inodes_ext(meta.features.has_64bit);
 
-    // Count set bits
-    let mut set_bits = 0u32;
-    for byte in &bitmap {
-        set_bits += byte.count_ones();
+    let group_start = meta.first_data_block as u64 + group as u64 * meta.blocks_per_group as u64;
+    let group_blocks = meta.group_total_blocks(group as usize) as u64;
+    let group_end = group_start + group_blocks;
+
+    if inode_bitmap < group_start || inode_bitmap >= group_end {
+        rep.push(Finding::err(
+            "BGDT.LOCATION",
+            format!(
+                "Group {group}: inode_bitmap {inode_bitmap} out of range [{group_start}..{group_end})"
+            ),
+        ));
+        return Ok(None);
     }
 
-    // Check reserved inodes in group 0 (inodes 1-10 are reserved)
-    if group == 0 {
-        // Inodes 1-2 should definitely be in use (bad blocks inode, root inode)
-        let root_bit_idx = (EXT_ROOT_INODE - 1) as usize; // 0-based
-        let byte_idx = root_bit_idx / 8;
-        let bit_mask = 1u8 << (root_bit_idx % 8);
-        if byte_idx < bitmap.len() && (bitmap[byte_idx] & bit_mask) == 0 {
-            rep.push(Finding::warn(
-                "BMP.ROOT",
-                "Root inode (2) not marked as used in bitmap",
-            ));
+    let mut bm_buf = vec![0u8; meta.block_size as usize];
+    let bm_offset = inode_bitmap * meta.block_size as u64;
+    if let Err(e) = io.read_at(bm_offset, &mut bm_buf) {
+        rep.push(Finding::err(
+            "BMP.IO",
+            format!("Group {group}: failed to read inode bitmap at block {inode_bitmap}: {e:?}"),
+        ));
+        return Ok(None);
+    }
+
+    let group_inodes = meta.group_total_inodes(group as usize) as u64;
+
+    // Count free inodes in valid range 0..group_inodes.
+    // Exclude any padding bits beyond group_inodes.
+    let full_bytes = (group_inodes / 8) as usize;
+    let remaining_bits = (group_inodes % 8) as usize;
+
+    let mut calculated_free = 0u32;
+    for &byte in &bm_buf[..full_bytes] {
+        calculated_free += byte.count_zeros();
+    }
+    if remaining_bits > 0 {
+        let last_byte = bm_buf[full_bytes];
+        for bit in 0..remaining_bits {
+            if last_byte & (1 << bit) == 0 {
+                calculated_free += 1;
+            }
         }
     }
 
+    if group == 0 {
+        let root_bit_idx = (EXT_ROOT_INODE - 1) as usize;
+        if root_bit_idx < group_inodes as usize {
+            let byte_idx = root_bit_idx / 8;
+            let bit_mask = 1u8 << (root_bit_idx % 8);
+            if bm_buf[byte_idx] & bit_mask == 0 {
+                rep.push(Finding::warn(
+                    "BMP.ROOT",
+                    "Root inode (2) not marked as used in bitmap",
+                ));
+            }
+        }
+    }
+
+    if declared_free != calculated_free {
+        rep.push(Finding::err(
+            "BMP.FREE_INODES",
+            format!(
+                "Group {group}: free inodes mismatch: declared {declared_free}, calculated {calculated_free}"
+            ),
+        ));
+    }
+
+    let set_bits = (group_inodes as u32).saturating_sub(calculated_free);
     rep.push(Finding::info(
         "BMP.INO",
-        format!(
-            "Group {}: {} of {} inodes used in bitmap",
-            group, set_bits, meta.inodes_per_group
-        ),
+        format!("Group {group}: {set_bits} of {group_inodes} inodes used in bitmap"),
     ));
 
-    Ok(())
+    Ok(Some((calculated_free, declared_free)))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::core::formatter::FsFormatter;
+    use crate::core::testing::expect_error;
+    use crate::formatter::ExtFormatter;
+    use crate::meta::{ExtFeatureSet, ExtMeta};
+    use crate::types::ExtSuperblock;
+    use rimio::MemRimIO;
+    use rimio::prelude::*;
+    use zerocopy::IntoBytes;
+
+    #[test]
+    fn test_ext_checker_clean_image_passes() {
+        let meta = ExtMeta::new(32 * 1024 * 1024, Some("CLEAN")).unwrap();
+        let mut disk = vec![0u8; 32 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert!(
+            report.ok(),
+            "Clean image should pass checker: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn test_ext_checker_detects_corrupted_counters() {
+        let meta = ExtMeta::new(32 * 1024 * 1024, Some("CORRUPT")).unwrap();
+        let mut disk = vec![0u8; 32 * 1024 * 1024];
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+        }
+
+        // 1. Corrupt group 0 free blocks in BGDT
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            let offset = (meta.first_data_block as u64 + 1) * meta.block_size as u64;
+            let mut desc = crate::utils::read_group_descriptor(&mut io, &meta, 0).unwrap();
+            let orig = desc.bg_free_blocks_count_lo.get();
+            desc.bg_free_blocks_count_lo = (orig.wrapping_add(5)).into();
+            io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+                .unwrap();
+
+            let mut checker = ExtChecker::new(&mut io, &meta);
+            let report = checker.check_all().unwrap();
+            let err = expect_error(&report, "BMP.FREE_BLOCKS");
+            assert!(err.msg.contains("Group 0: free blocks mismatch: declared"));
+            assert!(err.msg.contains(&format!("declared {}", orig + 5)));
+            assert!(err.msg.contains(&format!("calculated {orig}")));
+            desc.bg_free_blocks_count_lo = orig.into();
+            io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+                .unwrap();
+        }
+
+        // 2. Corrupt group 0 free inodes in BGDT
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            let offset = (meta.first_data_block as u64 + 1) * meta.block_size as u64;
+            let mut desc = crate::utils::read_group_descriptor(&mut io, &meta, 0).unwrap();
+            let orig = desc.bg_free_inodes_count_lo.get();
+            desc.bg_free_inodes_count_lo = (orig.wrapping_add(3)).into();
+            io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+                .unwrap();
+
+            let mut checker = ExtChecker::new(&mut io, &meta);
+            let report = checker.check_all().unwrap();
+            let err = expect_error(&report, "BMP.FREE_INODES");
+            assert!(err.msg.contains("Group 0: free inodes mismatch: declared"));
+            assert!(err.msg.contains(&format!("declared {}", orig + 3)));
+            assert!(err.msg.contains(&format!("calculated {orig}")));
+            desc.bg_free_inodes_count_lo = orig.into();
+            io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+                .unwrap();
+        }
+
+        // 3. Corrupt superblock free blocks
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            let sb: ExtSuperblock = io.read_struct(EXT_SUPERBLOCK_OFFSET).unwrap();
+            let orig = sb.s_free_blocks_count_lo.get();
+            io.write_u32_at(EXT_SUPERBLOCK_OFFSET + 0x0C, orig + 10)
+                .unwrap();
+
+            let mut checker = ExtChecker::new(&mut io, &meta);
+            let report = checker.check_all().unwrap();
+            let err = expect_error(&report, "SB.FREE_BLOCKS");
+            assert!(err.msg.contains("Superblock free blocks mismatch"));
+            assert!(err.msg.contains(&format!("declared {}", orig + 10)));
+            assert!(err.msg.contains(&format!("calculated {orig}")));
+            io.write_u32_at(EXT_SUPERBLOCK_OFFSET + 0x0C, orig).unwrap();
+        }
+
+        // 4. Corrupt superblock free inodes
+        {
+            let mut io = MemRimIO::new(&mut disk);
+            let sb: ExtSuperblock = io.read_struct(EXT_SUPERBLOCK_OFFSET).unwrap();
+            let orig = sb.s_free_inodes_count.get();
+            io.write_u32_at(EXT_SUPERBLOCK_OFFSET + 0x10, orig + 7)
+                .unwrap();
+
+            let mut checker = ExtChecker::new(&mut io, &meta);
+            let report = checker.check_all().unwrap();
+            let err = expect_error(&report, "SB.FREE_INODES");
+            assert!(err.msg.contains("Superblock free inodes mismatch"));
+            assert!(err.msg.contains(&format!("declared {}", orig + 7)));
+            assert!(err.msg.contains(&format!("calculated {orig}")));
+            io.write_u32_at(EXT_SUPERBLOCK_OFFSET + 0x10, orig).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_ext_checker_partial_group_accounting() {
+        // 12 MB with 1024-byte blocks:
+        // blocks_per_group = 8192, total blocks = 12288 (group 0: 8192, group 1: 4096 = partial)
+        let meta = ExtMeta::new_custom(
+            ExtFeatureSet::EXT2,
+            12 * 1024 * 1024,
+            Some("PARTIAL"),
+            None,
+            1024,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(meta.group_count, 2);
+        assert_eq!(meta.group_total_blocks(0), 8192);
+        assert_eq!(meta.group_total_blocks(1), 4096);
+
+        let mut disk = vec![0u8; 12 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        // Healthy partial group must pass
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert!(
+            report.ok(),
+            "Healthy partial group volume should pass checker: {:?}",
+            report.findings
+        );
+
+        // Corrupt group 1 (partial group) free block counter in BGDT
+        let offset = (meta.first_data_block as u64 + 1) * meta.block_size as u64
+            + meta.bgdt_entry_size as u64;
+        let mut desc = crate::utils::read_group_descriptor(&mut io, &meta, 1).unwrap();
+        let orig = desc.bg_free_blocks_count_lo.get();
+        desc.bg_free_blocks_count_lo = (orig.wrapping_sub(4)).into();
+        io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+            .unwrap();
+
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        let err = expect_error(&report, "BMP.FREE_BLOCKS");
+        assert!(err.msg.contains("Group 1: free blocks mismatch: declared"));
+        assert!(err.msg.contains(&format!("declared {}", orig - 4)));
+        assert!(err.msg.contains(&format!("calculated {orig}")));
+    }
+
+    #[test]
+    fn test_ext_checker_multigroup_accounting() {
+        // 16 MB with 1024-byte blocks -> 2 full groups of 8192 blocks each = 16384 blocks
+        let meta = ExtMeta::new_custom(
+            ExtFeatureSet::EXT,
+            16 * 1024 * 1024,
+            Some("MULTIGRP"),
+            None,
+            1024,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(meta.group_count, 2);
+        assert_eq!(meta.group_total_blocks(0), 8192);
+        assert_eq!(meta.group_total_blocks(1), 8192);
+
+        let mut disk = vec![0u8; 16 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert!(
+            report.ok(),
+            "Healthy multi-group volume should pass: {:?}",
+            report.findings
+        );
+
+        // Corrupt group 1 descriptor's free block counter in BGDT
+        let offset = (meta.first_data_block as u64 + 1) * meta.block_size as u64
+            + meta.bgdt_entry_size as u64;
+        let mut desc = crate::utils::read_group_descriptor(&mut io, &meta, 1).unwrap();
+        let orig = desc.bg_free_blocks_count_lo.get();
+        desc.bg_free_blocks_count_lo = (orig + 1).into();
+        io.write_at(offset, &desc.as_bytes()[..meta.bgdt_entry_size])
+            .unwrap();
+
+        let mut checker = ExtChecker::new(&mut io, &meta);
+        let report = checker.check_all().unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.code == "BMP.FREE_BLOCKS" && f.msg.contains("Group 1"))
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.code == "SB.BGDT_FREE_BLOCKS")
+        );
+    }
+
+    #[test]
+    fn test_ext_checker_distinguishes_io_error() {
+        let meta = ExtMeta::new(32 * 1024 * 1024, None).unwrap();
+        let mut disk = vec![0u8; 32 * 1024 * 1024];
+        let mut io = MemRimIO::new(&mut disk);
+        ExtFormatter::new(&mut io, &meta).format(false).unwrap();
+
+        let desc = crate::utils::read_group_descriptor(&mut io, &meta, 0).unwrap();
+        let bm_offset = desc.block_bitmap(meta.features.has_64bit) * meta.block_size as u64;
+
+        use crate::core::testing::FailingRimIO;
+        let mut failing_io = FailingRimIO::new(MemRimIO::new(&mut disk)).fail_read_at(bm_offset);
+        let mut checker = ExtChecker::new(&mut failing_io, &meta);
+        let report = checker.check_all().unwrap();
+
+        assert!(
+            report.findings.iter().any(|f| f.code == "BMP.IO"),
+            "Expected BMP.IO finding"
+        );
+        assert!(
+            !report.findings.iter().any(|f| f.code == "BMP.FREE_BLOCKS"),
+            "Should not report counter mismatch when read failed"
+        );
+    }
 }

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 
+//! FAT DOS file attribute flags and timestamps.
+
 use crate::core::resolver::*;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[repr(transparent)]
-    pub struct FatAttributes: u8 {
+    pub struct FatFileAttributes: u8 {
         const READ_ONLY = 0x01;
         const HIDDEN    = 0x02;
         const SYSTEM    = 0x04;
@@ -17,43 +19,42 @@ bitflags::bitflags! {
 }
 
 pub trait FatFileAttributesExt {
-    fn as_fat_attr(&self) -> u8;
-    fn from_fat_attr(attr: u8) -> Self;
+    fn as_fat_attr(&self) -> FatFileAttributes;
+    fn from_fat_attr(attr: FatFileAttributes) -> Self;
 }
 
 impl FatFileAttributesExt for FileAttributes {
-    fn as_fat_attr(&self) -> u8 {
-        let mut attr = FatAttributes::empty();
+    fn as_fat_attr(&self) -> FatFileAttributes {
+        let mut attr = FatFileAttributes::empty();
         if self.read_only {
-            attr |= FatAttributes::READ_ONLY;
+            attr |= FatFileAttributes::READ_ONLY;
         }
         if self.hidden {
-            attr |= FatAttributes::HIDDEN;
+            attr |= FatFileAttributes::HIDDEN;
         }
         if self.system {
-            attr |= FatAttributes::SYSTEM;
+            attr |= FatFileAttributes::SYSTEM;
         }
         if self.is_dir() {
-            attr |= FatAttributes::DIRECTORY;
+            attr |= FatFileAttributes::DIRECTORY;
         }
         if self.archive {
-            attr |= FatAttributes::ARCHIVE;
+            attr |= FatFileAttributes::ARCHIVE;
         }
-        attr.bits()
+        attr
     }
 
-    fn from_fat_attr(attr: u8) -> Self {
-        let fat_attr = FatAttributes::from_bits_truncate(attr);
-        let is_dir = fat_attr.contains(FatAttributes::DIRECTORY);
+    fn from_fat_attr(attr: FatFileAttributes) -> Self {
+        let is_dir = attr.contains(FatFileAttributes::DIRECTORY);
         let mut fa = if is_dir {
             FileAttributes::new_dir()
         } else {
             FileAttributes::new_file()
         };
-        fa.read_only = fat_attr.contains(FatAttributes::READ_ONLY);
-        fa.hidden = fat_attr.contains(FatAttributes::HIDDEN);
-        fa.system = fat_attr.contains(FatAttributes::SYSTEM);
-        fa.archive = fat_attr.contains(FatAttributes::ARCHIVE);
+        fa.read_only = attr.contains(FatFileAttributes::READ_ONLY);
+        fa.hidden = attr.contains(FatFileAttributes::HIDDEN);
+        fa.system = attr.contains(FatFileAttributes::SYSTEM);
+        fa.archive = attr.contains(FatFileAttributes::ARCHIVE);
         fa
     }
 }

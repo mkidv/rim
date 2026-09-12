@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Verification summary counters and timing metrics.
+
 /// Common statistics collected during a directory tree walk.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WalkerStats {

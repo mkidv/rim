@@ -24,8 +24,8 @@ fn test_wasm_demo_layout_synthesis_and_validation() {
     assert_eq!(decode_gpt_name(&entries[1].name), "rootfs");
 
     // 2. Validate FAT32 partition
-    let p1_offset = entries[0].start_lba * 512;
-    let p1_len = (entries[0].end_lba - entries[0].start_lba + 1) * 512;
+    let p1_offset = entries[0].start_lba.get() * 512;
+    let p1_len = (entries[0].end_lba.get() - entries[0].start_lba.get() + 1) * 512;
     io.set_offset(p1_offset);
 
     let fat_meta = FatMeta::new_fat32(p1_len, Some("BOOT")).expect("FAT32 meta failed");
@@ -40,8 +40,8 @@ fn test_wasm_demo_layout_synthesis_and_validation() {
     );
 
     // 3. Validate EXT4 partition
-    let p2_offset = entries[1].start_lba * 512;
-    let p2_len = (entries[1].end_lba - entries[1].start_lba + 1) * 512;
+    let p2_offset = entries[1].start_lba.get() * 512;
+    let p2_len = (entries[1].end_lba.get() - entries[1].start_lba.get() + 1) * 512;
     io.set_offset(p2_offset);
 
     let ext_meta = ExtMeta::new(p2_len, Some("ROOTFS")).unwrap();

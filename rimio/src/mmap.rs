@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! Memory-mapped file I/O implementation (MmapRimIO).
+
 use crate::{RimIO, RimIOError, RimIOResult, RimIOSetLen, RimRead, RimWrite, checked_add_offset};
 use memmap2::MmapMut;
 use std::fs::File;
@@ -10,8 +14,7 @@ use std::io;
 ///
 /// # Safety Invariants & Preconditions
 /// - **Exclusive Access / No Concurrent Modification**:
-///   The caller must ensure that the underlying file is not modified, truncated,
-///   or unlinked concurrently by any other thread, process, or file descriptor
+///   The caller must ensure that the underlying file is not modified or truncated concurrently by any other thread, process, or file descriptor
 ///   for the lifetime of this `MmapRimIO`.
 /// - **Undefined Behavior on Truncation**:
 ///   If another process or file descriptor truncates or modifies the mapped file,
@@ -31,10 +34,10 @@ pub struct MmapRimIO {
 impl MmapRimIO {
     /// Creates a new memory mapped IO from a standard file.
     ///
-    /// # Safety Invariants
+    /// # Safety
     /// The caller must guarantee that no concurrent process or thread modifies or
     /// truncates `file` while `MmapRimIO` is active.
-    pub fn new(file: File) -> io::Result<Self> {
+    pub unsafe fn new(file: File) -> io::Result<Self> {
         let len = file.metadata()?.len();
         let mmap = if len > 0 {
             // SAFETY: Caller guarantees that `file` is not concurrently mutated or truncated
@@ -53,8 +56,11 @@ impl MmapRimIO {
     }
 
     /// Creates a new memory mapped IO with an offset.
-    pub fn new_with_offset(file: File, partition_offset: u64) -> io::Result<Self> {
-        let mut me = Self::new(file)?;
+    ///
+    /// # Safety
+    /// The exclusive backing-file contract of `new` applies.
+    pub unsafe fn new_with_offset(file: File, partition_offset: u64) -> io::Result<Self> {
+        let mut me = unsafe { Self::new(file)? };
         me.partition_offset = partition_offset;
         Ok(me)
     }
@@ -160,7 +166,7 @@ mod tests {
         // Zero it to avoid random trash if tempfile recycles
         file.write_all(&[0u8; 1024]).unwrap();
 
-        let mut io = MmapRimIO::new(file).unwrap();
+        let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
 
         check_basic_rw(&mut io);
         check_rw_at_offset(&mut io);
@@ -172,7 +178,7 @@ mod tests {
     fn test_mmap_rimio_set_len() {
         let file = tempfile().unwrap();
         file.set_len(512).unwrap();
-        let mut io = MmapRimIO::new(file).unwrap();
+        let mut io = unsafe { MmapRimIO::new(file) }.unwrap();
         check_set_len(&mut io);
     }
 }

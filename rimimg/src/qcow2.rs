@@ -12,6 +12,8 @@ use rimio::errors::RimIOError;
 #[cfg(feature = "alloc")]
 use rimio::extent::IoExtent;
 use rimio::prelude::*;
+#[cfg(feature = "alloc")]
+use zerocopy::byteorder::U16;
 use zerocopy::byteorder::{BigEndian, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -21,10 +23,9 @@ pub const QCOW2_MAGIC: u32 = 0x514649fb;
 pub const QCOW2_VERSION_2: u32 = 2;
 pub const QCOW2_VERSION_3: u32 = 3;
 pub const CLUSTER_BITS: u32 = 16;
-pub const CLUSTER_SIZE: u64 = 1 << CLUSTER_BITS; // 64KB
-pub const L2_ENTRIES_PER_CLUSTER: u64 = CLUSTER_SIZE / 8; // 8192
-pub const REFCOUNT_ENTRIES_PER_BLOCK: u64 = CLUSTER_SIZE / 2; // 32768
-
+pub const CLUSTER_SIZE: u64 = 1 << CLUSTER_BITS;
+pub const L2_ENTRIES_PER_CLUSTER: u64 = CLUSTER_SIZE / 8;
+pub const REFCOUNT_ENTRIES_PER_BLOCK: u64 = CLUSTER_SIZE / 2;
 pub const QCOW_OFLAG_COPIED: u64 = 1 << 63;
 pub const QCOW_OFLAG_COMPRESSED: u64 = 1 << 62;
 pub const QCOW_OFLAG_ZERO: u64 = 1 << 0;
@@ -149,24 +150,20 @@ pub fn init_sparse_qcow2_layout(dst: &mut dyn RimIO, img_len: u64) -> RimImgResu
         header_length: U32::new(104),
     };
 
-    // Zero-fill initial metadata clusters
     let init_size_usize = usize::try_from(initial_size).map_err(|_| RimImgError::SizeOverflow)?;
     dst.zero_fill(0, init_size_usize)?;
 
-    // Write header
     dst.write_struct(0, &header)?;
     dst.write_struct(core::mem::size_of::<Qcow2Header>() as u64, &v3_ext)?;
 
-    // Write refcount table entry 0 -> initial_refcount_block_offset
-    let rt_entry_0 = initial_refcount_block_offset.to_be_bytes();
-    dst.write_at(refcount_table_offset, &rt_entry_0)?;
+    dst.write_struct(
+        refcount_table_offset,
+        &U64::<BigEndian>::new(initial_refcount_block_offset),
+    )?;
 
-    // Write initial refcount block: mark all initial clusters (0..total_initial_clusters) with refcount 1
-    let mut init_rb = vec![0u8; CLUSTER_SIZE as usize];
-    for i in 0..total_initial_clusters as usize {
-        init_rb[i * 2..i * 2 + 2].copy_from_slice(&1u16.to_be_bytes());
-    }
-    dst.write_at(initial_refcount_block_offset, &init_rb)?;
+    let mut init_rb = vec![U16::<BigEndian>::ZERO; REFCOUNT_ENTRIES_PER_BLOCK as usize];
+    init_rb[..total_initial_clusters as usize].fill(1.into());
+    dst.write_at(initial_refcount_block_offset, init_rb.as_slice().as_bytes())?;
 
     dst.flush()?;
     Ok(header)
@@ -179,12 +176,12 @@ pub struct Qcow2IO<'a> {
     header: Qcow2Header,
     virtual_size: u64,
     partition_offset: u64,
-    l1_table: Vec<u64>,
-    refcount_table: Vec<u64>,
+    l1_table: Vec<U64<BigEndian>>,
+    refcount_table: Vec<U64<BigEndian>>,
     max_physical_clusters: u64,
     cached_rb_idx: Option<usize>,
     cached_rb_cluster: u64,
-    cached_rb: Vec<u8>,
+    cached_rb: Vec<U16<BigEndian>>,
     next_free_cluster: u64,
     finished: bool,
 }
@@ -216,27 +213,25 @@ impl<'a> Qcow2IO<'a> {
             return Err(RimImgError::SizeOverflow);
         }
 
-        if self.refcount_table[rb_idx] == 0 {
+        if self.refcount_table[rb_idx].get() == 0 {
             // Bootstrap new refcount block at EOF
             let rb_cluster = phys_cluster;
-            let mut new_rb = vec![0u8; CLUSTER_SIZE as usize];
+            let mut new_rb = vec![U16::<BigEndian>::ZERO; REFCOUNT_ENTRIES_PER_BLOCK as usize];
 
             let entry_in_block = (rb_cluster % REFCOUNT_ENTRIES_PER_BLOCK) as usize;
-            new_rb[entry_in_block * 2..entry_in_block * 2 + 2].copy_from_slice(&1u16.to_be_bytes());
+            new_rb[entry_in_block] = 1.into();
 
-            // Write new refcount block to disk
-            self.inner.write_at(rb_cluster * CLUSTER_SIZE, &new_rb)?;
+            self.inner
+                .write_at(rb_cluster * CLUSTER_SIZE, new_rb.as_slice().as_bytes())?;
             self.inner.flush()?;
 
-            // Update refcount table
             let rb_offset = rb_cluster * CLUSTER_SIZE;
-            self.refcount_table[rb_idx] = rb_offset;
+            self.refcount_table[rb_idx] = rb_offset.into();
             let rt_entry_offset = self.header.refcount_table_offset.get() + (rb_idx as u64) * 8;
             self.inner
-                .write_at(rt_entry_offset, &rb_offset.to_be_bytes())?;
+                .write_struct(rt_entry_offset, &U64::<BigEndian>::new(rb_offset))?;
             self.inner.flush()?;
 
-            // Set cached block
             self.cached_rb_idx = Some(rb_idx);
             self.cached_rb_cluster = rb_cluster;
             self.cached_rb = new_rb;
@@ -257,22 +252,22 @@ impl<'a> Qcow2IO<'a> {
         let entry_in_block = (phys_cluster % REFCOUNT_ENTRIES_PER_BLOCK) as usize;
 
         if self.cached_rb_idx != Some(rb_idx) {
-            let rb_offset = self.refcount_table[rb_idx];
+            let rb_offset = self.refcount_table[rb_idx].get();
             if rb_offset == 0 {
                 return Err(RimImgError::Corrupted("Missing refcount block in table"));
             }
-            let mut rb_buf = vec![0u8; CLUSTER_SIZE as usize];
-            self.inner.read_at(rb_offset, &mut rb_buf)?;
+            let mut rb_buf = vec![U16::<BigEndian>::ZERO; REFCOUNT_ENTRIES_PER_BLOCK as usize];
+            self.inner
+                .read_at(rb_offset, rb_buf.as_mut_slice().as_mut_bytes())?;
             self.cached_rb_idx = Some(rb_idx);
             self.cached_rb_cluster = rb_offset / CLUSTER_SIZE;
             self.cached_rb = rb_buf;
         }
 
-        self.cached_rb[entry_in_block * 2..entry_in_block * 2 + 2]
-            .copy_from_slice(&refcount.to_be_bytes());
+        self.cached_rb[entry_in_block] = refcount.into();
         let entry_disk_offset = self.cached_rb_cluster * CLUSTER_SIZE + (entry_in_block as u64) * 2;
         self.inner
-            .write_at(entry_disk_offset, &refcount.to_be_bytes())?;
+            .write_struct(entry_disk_offset, &U16::<BigEndian>::new(refcount))?;
         self.inner.flush()?;
 
         Ok(())
@@ -316,7 +311,7 @@ impl RimRead for Qcow2IO<'_> {
                 continue;
             }
 
-            let l1_entry = self.l1_table[l1_idx];
+            let l1_entry = self.l1_table[l1_idx].get();
             let l2_offset = l1_entry & L2_OFFSET_MASK;
             if l2_offset == 0 {
                 dest.fill(0);
@@ -325,10 +320,10 @@ impl RimRead for Qcow2IO<'_> {
             }
 
             let l2_idx = (cluster_idx % L2_ENTRIES_PER_CLUSTER) as usize;
-            let mut l2_entry_bytes = [0u8; 8];
-            self.inner
-                .read_at(l2_offset + (l2_idx as u64) * 8, &mut l2_entry_bytes)?;
-            let l2_entry = u64::from_be_bytes(l2_entry_bytes);
+            let l2_entry = self
+                .inner
+                .read_struct::<U64<BigEndian>>(l2_offset + (l2_idx as u64) * 8)?
+                .get();
 
             if (l2_entry & QCOW_OFLAG_COMPRESSED) != 0 {
                 return Err(RimIOError::Unsupported);
@@ -391,9 +386,8 @@ impl RimWrite for Qcow2IO<'_> {
                 return Err(RimIOError::OutOfBounds);
             }
 
-            let mut l1_entry = self.l1_table[l1_idx];
+            let mut l1_entry = self.l1_table[l1_idx].get();
             if l1_entry == 0 {
-                // Allocate new L2 table
                 let l2_cluster = self.allocate_cluster().map_err(|e| match e {
                     RimImgError::IO(io_e) => io_e,
                     _ => RimIOError::Other("Failed to allocate L2 cluster"),
@@ -402,10 +396,10 @@ impl RimWrite for Qcow2IO<'_> {
                 self.inner.flush()?;
 
                 l1_entry = l2_cluster | QCOW_OFLAG_COPIED;
-                self.l1_table[l1_idx] = l1_entry;
+                self.l1_table[l1_idx] = l1_entry.into();
                 let l1_disk_offset = self.header.l1_table_offset.get() + (l1_idx as u64) * 8;
                 self.inner
-                    .write_at(l1_disk_offset, &l1_entry.to_be_bytes())?;
+                    .write_struct(l1_disk_offset, &U64::<BigEndian>::new(l1_entry))?;
                 self.inner.flush()?;
             } else if (l1_entry & QCOW_OFLAG_COPIED) == 0 {
                 return Err(RimIOError::Unsupported); // Shared L2 table
@@ -415,10 +409,10 @@ impl RimWrite for Qcow2IO<'_> {
             let l2_idx = (cluster_idx % L2_ENTRIES_PER_CLUSTER) as usize;
             let l2_entry_disk_offset = l2_offset + (l2_idx as u64) * 8;
 
-            let mut l2_entry_bytes = [0u8; 8];
-            self.inner
-                .read_at(l2_entry_disk_offset, &mut l2_entry_bytes)?;
-            let l2_entry = u64::from_be_bytes(l2_entry_bytes);
+            let l2_entry = self
+                .inner
+                .read_struct::<U64<BigEndian>>(l2_entry_disk_offset)?
+                .get();
 
             if (l2_entry & QCOW_OFLAG_COMPRESSED) != 0 {
                 return Err(RimIOError::Unsupported);
@@ -447,7 +441,7 @@ impl RimWrite for Qcow2IO<'_> {
 
                 let new_l2_entry = new_cluster | QCOW_OFLAG_COPIED;
                 self.inner
-                    .write_at(l2_entry_disk_offset, &new_l2_entry.to_be_bytes())?;
+                    .write_struct(l2_entry_disk_offset, &U64::<BigEndian>::new(new_l2_entry))?;
                 self.inner.flush()?;
             } else if is_zero_cluster {
                 // Preallocated zero cluster
@@ -474,10 +468,9 @@ impl RimWrite for Qcow2IO<'_> {
                 )?;
                 self.inner.flush()?;
 
-                // Clear bit 0 (QCOW_OFLAG_ZERO), retain OFLAG_COPIED
                 let new_l2_entry = phys_offset | QCOW_OFLAG_COPIED;
                 self.inner
-                    .write_at(l2_entry_disk_offset, &new_l2_entry.to_be_bytes())?;
+                    .write_struct(l2_entry_disk_offset, &U64::<BigEndian>::new(new_l2_entry))?;
                 self.inner.flush()?;
             } else {
                 // Standard allocated cluster
@@ -523,7 +516,7 @@ pub struct Qcow2ReadIO<'a> {
     l1_size: u32,
     partition_offset: u64,
     #[cfg(feature = "alloc")]
-    l1_table: Vec<u64>,
+    l1_table: Vec<U64<BigEndian>>,
 }
 
 impl<'a> Qcow2ReadIO<'a> {
@@ -578,14 +571,13 @@ impl RimRead for Qcow2ReadIO<'_> {
             }
 
             #[cfg(feature = "alloc")]
-            let l1_entry = self.l1_table[l1_idx];
+            let l1_entry = self.l1_table[l1_idx].get();
 
             #[cfg(not(feature = "alloc"))]
             let l1_entry = {
-                let mut bytes = [0u8; 8];
                 self.inner
-                    .read_at(self.l1_table_offset + (l1_idx as u64) * 8, &mut bytes)?;
-                u64::from_be_bytes(bytes)
+                    .read_struct::<U64<BigEndian>>(self.l1_table_offset + (l1_idx as u64) * 8)?
+                    .get()
             };
 
             let l2_offset = l1_entry & L2_OFFSET_MASK;
@@ -596,10 +588,10 @@ impl RimRead for Qcow2ReadIO<'_> {
             }
 
             let l2_idx = (cluster_idx % L2_ENTRIES_PER_CLUSTER) as usize;
-            let mut l2_entry_bytes = [0u8; 8];
-            self.inner
-                .read_at(l2_offset + (l2_idx as u64) * 8, &mut l2_entry_bytes)?;
-            let l2_entry = u64::from_be_bytes(l2_entry_bytes);
+            let l2_entry = self
+                .inner
+                .read_struct::<U64<BigEndian>>(l2_offset + (l2_idx as u64) * 8)?
+                .get();
 
             if (l2_entry & QCOW_OFLAG_COMPRESSED) != 0 {
                 return Err(RimIOError::Unsupported);
@@ -655,24 +647,14 @@ pub fn open_sparse_qcow2_io<'a>(src: &'a mut dyn RimIO) -> RimImgResult<Qcow2IO<
     let l1_size = header.l1_size.get() as usize;
     let l1_offset = header.l1_table_offset.get();
 
-    // Read L1 table
-    let mut l1_bytes = vec![0u8; l1_size * 8];
-    src.read_at(l1_offset, &mut l1_bytes)?;
-    let mut l1_table = Vec::with_capacity(l1_size);
-    for chunk in l1_bytes.chunks_exact(8) {
-        l1_table.push(u64::from_be_bytes(chunk.try_into().unwrap()));
-    }
+    let mut l1_table = vec![U64::<BigEndian>::ZERO; l1_size];
+    src.read_at(l1_offset, l1_table.as_mut_slice().as_mut_bytes())?;
 
-    // Read refcount table
     let rt_clusters = header.refcount_table_clusters.get() as usize;
     let rt_entries = rt_clusters * (CLUSTER_SIZE as usize / 8);
     let rt_offset = header.refcount_table_offset.get();
-    let mut rt_bytes = vec![0u8; rt_entries * 8];
-    src.read_at(rt_offset, &mut rt_bytes)?;
-    let mut refcount_table = Vec::with_capacity(rt_entries);
-    for chunk in rt_bytes.chunks_exact(8) {
-        refcount_table.push(u64::from_be_bytes(chunk.try_into().unwrap()));
-    }
+    let mut refcount_table = vec![U64::<BigEndian>::ZERO; rt_entries];
+    src.read_at(rt_offset, refcount_table.as_mut_slice().as_mut_bytes())?;
 
     let max_physical_clusters = (rt_entries as u64) * REFCOUNT_ENTRIES_PER_BLOCK;
 
@@ -686,15 +668,16 @@ pub fn open_sparse_qcow2_io<'a>(src: &'a mut dyn RimIO) -> RimImgResult<Qcow2IO<
         highest_cluster.max(l1_offset / CLUSTER_SIZE + n_l1_clusters.saturating_sub(1));
 
     // Scan refcount blocks for highest allocated cluster
-    for (rb_idx, &rb_offset) in refcount_table.iter().enumerate() {
+    for (rb_idx, rb_offset) in refcount_table.iter().enumerate() {
+        let rb_offset = rb_offset.get();
         if rb_offset != 0 {
             highest_cluster = highest_cluster.max(rb_offset / CLUSTER_SIZE);
             let mut rb_buf = vec![0u8; CLUSTER_SIZE as usize];
             src.read_at(rb_offset, &mut rb_buf)?;
-            for entry_idx in (0..REFCOUNT_ENTRIES_PER_BLOCK as usize).rev() {
-                let rc = u16::from_be_bytes(
-                    rb_buf[entry_idx * 2..entry_idx * 2 + 2].try_into().unwrap(),
-                );
+            let counts = <[U16<BigEndian>]>::ref_from_bytes(&rb_buf)
+                .map_err(|_| RimImgError::InvalidHeader("Truncated metadata table"))?;
+            for (entry_idx, count) in counts.iter().enumerate().rev() {
+                let rc = count.get();
                 if rc != 0 {
                     let cluster_idx =
                         (rb_idx as u64) * REFCOUNT_ENTRIES_PER_BLOCK + entry_idx as u64;
@@ -740,12 +723,8 @@ pub fn open_sparse_qcow2_read_io(src: &mut dyn RimRead) -> RimImgResult<Qcow2Rea
 
     #[cfg(feature = "alloc")]
     let l1_table = {
-        let mut l1_bytes = vec![0u8; (l1_size as usize) * 8];
-        src.read_at(l1_offset, &mut l1_bytes)?;
-        let mut table = Vec::with_capacity(l1_size as usize);
-        for chunk in l1_bytes.chunks_exact(8) {
-            table.push(u64::from_be_bytes(chunk.try_into().unwrap()));
-        }
+        let mut table = vec![U64::<BigEndian>::ZERO; l1_size as usize];
+        src.read_at(l1_offset, table.as_mut_slice().as_mut_bytes())?;
         table
     };
 
@@ -780,6 +759,9 @@ pub fn parse_qcow2_extents(src: &mut dyn RimRead) -> RimImgResult<Vec<IoExtent>>
     let mut l1_bytes = vec![0u8; l1_size * 8];
     src.read_at(l1_offset, &mut l1_bytes)?;
 
+    let l1_entries = <[U64<BigEndian>]>::ref_from_bytes(&l1_bytes)
+        .map_err(|_| RimImgError::InvalidHeader("Truncated metadata table"))?;
+
     let mut extents = Vec::new();
     let mut current_extent: Option<IoExtent> = None;
 
@@ -791,14 +773,13 @@ pub fn parse_qcow2_extents(src: &mut dyn RimRead) -> RimImgResult<Vec<IoExtent>>
 
         let mut phys_offset = None;
         if l1_idx < l1_size {
-            let l1_entry =
-                u64::from_be_bytes(l1_bytes[l1_idx * 8..l1_idx * 8 + 8].try_into().unwrap());
+            let l1_entry = l1_entries[l1_idx].get();
             let l2_offset = l1_entry & L2_OFFSET_MASK;
             if l2_offset != 0 {
                 let l2_idx = (cluster_idx % L2_ENTRIES_PER_CLUSTER) as usize;
-                let mut l2_entry_bytes = [0u8; 8];
-                src.read_at(l2_offset + (l2_idx as u64) * 8, &mut l2_entry_bytes)?;
-                let l2_entry = u64::from_be_bytes(l2_entry_bytes);
+                let l2_entry = src
+                    .read_struct::<U64<BigEndian>>(l2_offset + (l2_idx as u64) * 8)?
+                    .get();
                 if (l2_entry & QCOW_OFLAG_COMPRESSED) != 0 {
                     return Err(RimImgError::UnsupportedFormat);
                 }
@@ -939,3 +920,24 @@ pub fn validate_qcow2_v3_extension(v3: &Qcow2HeaderV3Extension) -> RimImgResult<
 pub fn data_start_from_header(header: &Qcow2Header) -> u64 {
     CLUSTER_SIZE * 4 + (header.l1_size.get() as u64) * CLUSTER_SIZE
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<Qcow2Header>() == 72);
+    assert!(core::mem::align_of::<Qcow2Header>() == 1);
+    assert!(core::mem::offset_of!(Qcow2Header, version) == 4);
+    assert!(core::mem::offset_of!(Qcow2Header, backing_file_offset) == 8);
+    assert!(core::mem::offset_of!(Qcow2Header, cluster_bits) == 20);
+    assert!(core::mem::offset_of!(Qcow2Header, size) == 24);
+    assert!(core::mem::offset_of!(Qcow2Header, l1_size) == 36);
+    assert!(core::mem::offset_of!(Qcow2Header, l1_table_offset) == 40);
+    assert!(core::mem::offset_of!(Qcow2Header, refcount_table_offset) == 48);
+    assert!(core::mem::offset_of!(Qcow2Header, refcount_table_clusters) == 56);
+    assert!(core::mem::offset_of!(Qcow2Header, nb_snapshots) == 60);
+    assert!(core::mem::offset_of!(Qcow2Header, snapshots_offset) == 64);
+    assert!(core::mem::size_of::<Qcow2HeaderV3Extension>() == 32);
+    assert!(core::mem::align_of::<Qcow2HeaderV3Extension>() == 1);
+    assert!(core::mem::offset_of!(Qcow2HeaderV3Extension, compatible_features) == 8);
+    assert!(core::mem::offset_of!(Qcow2HeaderV3Extension, autoclear_features) == 16);
+    assert!(core::mem::offset_of!(Qcow2HeaderV3Extension, refcount_order) == 24);
+    assert!(core::mem::offset_of!(Qcow2HeaderV3Extension, header_length) == 28);
+};

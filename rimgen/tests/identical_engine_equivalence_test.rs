@@ -42,7 +42,7 @@ fn make_layout(seed: u64) -> (Layout<'static>, SeededGuidGenerator) {
         "ESP",
         PartitionKind::Esp,
         Filesystem::Fat32,
-        65536, // 32 MiB
+        65536,
         guid_gen.generate_guid(),
     )
     .with_bootable(true)
@@ -64,7 +64,7 @@ fn make_layout(seed: u64) -> (Layout<'static>, SeededGuidGenerator) {
         "DATA",
         PartitionKind::Data,
         Filesystem::Ext4,
-        40960, // 20 MiB
+        40960,
         guid_gen.generate_guid(),
     )
     .with_label("DATA")
@@ -77,8 +77,7 @@ fn make_layout(seed: u64) -> (Layout<'static>, SeededGuidGenerator) {
 
 #[test]
 fn test_identical_engine_equivalence() {
-    let total_size = 64 * 1024 * 1024; // 64 MiB
-
+    let total_size = 64 * 1024 * 1024;
     let (mut layout1, _) = make_layout(0x4242_4242);
     let mut buf1 = vec![0u8; total_size];
     let mut io1 = MemRimIO::new(&mut buf1);

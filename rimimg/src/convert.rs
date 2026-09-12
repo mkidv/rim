@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Disk image conversion pipeline between raw and container formats.
+
 use rimio::prelude::*;
 
 #[cfg(feature = "alloc")]

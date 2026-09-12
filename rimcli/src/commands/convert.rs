@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! CLI command to convert between disk image container formats.
+
 use crate::ui::{format_duration, pretty_bytes};
 use anyhow::Context;
 use colored::Colorize;
@@ -134,6 +136,33 @@ pub(crate) fn convert_file_with_progress<F: FnMut(u64, u64)>(
     let input_format = format_from_path(input)?;
     let output_format = format_from_path(output)?;
 
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary =
+        tempfile::NamedTempFile::new_in(parent).context("Failed to stage converted image")?;
+    convert_to_staged_file(
+        input,
+        temporary.path(),
+        input_format,
+        output_format,
+        &mut on_progress,
+    )?;
+    temporary
+        .persist(output)
+        .map_err(|e| e.error)
+        .context("Failed to publish converted image")?;
+    Ok(())
+}
+
+fn convert_to_staged_file<F: FnMut(u64, u64)>(
+    input: &Path,
+    output: &Path,
+    input_format: ImageFormat,
+    output_format: ImageFormat,
+    mut on_progress: F,
+) -> anyhow::Result<()> {
     if input_format == ImageFormat::Raw {
         return wrap_file_with_progress(input, output, output_format, on_progress);
     }
@@ -142,7 +171,7 @@ pub(crate) fn convert_file_with_progress<F: FnMut(u64, u64)>(
         return unwrap_file_with_progress(input, output, input_format, on_progress);
     }
 
-    // Direct streaming container conversion without temporary disk files (O2)
+    // Stream directly into the staged destination container, without an intermediate RAW image.
     let input_file = File::open(input)
         .with_context(|| format!("Failed to open input image {}", input.display()))?;
     let output_file = std::fs::OpenOptions::new()
@@ -174,4 +203,30 @@ pub(crate) fn convert_file_with_progress<F: FnMut(u64, u64)>(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn failed_conversion_preserves_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("broken.vhd");
+        let output = dir.path().join("existing.raw");
+        std::fs::write(&input, b"invalid container").unwrap();
+        std::fs::write(&output, b"keep me").unwrap();
+        assert!(convert_file_with_progress(&input, &output, |_, _| {}).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"keep me");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn same_path_conversion_preserves_raw_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same.raw");
+        std::fs::write(&path, b"original payload").unwrap();
+        convert_file_with_progress(&path, &path, |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"original payload");
+    }
 }

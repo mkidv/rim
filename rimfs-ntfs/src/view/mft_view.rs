@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! MFT record view + attribute iterator.
 
-use crate::{constant::ATTR_END, types::*};
+use crate::types::*;
 use zerocopy::FromBytes;
 
 use super::attr_view::AttrRef;
@@ -9,12 +9,12 @@ use super::attr_view::AttrRef;
 #[derive(Debug, Clone, Copy)]
 pub struct MftRecordView<'a> {
     buf: &'a [u8],
-    header: MftRecordHeader,
+    header: &'a MftRecordHeader,
 }
 
 impl<'a> MftRecordView<'a> {
     pub fn new(buf: &'a [u8]) -> Result<Self, MftViewError> {
-        let (hdr, _) = MftRecordHeader::read_from_prefix(buf)
+        let (hdr, _) = MftRecordHeader::ref_from_prefix(buf)
             .map_err(|_| MftViewError::Malformed("mft header"))?;
         if !hdr.is_file_record() {
             return Err(MftViewError::Malformed("bad signature"));
@@ -23,7 +23,7 @@ impl<'a> MftRecordView<'a> {
     }
 
     pub fn header(&self) -> &MftRecordHeader {
-        &self.header
+        self.header
     }
 
     pub fn is_dir(&self) -> bool {
@@ -33,24 +33,24 @@ impl<'a> MftRecordView<'a> {
     pub fn attrs(&self) -> AttrIter<'a> {
         AttrIter {
             record: self.buf,
-            offset: self.header.attrs_offset as usize,
+            offset: self.header.attrs_offset.get() as usize,
             done: false,
         }
     }
 
-    pub fn find(&self, attr_type: u32) -> Result<Option<AttrRef<'a>>, MftViewError> {
+    pub fn find(&self, attr_type: NtfsAttributeType) -> Result<Option<AttrRef<'a>>, MftViewError> {
         self.find_named(attr_type, None)
     }
 
     #[cfg(feature = "alloc")]
     pub fn find_named(
         &self,
-        attr_type: u32,
+        attr_type: NtfsAttributeType,
         stream_name: Option<&str>,
     ) -> Result<Option<AttrRef<'a>>, MftViewError> {
         for a in self.attrs() {
             let a = a?;
-            if a.ty() == attr_type {
+            if a.ty() == attr_type.code() {
                 match stream_name {
                     None => {
                         if a.header.name_length == 0 {
@@ -58,9 +58,7 @@ impl<'a> MftRecordView<'a> {
                         }
                     }
                     Some(target_name) => {
-                        if a.name()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(target_name))
-                        {
+                        if a.name_eq_ignore_ascii_case(target_name) {
                             return Ok(Some(a));
                         }
                     }
@@ -85,13 +83,21 @@ impl<'a> Iterator for AttrIter<'a> {
             return None;
         }
 
-        if self.offset + core::mem::size_of::<AttributeHeader>() > self.record.len() {
+        let Some(slice) = self.record.get(self.offset..) else {
+            self.done = true;
+            return Some(Err(MftViewError::OutOfBounds));
+        };
+        // The end marker occupies only four bytes, not a full attribute header.
+        let Ok((kind, _)) = zerocopy::byteorder::little_endian::U32::ref_from_prefix(slice) else {
+            self.done = true;
+            return Some(Err(MftViewError::Malformed("missing attribute end marker")));
+        };
+        if kind.get() == NtfsAttributeType::End.code() {
             self.done = true;
             return None;
         }
 
-        let slice = &self.record[self.offset..];
-        let (hdr, _) = match AttributeHeader::read_from_prefix(slice) {
+        let (hdr, _) = match AttributeHeader::ref_from_prefix(slice) {
             Ok(x) => x,
             Err(_) => {
                 self.done = true;
@@ -99,13 +105,8 @@ impl<'a> Iterator for AttrIter<'a> {
             }
         };
 
-        if hdr.attr_type == ATTR_END {
-            self.done = true;
-            return None;
-        }
-
-        let total = hdr.length as usize;
-        if total == 0 || self.offset + total > self.record.len() {
+        let total = hdr.length.get() as usize;
+        if total < core::mem::size_of::<AttributeHeader>() || total > slice.len() {
             self.done = true;
             return Some(Err(MftViewError::OutOfBounds));
         }
@@ -121,4 +122,30 @@ impl<'a> Iterator for AttrIter<'a> {
 pub enum MftViewError {
     Malformed(&'static str),
     OutOfBounds,
+}
+
+#[cfg(test)]
+mod iterator_tests {
+    use super::*;
+    #[test]
+    fn short_end_marker_is_valid_but_truncated_header_is_not() {
+        for len in 0..16 {
+            let bytes = [0u8; 16];
+            let mut iter = AttrIter {
+                record: &bytes[..len],
+                offset: 0,
+                done: false,
+            };
+            assert!(iter.next().unwrap().is_err());
+            assert!(iter.next().is_none());
+        }
+        let marker = NtfsAttributeType::End.code().to_le_bytes();
+        let mut iter = AttrIter {
+            record: &marker,
+            offset: 0,
+            done: false,
+        };
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+    }
 }

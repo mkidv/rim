@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT table integrity and cluster allocation check.
+
 use crate::FsMeta;
 use crate::core::checker::{Finding, VerifyReport};
 
@@ -66,13 +70,14 @@ pub fn compare_fat_copies<IO: RimIO + ?Sized>(
     let start = FAT_FIRST_CLUSTER;
     let end = FAT_FIRST_CLUSTER + count - 1;
 
-    let mut driver = FatDriver::new(meta);
+    let mut driver0 = FatDriver::new(meta);
+    let mut driver1 = FatDriver::new(meta);
     let mut c = start;
     while c <= end {
-        let val0 = driver
+        let val0 = driver0
             .read_entry_from_table(io, 0, c)
             .map_err(FsCheckerError::IO)?;
-        let val1 = driver
+        let val1 = driver1
             .read_entry_from_table(io, 1, c)
             .map_err(FsCheckerError::IO)?;
 
@@ -136,7 +141,7 @@ pub fn deep_walk<IO: RimIO + ?Sized>(io: &mut IO, meta: &FatMeta) -> FsCheckerRe
 
             mark(&mut visited, first, cur);
 
-            let next = view.get(io, cur)?;
+            let next = view.read_entry(io, cur)?;
             len += 1;
 
             if len > meta.cluster_count as usize {

@@ -96,17 +96,14 @@ impl ReachabilityTracker {
         }
     }
 
-    /// Returns the raw bitmap for comparison with on-disk bitmaps.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bitmap
     }
 
-    /// Returns the number of tracked units.
     pub fn count(&self) -> usize {
         self.count
     }
 
-    /// Returns the base unit offset.
     pub fn base_unit(&self) -> u32 {
         self.base_unit
     }
@@ -198,7 +195,6 @@ mod tests {
     fn test_basic_mark() {
         let mut tracker = ReachabilityTracker::new(2, 100);
 
-        // Mark cluster 5
         tracker.mark(5);
         assert!(tracker.is_marked(5));
         assert!(!tracker.is_marked(4));
@@ -209,7 +205,6 @@ mod tests {
     fn test_mark_range() {
         let mut tracker = ReachabilityTracker::new(2, 100);
 
-        // Mark clusters 10..15
         tracker.mark_range(10, 5);
 
         for c in 10..15 {
@@ -238,7 +233,6 @@ mod tests {
     fn test_count_orphans() {
         let mut tracker = ReachabilityTracker::new(0, 16);
 
-        // Mark bits 0, 1, 2, 3 as reachable
         tracker.mark_range(0, 4);
 
         // On-disk has bits 0, 1, 2, 3, 4, 5 set
@@ -252,7 +246,6 @@ mod tests {
     fn test_for_each_orphan() {
         let mut tracker = ReachabilityTracker::new(2, 16);
 
-        // Mark clusters 2, 3, 4 as reachable
         tracker.mark_range(2, 3);
 
         // On-disk bitmap (relative to cluster 2) has clusters 2,3,4,5,6 set

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Terminal badge and status tag formatting.
+
 use colored::{ColoredString, Colorize};
 use rimgen::Filesystem;
 

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+//! I/O counters and performance tracking statistics.
+
 #![allow(dead_code)]
 
 use crate::{RimIO, RimIOResult, RimRead, RimWrite};
@@ -89,7 +92,6 @@ impl IoStats {
     }
 }
 
-// ---- Byte pretty-printer (no_std) ----
 #[inline]
 fn fmt_bytes(n: u64, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -114,7 +116,6 @@ fn fmt_bytes(n: u64, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{} {}", whole, UNITS[idx])
 }
 
-// ---- Percent helper ----
 #[inline]
 fn fmt_pct(numer: u64, denom: u64, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     if denom == 0 {
@@ -130,7 +131,6 @@ fn fmt_pct(numer: u64, denom: u64, f: &mut core::fmt::Formatter<'_>) -> core::fm
     }
 }
 
-// ---- Display implementation ----
 impl core::fmt::Display for IoStats {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let (r_align, r_tot) = self.read_aligned_ratio();

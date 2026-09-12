@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+//! Human-readable byte size, rate, and duration formatting.
+
 use std::time::Duration;
 
 /// Formats a byte size into human-readable representation (e.g. 512 MB, 1.25 GB).

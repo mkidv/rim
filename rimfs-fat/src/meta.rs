@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+
+//! FAT volume metadata and geometry convergence calculation.
+
 use alloc::string::{String, ToString};
 use rimio::prelude::*;
 
@@ -174,7 +178,7 @@ impl FatMeta {
             return Err(FsError::Invalid("Invalid FAT boot jump instruction"));
         }
 
-        let bytes_per_sector = vbr.bpb.bytes_per_sector;
+        let bytes_per_sector = vbr.bpb.bytes_per_sector.get();
         if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
             return Err(FsError::Invalid("Invalid FAT bytes_per_sector"));
         }
@@ -182,7 +186,7 @@ impl FatMeta {
         if !sectors_per_cluster.is_power_of_two() || sectors_per_cluster > 128 {
             return Err(FsError::Invalid("Invalid FAT sectors_per_cluster"));
         }
-        let reserved_sectors = vbr.bpb.reserved_sectors as u32;
+        let reserved_sectors = vbr.bpb.reserved_sectors.get() as u32;
         if reserved_sectors == 0 {
             return Err(FsError::Invalid("Invalid FAT reserved_sectors"));
         }
@@ -190,12 +194,12 @@ impl FatMeta {
         if num_fats == 0 || num_fats > 4 {
             return Err(FsError::Invalid("Invalid FAT num_fats"));
         }
-        let root_entry_count = vbr.bpb.root_entry_count;
+        let root_entry_count = vbr.bpb.root_entry_count.get();
 
-        let total_sectors = if vbr.bpb.total_sectors_16 != 0 {
-            vbr.bpb.total_sectors_16 as u64
+        let total_sectors = if vbr.bpb.total_sectors_16.get() != 0 {
+            vbr.bpb.total_sectors_16.get() as u64
         } else {
-            vbr.bpb.total_sectors_32 as u64
+            vbr.bpb.total_sectors_32.get() as u64
         };
         if total_sectors == 0 {
             return Err(FsError::Invalid("Invalid FAT total_sectors"));
@@ -237,13 +241,13 @@ impl FatMeta {
 
         let (volume_id, volume_label, root_cluster) = if vbr.is_fat32() {
             let e = vbr.f32();
-            if e.root_cluster < FAT_FIRST_CLUSTER {
+            if e.root_cluster.get() < FAT_FIRST_CLUSTER {
                 return Err(FsError::Invalid("Invalid FAT32 root_cluster"));
             }
-            (e.volume_id, e.volume_label, e.root_cluster)
+            (e.volume_id.get(), e.volume_label, e.root_cluster.get())
         } else {
             let e = vbr.f16();
-            (e.volume_id, e.volume_label, FAT_ROOT_CLUSTER)
+            (e.volume_id.get(), e.volume_label, FAT_ROOT_CLUSTER)
         };
 
         let mut meta = Self {
@@ -284,9 +288,8 @@ impl FatMeta {
 
             // 2. Verify FAT Checksum (from FSINFO)
             let fsinfo_off = FAT_FSINFO_SECTOR * bytes_per_sector as u64;
-            let mut fsinfo_buf = [0u8; 512];
-            io.read_at(fsinfo_off, &mut fsinfo_buf)?;
-            let expected_fat_crc = u32::from_le_bytes(fsinfo_buf[476..480].try_into().unwrap());
+            let fsinfo: crate::types::FatFsInfo = io.read_struct(fsinfo_off)?;
+            let expected_fat_crc = fsinfo.fat_checksum.get();
 
             if expected_fat_crc != 0 {
                 let mut fat_buf =
@@ -401,8 +404,8 @@ impl FatMeta {
 }
 
 impl FsMeta<u32> for FatMeta {
-    fn unit_size(&self) -> usize {
-        self.bytes_per_cluster as usize
+    fn unit_size(&self) -> u64 {
+        self.bytes_per_cluster as u64
     }
 
     fn root_unit(&self) -> u32 {
@@ -413,8 +416,8 @@ impl FsMeta<u32> for FatMeta {
         }
     }
 
-    fn total_units(&self) -> usize {
-        self.cluster_count as usize
+    fn total_units(&self) -> u64 {
+        self.cluster_count as u64
     }
 
     fn size_bytes(&self) -> u64 {
@@ -436,7 +439,7 @@ impl FsMeta<u32> for FatMeta {
                     * self.bytes_per_sector as u64)
         } else {
             self.cluster_heap_offset_bytes
-                + (cluster.saturating_sub(Self::FIRST_CLUSTER) as u64 * self.unit_size() as u64)
+                + (cluster.saturating_sub(Self::FIRST_CLUSTER) as u64 * self.unit_size())
         }
     }
 
@@ -487,24 +490,7 @@ impl FatFsMeta for FatMeta {
     }
 }
 
-/// Computes the FAT size and cluster count for a given FAT configuration.
-///
-/// This function performs convergence to determine the optimal FAT size (`fat_size`)
-/// and the number of clusters (`cluster_count`) based on the FAT file system parameters.
-///
-/// # Arguments
-/// - `sector_size`: Size of a sector in bytes (e.g., 512)
-/// - `total_sectors`: Total number of sectors on the volume
-/// - `reserved_sectors`: Number of reserved sectors (before the FAT area)
-/// - `entry_size`: Size of a FAT entry (in bytes, e.g., 4 for FAT32)
-/// - `min_entries`: Minimum number of FAT entries (often 2 for FAT12/16/32)
-/// - `fat_count`: Number of FAT copies (usually 2)
-/// - `sectors_per_cluster`: Number of sectors per cluster
-///
-/// # Returns
-/// Tuple `(fat_size, cluster_count)`
-/// - `fat_size`: FAT size in sectors
-/// - `cluster_count`: Number of data clusters
+/// Computes optimal FAT size (in sectors) and data cluster count via iterative convergence.
 #[allow(clippy::too_many_arguments)]
 pub fn converge_fat_layout(
     sector_size: u32,
@@ -526,7 +512,6 @@ pub fn converge_fat_layout(
 
     for _ in 0..32 {
         let entries = cluster_count + min_entries;
-        // Calculate FAT size depending on bits
         let fat_size_bits = entries as u64 * bits_per_entry as u64;
         let fat_size_bytes = fat_size_bits.div_ceil(8);
         let fat_size_new = fat_size_bytes.div_ceil(sector_size as u64) as u32;
