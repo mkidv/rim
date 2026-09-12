@@ -41,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build Binary
-        run: cargo build --release --locked --target ${{ matrix.target }} -p rimcli
+        run: cargo build --release --target ${{ matrix.target }} -p rimcli
 
       - name: Rename & Upload Artifact
         shell: bash
