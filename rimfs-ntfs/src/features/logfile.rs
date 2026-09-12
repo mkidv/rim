@@ -5,7 +5,7 @@
 //! transaction logging area on disk (2 MB default).
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use rimio::prelude::*;
 
@@ -15,8 +15,8 @@ use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
-use crate::types::{NtfsAttributeContent, NtfsMftRecord};
 use crate::mft::build_mft_reference;
+use crate::types::{NtfsAttributeContent, NtfsMftRecord};
 use crate::utils::encode_runs_to_dataruns;
 
 #[derive(Default)]

@@ -17,12 +17,12 @@ use crate::constant::*;
 use crate::core::errors::FsFeatureResult;
 use crate::core::feature::FsSystemFeature;
 use crate::meta::NtfsMeta;
-use crate::upcase::UpcaseHandle;
 use crate::types::index::NtfsIndexEntry;
 use crate::types::security::SECURITY_DESCRIPTOR_ROOT;
 use crate::types::{
     IndexTreeBuilder, NtfsAttribute, NtfsAttributeType, NtfsFileNameNamespace, NtfsMftRecord,
 };
+use crate::upcase::UpcaseHandle;
 
 pub struct NtfsRootDirFeature {
     timestamp: u64,
@@ -148,13 +148,6 @@ impl NtfsRootDirFeature {
             RootSpec {
                 rec: MFT_RECORD_EXTEND,
                 name: "$Extend",
-                attrs: sys_dir,
-                data_size: 0,
-                allocated_size: 0,
-            },
-            RootSpec {
-                rec: MFT_RECORD_ROOT,
-                name: ".",
                 attrs: sys_dir,
                 data_size: 0,
                 allocated_size: 0,

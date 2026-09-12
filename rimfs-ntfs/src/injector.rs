@@ -17,12 +17,12 @@ use crate::core::injector::FsTreeInjector;
 use crate::core::resolver::attr::FileAttributes;
 use crate::core::{FsInjectorError, FsInjectorResult};
 use crate::meta::NtfsMeta;
+use crate::mft::system_file_mft_reference;
 use crate::types::security::SECURITY_DESCRIPTOR_ROOT;
 use crate::types::{
     IndexEntryFlags, IndexEntryHeader, IndexNodeHeader, IndexTreeBuilder, NtfsAttribute,
     NtfsAttributeType, NtfsFileNameNamespace, NtfsIndexEntry, NtfsMftRecord,
 };
-use crate::mft::system_file_mft_reference;
 use crate::utils::*;
 use crate::{AttrView, MftRecordView, mft};
 
@@ -399,11 +399,8 @@ impl<'a, IO: RimIO + ?Sized> FsTreeInjector<NtfsHandle> for NtfsInjector<'a, IO>
             );
         }
 
-        // If "." entry exists in entries, use its creation time as timestamp
-        let dot_name: Vec<u16> = ".".encode_utf16().collect();
         let timestamp = entries
-            .iter()
-            .find(|e| e.name == dot_name)
+            .first()
             .map(|e| e.creation_time)
             .unwrap_or_else(crate::utils::current_ntfs_time);
 
