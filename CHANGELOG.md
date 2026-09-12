@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-*   **NTFS**: Remove invalid self-referential `.` entry from the root directory (`$I30`) index to ensure strict Windows CHKDSK compliance on formatted volumes.
+*   **NTFS**: Correct root directory (`.`) `$FILE_NAME` namespace to `Win32AndDos` and align timestamps between MFT Record 5 and its `$I30` root index entry for strict Windows CHKDSK compliance.
 *   **CI**: Remove `--locked` flag from release packaging pipeline to allow workspace distribution without lockfile synchronization issues.
 
 ## [0.10.0] - 2026-09-12
